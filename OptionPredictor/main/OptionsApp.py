@@ -12,6 +12,8 @@ from matplotlib.lines import Line2D # Needed for Line2D used in educational mode
 from llm_helper import LLMHelper
 from strategy_builder import StrategyBuilderWindow
 from strategy_tester import StrategyTesterWindow
+from StockChartWindow import StockChartWindow
+
 
 def calculate_binomial_greeks(S, K, T, r, sigma, option_type='call', N=500):
     from MonteCarloSimulation import cached_binomial_price
@@ -650,6 +652,15 @@ class OptionAnalyzerApp:
             self.input_data['correct_avg_trigger'] = correct_avg_trig
             self.input_data['correct_std_trigger'] = correct_std_trig
 
+            if model == "black_scholes":
+                from MonteCarloSimulation import black_scholes_price
+                bs_price = black_scholes_price(
+                    inputs['S0'], inputs['strike'], T,
+                    inputs['r'], inputs['sigma'], inputs['option_type']
+                )
+                self.input_data['bs_price'] = bs_price
+
+
             # 5. Binomial Fair Price
             fair_price = cached_binomial_price(
                 inputs['S0'], inputs['strike'], T, inputs['r'], inputs['sigma'],
@@ -709,6 +720,7 @@ class OptionAnalyzerApp:
          """Prints a simple text summary to the console (optional)."""
          if not self.input_data: return # Should not happen if called from analysis_complete
 
+
          fair_price_str = f"${self.input_data['fair_price']:.2f}" if not np.isnan(self.input_data['fair_price']) else "N/A (Calculation Error?)"
          prob_str = f"{self.input_data['probability']*100:.2f}%" if not np.isnan(self.input_data['probability']) else "N/A"
          avg_trig_str = f"${self.input_data['avg_trigger']:.2f}" if not np.isnan(self.input_data['avg_trigger']) else "N/A"
@@ -741,8 +753,9 @@ class OptionAnalyzerApp:
             ("Show Trigger Distribution", self.show_distribution_plot),
             ("Show Profit Heatmap ($/%)", self.show_heatmap_plot),
             ("Show 3D Value Surface", self.show_3d_surface_plot),
-            ("Explain my position", self.show_llm_explanation),
-            ("📉 Analyze Greeks", self.show_greek_analysis)  
+            ("📉 Analyze Greeks", self.show_greek_analysis),
+            ("📈 View Stock Chart", self.show_stock_chart_window),
+            ("Explain my position", self.show_llm_explanation)
         ]
 
         # Arrange buttons in a grid within the results frame
@@ -784,7 +797,7 @@ class OptionAnalyzerApp:
 
         iv_val = self.input_data.get('sigma', 0)
         rv_val = self.input_data.get('realized_vol', 0)
-        fair_price = fmt_val(self.input_data.get('fair_price'), "${:.2f}")
+        fair_price = fmt_val(self.input_data.get('fair_price'), "${:.4f}")
         prob = fmt_val(self.input_data.get('probability', 0) * 100, "{:.2f}%")
         avg_trig = fmt_val(self.input_data.get('avg_trigger'), "${:.2f}")
         vol = fmt_val(rv_val * 100, "{:.1f}%")
@@ -806,7 +819,18 @@ class OptionAnalyzerApp:
         # Build Simulation Settings section with model-specific logic
         model = self.input_data.get('simulation_model', 'black_scholes')
         param_map = self.input_data.get("model_params", {})
+        bs_price = self.input_data.get('bs_price', None)
+        fair_price = self.input_data.get('fair_price', None)
+        fair_price = fmt_val(fair_price, "${:.4f}")
+
         simulation_settings = [("Model Used", model.replace('_', ' ').title())]
+
+        # Add model-generated price line
+        if model == "black_scholes" and bs_price is not None:
+            simulation_settings.append(("Black-Scholes Price", f"${bs_price:.4f}"))
+        elif model != "black_scholes" and fair_price is not None:
+            simulation_settings.append(("Model-Based Estimate", f"${fair_price:.4f}"))
+
 
         if model == "jump_diffusion":
             for key in ['λ (Jump Intensity)', 'μ (Jump Mean)', 'σ (Jump Volatility)']:
@@ -990,6 +1014,14 @@ class OptionAnalyzerApp:
              print(f"3D Surface display error: {traceback.format_exc()}")
         finally:
             self.set_status("")
+
+    def show_stock_chart_window(self):
+            ticker = self.input_data.get("ticker", "")
+            if not ticker:
+                messagebox.showerror("Missing Ticker", "No stock ticker found.")
+                return
+            StockChartWindow(self.root, ticker, theme=self.current_theme)
+
 
     def toggle_theme(self):
         if self.is_dark_mode_var.get():

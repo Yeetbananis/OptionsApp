@@ -142,10 +142,16 @@ class Backtester:
             ps = get_prices(sym, start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
             if ps.empty:
                 raise ValueError("Empty price series")
-            return ps.squeeze()
+
+            ps = ps.squeeze()
+            ps = ps.loc[start:end].copy()
+            ps = ps[~ps.index.duplicated(keep='first')]
+            return ps
+
         except Exception as e:
             logger.error(f"Price load failed for {sym}: {e}")
             raise
+
 
     @classmethod
     def _simulate(
@@ -153,7 +159,10 @@ class Backtester:
         init_cap, alloc_pct, pt_pct, sl_mult, dte_target,
         commission, rf, strat_params
     ) -> tuple[pd.Series, list[dict]]:
+        prices = prices[~prices.index.duplicated(keep='first')]
+        vols = vols[~vols.index.duplicated(keep='first')]
         dates = prices.index
+
         equity = [init_cap]
         trades = []
         positions: list[Position] = []
@@ -164,8 +173,12 @@ class Backtester:
 
         for i, today in enumerate(dates):
             cap = equity[-1]
-            S = float(prices.loc[today])
-            sigma = float(vols.loc[today])
+            val = prices.loc[today]
+            S = float(val.iloc[0] if isinstance(val, pd.Series) else val)
+
+            val_sigma = vols.loc[today]
+            sigma = float(val_sigma.iloc[0] if isinstance(val_sigma, pd.Series) else val_sigma)
+
 
             # Update exits
             to_close = []

@@ -67,15 +67,19 @@ def ensure_spy_backup():
         df = pd.read_csv(io.StringIO(resp.text), parse_dates=["Date"], index_col="Date").sort_index()
     df.to_csv(backup)
 
-def load_icon(path, tint_black=False):
-    img = Image.open(path).convert("RGBA")
-    if tint_black:
-        # preserve alpha, fill RGB with 0
-        r, g, b, a = img.split()
-        black = Image.new("RGBA", img.size, (0, 0, 0, 255))
-        black.putalpha(a)
-        img = black
-    return ImageTk.PhotoImage(img)
+def load_icon(path, tint_black=False, size=(24, 24)):
+    try:
+        img = Image.open(path).convert("RGBA").resize(size, Image.LANCZOS)
+        if tint_black:
+            r, g, b, a = img.split()
+            black = Image.new("RGBA", img.size, (0, 0, 0, 255))
+            black.putalpha(a)
+            img = black
+        return ImageTk.PhotoImage(img)
+    except Exception as e:
+        logging.error(f"Failed to load icon {path}: {e}")
+        return None
+
 
 
 
@@ -516,34 +520,55 @@ class StrategyTesterWindow:
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self.fig.tight_layout()
 
-         # --- Add Fullscreen Button ---
-        # Make sure you have 'fullscreen.png' and 'minimize.png' in your ICON_DIR
+        # --- Add Fullscreen Button ---
         try:
-            self.fullscreen_icon = load_icon(ICON_DIR / "fullscreen.png")
-            self.minimize_icon = load_icon(ICON_DIR / "minimize.png")
-            # Create a small frame for the button to position it top-right within plot_frame
-            button_container = ttk.Frame(plot_frame) # Use plot_frame as parent
-            button_container.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
+            # Load fullscreen and minimize icons with smaller size
+            self.fullscreen_icon = load_icon(
+                ICON_DIR / "fullscreen.png",
+                tint_black=(self.theme == "light"),
+                size=(16, 16)  # Smaller size
+            )
+            self.minimize_icon = load_icon(
+                ICON_DIR / "minimize.png",
+                tint_black=(self.theme == "light"),
+                size=(16, 16)  # Smaller size
+            )
+            
+            # Verify icons loaded correctly
+            if self.fullscreen_icon is None or self.minimize_icon is None:
+                raise ValueError("Failed to load fullscreen or minimize icon")
 
+            # Create a frame for the button, positioned further top-right
+            button_container = ttk.Frame(plot_frame)
+            button_container.place(relx=0.99, rely=0.01, anchor='ne', x=11, y=2)  # Adjusted position
+
+            # Create button with transparent style
+            self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
             self.fullscreen_button = ttk.Button(
                 button_container,
                 image=self.fullscreen_icon,
-                command=self._toggle_fullscreen_graph
+                command=self._toggle_fullscreen_graph,
+                style='Transparent.TButton'
             )
+            # Explicitly retain the icon reference
+            self.fullscreen_button.image_ref = self.fullscreen_icon
             self.fullscreen_button.pack()
+
         except Exception as e:
             logging.error(f"Could not load fullscreen/minimize icons: {e}")
-            # Fallback to text button if icon loading fails
+            # Fallback to minimal text button
+            button_container = ttk.Frame(plot_frame)
+            button_container.place(relx=0.99, rely=0.01, anchor='ne', x=-2, y=2)
+            self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
             self.fullscreen_button = ttk.Button(
-                plot_frame, # Adjust parent if button_container fails
+                button_container,
                 text="FS",
-                command=self._toggle_fullscreen_graph
+                command=self._toggle_fullscreen_graph,
+                style='Transparent.TButton'
             )
-            # Adjust placement if icon loading fails and using plot_frame directly
-            self.fullscreen_button.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
-
-
+            self.fullscreen_button.pack()
         # --- End Add Fullscreen Button ---
+
         # Initialize tooltip for equity curve
         self._setup_tooltip()
 
@@ -1659,10 +1684,78 @@ class StrategyTesterWindow:
             self.canvas.draw_idle()
 
 
-        self.tooltip_cid = self.canvas.mpl_connect('motion_notify_event', on_motion)
+        # --- Disconnect old handlers if they exist ---
+        if hasattr(self, 'tooltip_cid') and self.tooltip_cid:
+            try:
+                self.canvas.mpl_disconnect(self.tooltip_cid)
+            except:
+                pass # Ignore errors if already disconnected
+
+        # --- Connect the new _on_plot_motion method ---
+        self.tooltip_cid = self.canvas.mpl_connect('motion_notify_event', self._on_plot_motion)
 
         self.fig.tight_layout()
         self.canvas.draw()
+
+    def _on_plot_motion(self, event):
+        """Handle mouse motion over plot for tooltip."""
+        canvas = event.canvas # Get the canvas that triggered the event
+        ax = self.ax
+
+        # --- Ensure 'mdates' is imported: Add 'import matplotlib.dates as mdates' at the top of your file ---
+        import matplotlib.dates as mdates
+        import numpy as np
+        import pandas as pd
+
+
+        if event.inaxes != ax or event.xdata is None or event.ydata is None:
+            if hasattr(self, 'tooltip') and self.tooltip and self.tooltip.get_visible():
+                self.tooltip.set_visible(False)
+                if hasattr(self, 'tooltip_line') and self.tooltip_line:
+                    self.tooltip_line.set_visible(False)
+                canvas.draw_idle()
+            return
+
+        x, y = event.xdata, event.ydata
+        dates, pnl = self.plot_data['dates'], self.plot_data['pnl']
+        if not dates: return
+
+        date_nums = mdates.date2num(dates) # Convert dates to numbers
+        idx = np.argmin(np.abs(date_nums - x)) # Find nearest index
+        nd, npnl = dates[idx], pnl[idx] # Get the actual date and pnl
+
+        date_str = pd.Timestamp(nd).strftime('%Y-%m-%d')
+        pnl_str  = f"${npnl:,.2f}" if npnl >= 0 else f"-${-npnl:,.2f}"
+        txt = f"Results on {date_str}\nProfit/Loss: {pnl_str}"
+
+        fig_w, fig_h = canvas.get_width_height()
+        # Use mdates.date2num(nd) for transformation, but nd (datetime) for plotting
+        disp_x, disp_y = ax.transData.transform((mdates.date2num(nd), npnl))
+
+        margin = 200
+        offset, ha = (10, 10), 'left'
+        # Check if plot is near right edge
+        if disp_x > fig_w - margin:
+            offset, ha = (-10, 10), 'right'
+
+        if not hasattr(self, 'tooltip') or not self.tooltip:
+            self.tooltip = ax.annotate(
+                txt, xy=(nd, npnl), xytext=offset, textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.5", fc="green", alpha=0.8),
+                arrowprops=dict(arrowstyle="->"), ha=ha, va='bottom', zorder=20
+            )
+            self.tooltip_line, = ax.plot([nd, nd], [ax.get_ylim()[0], npnl], 'k--', lw=1, visible=False, zorder=20)
+        else:
+            self.tooltip.set_text(txt)
+            self.tooltip.xy = (nd, npnl)
+            self.tooltip.set_ha(ha)
+            self.tooltip.set_position(offset)
+            self.tooltip_line.set_xdata([nd, nd])
+            self.tooltip_line.set_ydata([ax.get_ylim()[0], npnl])
+
+        self.tooltip.set_visible(True)
+        self.tooltip_line.set_visible(True)
+        canvas.draw_idle()
 
 
 
@@ -1719,14 +1812,51 @@ class StrategyTesterWindow:
             if not keyword or keyword in combined_text:
                 self.log_tree.insert("", "end", values=vals, tags=(tag,))
 
+    
     def _copy_performance_metrics(self):
-        if not hasattr(self, 'performance_data'):
+        # Get the text from the summary_txt widget
+        summary_text = self.summary_txt.get("1.0", tk.END).strip()
+        if not summary_text:
+            messagebox.showwarning("No Metrics", "No performance metrics available to copy.", parent=self.win)
             return
-        lines = [f"{k}: {v}" for k, v in self.performance_data.items()]
-        text = "\n".join(lines)
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.update()
+
+        # Copy the summary text to the clipboard
+        self.win.clipboard_clear()
+        self.win.clipboard_append(summary_text)
+        self.win.update()
+
+        # Create a temporary notification window
+        notify = tk.Toplevel(self.win)
+        notify.transient(self.win)
+        notify.overrideredirect(True)  # Remove window decorations
+        notify.geometry("200x50")  # Small window size
+        notify.lift()  # Ensure window is on top
+        notify.update()  # Force redraw
+
+        # Style based on theme
+        bg = THEMES[self.theme]["bg"]
+        fg = THEMES[self.theme]["fg"]
+        notify.configure(bg=bg)
+
+        # Create label with "Metrics Copied!" message
+        label = ttk.Label(
+            notify,
+            text="Metrics Copied!",
+            background="#888888",
+            foreground="#000000", 
+            font=('Segoe UI', 10, 'italic'),  # Added italic for emphasis
+            anchor='center'
+        )
+        label.pack(fill=tk.BOTH, expand=True)
+
+        # Center the window relative to the main window
+        x = self.win.winfo_rootx() + (self.win.winfo_width() - 200) // 2
+        y = self.win.winfo_rooty() + (self.win.winfo_height() - 50) // 2
+        notify.geometry(f"+{x}+{y}")
+
+        # Destroy the window after 1.5 seconds
+        notify.after(1500, notify.destroy)
+
 
     def _show_trade_right_click(self, event):
         menu = tk.Menu(self, tearoff=0)
@@ -1750,54 +1880,126 @@ class StrategyTesterWindow:
 
     
     def _toggle_fullscreen_graph(self):
-        # grab the embedded canvas widget
         embedded = self.canvas.get_tk_widget()
 
         # → ENTER fullscreen
         if not getattr(self, '_fs_window', None) or not self._fs_window.winfo_exists():
-            # 1) remember where the chart lived
+            # 1) Remember original parent and FIGURE properties
             self._orig_parent = embedded.master
+            self._orig_size = self.fig.get_size_inches()
+            self._orig_dpi = self.fig.get_dpi()
 
-            # 2) hide the embedded plot
+            # 2) Hide the original embedded canvas
             embedded.pack_forget()
 
-            # 3) spawn a true fullscreen Toplevel
-            self._fs_window = tk.Toplevel(self.win)          # parent to self.win, not undefined self.master
+            # 3) Create the fullscreen Toplevel window
+            self._fs_window = tk.Toplevel(self.win)
             self._fs_window.attributes('-fullscreen', True)
             self._fs_window.protocol("WM_DELETE_WINDOW", self._toggle_fullscreen_graph)
 
-            # 4) brand-new canvas in the fullscreen window
+            # 4) Create a NEW canvas for the fullscreen window
             self._fs_canvas = FigureCanvasTkAgg(self.fig, master=self._fs_window)
-            self._fs_canvas.draw()
-            self._fs_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            fs_widget = self._fs_canvas.get_tk_widget()
+            fs_widget.pack(fill=tk.BOTH, expand=True)
 
-            # 5) your own “minimize” button
-            self._fs_close_btn = ttk.Button(
-                self._fs_window,
-                image=self.minimize_icon,
-                command=self._toggle_fullscreen_graph
-            )
-            self._fs_close_btn.place(relx=0.98, rely=0.02, anchor='ne')
+            # 5) Connect the tooltip handler to this new canvas
+            self._fs_tooltip_cid = self._fs_canvas.mpl_connect(
+                'motion_notify_event', self._on_plot_motion)
 
-            # 6) swap the icon on your toolbar button
+            # 6) Create a close button for the fullscreen window
+            try:
+                # Load minimize icon with smaller size
+                self.minimize_icon = load_icon(
+                    ICON_DIR / "minimize.png",
+                    tint_black=(self.theme == "light"),
+                    size=(16, 16)  # Smaller size
+                )
+                if self.minimize_icon is None:
+                    raise ValueError("Failed to load minimize icon")
+
+                # Create button with transparent style
+                self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
+                self._fs_close_btn = ttk.Button(
+                    self._fs_window,
+                    image=self.minimize_icon,
+                    command=self._toggle_fullscreen_graph,
+                    style='Transparent.TButton'
+                )
+                # Explicitly retain the icon reference
+                self._fs_close_btn.image_ref = self.minimize_icon
+                self._fs_close_btn.place(relx=0.99, rely=0.01, anchor='ne', x=-2, y=2)  # Adjusted position
+
+            except Exception as e:
+                logging.error(f"Could not load minimize icon for fullscreen window: {e}")
+                # Fallback to minimal text button
+                self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
+                self._fs_close_btn = ttk.Button(
+                    self._fs_window,
+                    text="Exit FS",
+                    command=self._toggle_fullscreen_graph,
+                    style='Transparent.TButton'
+                )
+                self._fs_close_btn.place(relx=0.99, rely=0.01, anchor='ne', x=-2, y=2)
+
+            # 7) Update the main button icon
             self.fullscreen_button.configure(image=self.minimize_icon)
+            self.fullscreen_button.image_ref = self.minimize_icon
+
+            # 8) Adjust layout & redraw
+            self.fig.tight_layout()
+            self._fs_canvas.draw_idle()
+            self.is_graph_fullscreen = True
 
         # → EXIT fullscreen
         else:
-            # 1) tear down fullscreen widgets
-            self._fs_canvas.get_tk_widget().destroy()
-            self._fs_close_btn.destroy()
-            self._fs_window.destroy()
+            # 1) Disconnect tooltip from fullscreen canvas
+            if hasattr(self, '_fs_tooltip_cid') and hasattr(self, '_fs_canvas') and self._fs_canvas:
+                try:
+                    self._fs_canvas.mpl_disconnect(self._fs_tooltip_cid)
+                except:
+                    pass
 
-            # 2) ensure the embedded plot is hidden (in case)
-            embedded.pack_forget()
+            # 2) Destroy the fullscreen widgets and window
+            if hasattr(self, '_fs_canvas'):
+                self._fs_canvas.get_tk_widget().destroy()
+            if hasattr(self, '_fs_close_btn'):
+                self._fs_close_btn.destroy()
+            if hasattr(self, '_fs_window'):
+                self._fs_window.destroy()
 
-            # 3) re-pack it into *its original container* with the same options
+            # 3) Clear references
+            self._fs_window = None
+            self._fs_canvas = None
+            self._fs_close_btn = None
+            self._fs_tooltip_cid = None
+
+            # 4) Restore original FIGURE properties
+            if hasattr(self, '_orig_size'):
+                self.fig.set_size_inches(self._orig_size)
+            if hasattr(self, '_orig_dpi'):
+                self.fig.set_dpi(self._orig_dpi)
+
+            # 5) Repack the *original* embedded canvas
             embedded.pack(in_=self._orig_parent, fill=tk.BOTH, expand=True)
 
-            # 4) swap your toolbar icon back
+            # 6) Update the main button icon
             self.fullscreen_button.configure(image=self.fullscreen_icon)
+            self.fullscreen_button.image_ref = self.fullscreen_icon
 
+            # 7) Re-connect the handler to the original canvas
+            if hasattr(self, '_on_plot_motion'):
+                if hasattr(self, 'tooltip_cid') and self.tooltip_cid:
+                    try:
+                        self.canvas.mpl_disconnect(self.tooltip_cid)
+                    except:
+                        pass
+                self.tooltip_cid = self.canvas.mpl_connect(
+                    'motion_notify_event', self._on_plot_motion)
+
+            # 8) Adjust layout & redraw for original view
+            self.fig.tight_layout()
+            self.canvas.draw_idle()
+            self.is_graph_fullscreen = False
 
 # Example Usage
 if __name__ == "__main__":
