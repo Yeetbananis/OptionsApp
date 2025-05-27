@@ -10,9 +10,74 @@ import sys
 import time # Make sure time is imported 
 from matplotlib.lines import Line2D # Needed for Line2D used in educational mode
 from llm_helper import LLMHelper
-from strategy_builder import StrategyBuilderWindow
-from strategy_tester import StrategyTesterWindow
 from StockChartWindow import StockChartWindow
+
+def configure_global_styles(theme: str):
+    """
+    Apply *every* ttk style rule for light vs dark.
+    Must be called *before* you re-skin each window.
+    """
+    style = ttk.Style()
+    style.theme_use('clam')
+
+    if theme == 'dark':
+        bg, fg           = "#0f0f0f", '#ffffff'
+        entry_bg         = '#3c3c3c'
+        button_bg        = '#555555'
+        header_bg        = '#444444'
+        combobox_bg      = entry_bg
+        notebook_sel_bg  = '#333333'
+        tree_bg, field_bg= entry_bg, entry_bg
+    else:
+        bg, fg           = '#f0f0f0', '#000000'
+        entry_bg         = '#ffffff'
+        button_bg        = '#e0e0e0'
+        header_bg        = '#d9d9d9'
+        combobox_bg      = entry_bg
+        notebook_sel_bg  = '#ffffff'
+        tree_bg, field_bg= entry_bg, entry_bg
+
+    # Base
+    style.configure('.', background=bg, foreground=fg, font=('Segoe UI', 9))
+
+    # Frames & Labelframes
+    style.configure('TFrame', background=bg)
+    style.configure('TLabelframe', background=bg, foreground=fg)
+    style.configure('TLabelframe.Label', background=bg, foreground=fg)
+
+    # Labels
+    style.configure('TLabel', background=bg, foreground=fg)
+
+    # Buttons
+    style.configure('TButton', background=button_bg, foreground=fg)
+    style.map('TButton', background=[('active', header_bg)])
+
+    # Checkbuttons & Radiobuttons
+    style.configure('TCheckbutton', background=bg, foreground=fg)
+    style.configure('TRadiobutton', background=bg, foreground=fg)
+
+    # Entries
+    style.configure('TEntry', fieldbackground=entry_bg, foreground=fg)
+
+    # Comboboxes
+    style.configure('TCombobox', fieldbackground=combobox_bg, foreground=fg, arrowcolor=fg)
+    style.map('TCombobox',
+              fieldbackground=[('readonly', combobox_bg)],
+              foreground=[('readonly', fg)])
+
+    # Notebook tabs
+    style.configure('TNotebook', background=bg)
+    style.configure('TNotebook.Tab', background=bg, foreground=fg)
+    style.map('TNotebook.Tab',
+              background=[('selected', notebook_sel_bg)],
+              foreground=[('selected', fg)])
+
+    # Treeview
+    style.configure('Treeview', background=tree_bg, fieldbackground=field_bg, foreground=fg)
+    style.configure('Treeview.Heading', background=header_bg, foreground=fg)
+    style.map('Treeview.Heading', background=[('active', header_bg)])
+    style.map('Treeview', background=[('selected', '#007acc')], foreground=[('selected', '#ffffff')])
+
 
 
 def calculate_binomial_greeks(S, K, T, r, sigma, option_type='call', N=500):
@@ -128,6 +193,10 @@ class OptionAnalyzerApp:
         self.root.geometry("900x800") # Give main window a bit more space
         self.llm = LLMHelper(model="deepseek-q4ks")
 
+        # keep track of all child windows for theme propagation
+        self.child_windows: list = []
+
+
         # --- Style Configuration ---
         style = ttk.Style()
         try:
@@ -224,6 +293,47 @@ class OptionAnalyzerApp:
         self.animation_chars = ['|', '/', '-', '\\'] # Animation characters
         self.animation_step = 0
 
+        
+        # expose our theming helper on the root for children to call
+        self.root.apply_theme_to_window = self.apply_theme_to_window
+
+    def apply_theme_to_window(self, window):
+            """Central recursive theming for every widget in `window`."""
+            try:
+                if not window.winfo_exists():
+                    return
+            except:
+                return
+
+            # derive our colors from the current_theme
+            bg       = "#0f0f0f" if self.current_theme == 'dark' else "#f0f0f0"
+            fg       = "#ffffff" if self.current_theme == 'dark' else "#000000"
+            entry_bg = "#3c3c3c" if self.current_theme == 'dark' else "#ffffff"
+
+            # theme this container
+            try:
+                window.configure(bg=bg)
+            except:
+                pass
+
+            # walk all children
+            for w in window.winfo_children():
+                # ttk widgets respond to style → (we already set that globally)
+                # raw tk widgets need explicit bg/fg
+                if isinstance(w, (tk.Label, tk.Button, tk.Checkbutton, tk.Radiobutton)):
+                    try: w.configure(bg=bg, fg=fg)
+                    except: pass
+                if isinstance(w, tk.Entry):
+                    try: w.configure(bg=entry_bg, fg=fg)
+                    except: pass
+                if isinstance(w, tk.Text):
+                    try: w.configure(bg=entry_bg, fg=fg)
+                    except: pass
+
+                # recurse into frames & toplevels
+                if hasattr(w, 'winfo_children'):
+                    self.apply_theme_to_window(w)
+
 
     def set_status(self, text, color=None):
         """Updates the status label. Uses default label foreground if color is None."""
@@ -264,13 +374,11 @@ class OptionAnalyzerApp:
 
 
     def launch_strategy_tester(self):
-        from matplotlib import style as mpl_style
-        if self.current_theme == 'dark':
-            mpl_style.use('dark_background')
-        else:
-            mpl_style.use('default')
-
-        StrategyTesterWindow(self.root, self.current_theme)
+        # import here to avoid circular import
+        from strategy_tester import StrategyTesterWindow
+        tester = StrategyTesterWindow(self.root, self.current_theme)
+        self.child_windows.append(tester.win)
+        self.apply_theme_to_window(tester.win)
 
 
 
@@ -1024,19 +1132,40 @@ class OptionAnalyzerApp:
 
 
     def toggle_theme(self):
-        if self.is_dark_mode_var.get():
-            self.current_theme = 'dark'
-        else:
-            self.current_theme = 'light'
+        new_theme = 'dark' if self.is_dark_mode_var.get() else 'light'
+        self.current_theme = new_theme
 
         import MonteCarloSimulation as sim
-        sim.dark_mode = (self.current_theme == 'dark')
-        self.apply_theme()
+        sim.dark_mode = (new_theme == 'dark')
+
+        configure_global_styles(new_theme)
+        self.apply_theme_to_window(self.root)
+
+        # rebuild child_windows list with only still-open windows
+        live_children = []
+        for win in self.child_windows:
+            try:
+                if win.winfo_exists():
+                    self.apply_theme_to_window(win)
+                    live_children.append(win)
+            except:
+                # if anything goes wrong, just drop this window
+                continue
+        self.child_windows = live_children
+
+
+
+
+
 
 
 
     def launch_strategy_builder(self):
-        strat_win = StrategyBuilderWindow(self.root, self.current_theme)
+        # import here to avoid circular import
+        from strategy_builder import StrategyBuilderWindow
+        builder = StrategyBuilderWindow(self.root, self.current_theme)
+        self.child_windows.append(builder)
+        self.apply_theme_to_window(builder)
     
     def _toggle_fullscreen(self):
         is_full = self.root.attributes('-fullscreen')
@@ -1065,50 +1194,6 @@ class OptionAnalyzerApp:
 
 
 
-    def apply_theme(self):
-        bg = "#1e1e1e" if self.current_theme == 'dark' else "#f0f0f0"
-        fg = "#f0f0f0" if self.current_theme == 'dark' else "#000000"
-        entry_bg = "#2d2d2d" if self.current_theme == 'dark' else "white"
-
-        style = ttk.Style()
-        style.configure("TFrame", background=bg)
-        style.configure("TLabel", background=bg, foreground=fg)
-        style.configure("Title.TLabel", background=bg, foreground=fg)
-        style.configure("Status.TLabel", background=bg, foreground=fg)
-        style.configure("TButton", background=bg, foreground=fg)
-        style.configure("TEntry", fieldbackground=entry_bg, foreground=fg)
-        
-        style.configure("Theme.TCheckbutton", background=bg, foreground=fg)
-        style.map("Theme.TCheckbutton",
-                background=[('active', bg)],
-                foreground=[('disabled', '#888888'), ('!disabled', fg)])
-
-
-        self.root.configure(bg=bg)
-        for widget in self.root.winfo_children():
-            self.recursively_update_widget_bg(widget, bg, fg)
-
-    def recursively_update_widget_bg(self, widget, bg, fg):
-        # Update background recursively for nested widgets
-        try:
-            if isinstance(widget, (tk.Toplevel, tk.Frame, ttk.Frame, tk.Label, ttk.Label, tk.Entry, ttk.Entry, tk.Text)):
-                widget.configure(bg=bg)
-            elif isinstance(widget, tk.Button):
-                widget.configure(bg=bg, fg=fg)
-        except Exception:
-            pass
-
-        for child in widget.winfo_children():
-            self.recursively_update_widget_bg(child, bg, fg)
-
-    def apply_theme_to_window(self, window):
-        bg = "#1e1e1e" if self.current_theme == 'dark' else "#f0f0f0"
-        fg = "#f0f0f0" if self.current_theme == 'dark' else "#000000"
-        entry_bg = "#2d2d2d" if self.current_theme == 'dark' else "white"
-
-        window.configure(bg=bg)
-        for widget in window.winfo_children():
-            self.recursively_update_widget_bg(widget, bg, fg)
 
     def show_llm_explanation(self):
         if not self.input_data:
