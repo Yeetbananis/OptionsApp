@@ -13,6 +13,7 @@ from recommendation_dialog import RecommendationInputDialog
 from recommendation_dialog import RecommendationResultsDialog
 from strategy_recommender import StrategyRecommender
 
+
 # Constants for plot clarity
 PLOT_PRICE_RANGE_FACTOR = 0.3 # Plot S0 +/- 30% initially
 PLOT_POINTS = 500           # Number of points for the P/L curve
@@ -32,12 +33,11 @@ class StrategyBuilderWindow(tk.Toplevel):
         self.transient(parent)
         self.grab_set()
 
-        self.apply_theme_to_window(self)
 
 
-        # Apply theme (basic implementation, assuming parent has apply_theme_to_window)
+         # apply the central theme via the parent
         if hasattr(parent, 'apply_theme_to_window'):
-             parent.apply_theme_to_window(self)
+            parent.apply_theme_to_window(self)
 
         # --- Data Structures ---
         self.legs = [] # List to store leg dictionaries
@@ -92,13 +92,6 @@ class StrategyBuilderWindow(tk.Toplevel):
                             'profit': 'green', 'loss': 'red', 'zero_line': ':',
                             'annotation_bg': 'white', 'annotation_fg': 'black',
                             'mc_hist': 'skyblue'}
-        if self.current_theme == 'dark':
-            self.plot_colors.update({'line': 'cyan', 'zero_line': '--',
-                                     'annotation_bg': '#424242', 'annotation_fg': 'white',
-                                      'mc_hist': 'lightblue'})
-            plt.style.use('dark_background')
-        else:
-            plt.style.use('default') # Use Matplotlib default style for light mode
 
         self.fig, self.ax = plt.subplots(constrained_layout=True, facecolor=self.plot_colors['bg'])
         self.ax.set_facecolor(self.plot_colors['bg'])
@@ -136,39 +129,6 @@ class StrategyBuilderWindow(tk.Toplevel):
 
 
 
-
-    def apply_theme_to_window(self, window):
-        bg = "#1e1e1e" if self.current_theme == 'dark' else "#f0f0f0"
-        fg = "#ffffff" if self.current_theme == 'dark' else "#000000"
-
-        style = ttk.Style()
-        style.theme_use('clam')  # Ensures full style control
-        style.configure("Treeview",
-                        background=bg,
-                        foreground=fg,
-                        fieldbackground=bg,
-                        rowheight=22)
-
-        style.configure("Treeview.Heading",
-                        background=bg,
-                        foreground=fg)
-
-
-        # Global widget colors
-        style.configure(".", background=bg, foreground=fg)
-        style.configure("TLabel", background=bg, foreground=fg)
-        style.configure("TFrame", background=bg)
-        style.configure("TButton", background=bg, foreground=fg)
-        style.configure("TEntry", fieldbackground=bg, foreground=fg)
-        style.configure("TCombobox", fieldbackground=bg, foreground=fg)
-        style.configure("TNotebook", background=bg)
-        style.configure("TNotebook.Tab", background=bg, foreground=fg)
-        style.map("TNotebook.Tab", background=[("selected", "#333333" if self.current_theme == 'dark' else "#ffffff")])
-
-        window.configure(bg=bg)
-
-        for child in window.winfo_children():
-            self._recursive_theme(child, bg, fg)
 
 
 
@@ -350,37 +310,17 @@ class StrategyBuilderWindow(tk.Toplevel):
         frame.columnconfigure(1, weight=1)
         frame.columnconfigure(3, weight=1)
 
-        # --- Combobox dark mode style ---
-        if self.current_theme == 'dark':
-            style = ttk.Style()
-            style.layout('Dark.TCombobox', style.layout('TCombobox'))  # inherit default layout
-
-            style.configure('Dark.TCombobox',
-                            foreground='white',
-                            background='#2b2b2b',
-                            fieldbackground='#2b2b2b',
-                            arrowcolor='white')
-
-            style.map('Dark.TCombobox',
-                    fieldbackground=[('readonly', '#2b2b2b')],
-                    background=[('readonly', '#2b2b2b')],
-                    foreground=[('readonly', 'white')])
-            
-            combobox_style = 'Dark.TCombobox'
-        else:
-            combobox_style = 'TCombobox'
-
 
         ttk.Label(frame, text="Action:").grid(row=0, column=0, padx=5, pady=3, sticky='w')
         self.leg_action_var = tk.StringVar(value='Buy')
         action_combo = ttk.Combobox(frame, textvariable=self.leg_action_var,
-                                    values=['Buy', 'Sell'], state="readonly", width=6, style=combobox_style)
+                                    values=['Buy', 'Sell'], state="readonly", width=6)
         action_combo.grid(row=0, column=1, padx=5, pady=3, sticky='ew')
 
         ttk.Label(frame, text="Type:").grid(row=0, column=2, padx=5, pady=3, sticky='w')
         self.leg_type_var = tk.StringVar(value='Call')
         type_combo = ttk.Combobox(frame, textvariable=self.leg_type_var,
-                                values=['Call', 'Put'], state="readonly", width=6, style=combobox_style)
+                                values=['Call', 'Put'], state="readonly", width=6)
         type_combo.grid(row=0, column=3, padx=5, pady=3, sticky='ew')
 
         ttk.Label(frame, text="Strike:").grid(row=1, column=0, padx=5, pady=3, sticky='w')

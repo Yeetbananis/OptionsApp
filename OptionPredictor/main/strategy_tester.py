@@ -67,14 +67,29 @@ def ensure_spy_backup():
         df = pd.read_csv(io.StringIO(resp.text), parse_dates=["Date"], index_col="Date").sort_index()
     df.to_csv(backup)
 
-def load_icon(path, tint_black=False, size=(24, 24)):
+def load_icon(path, tint_color=None, tint_black=False, size=(24, 24)):
+    """
+    Load an icon and tint all non-transparent pixels to `tint_color` or black if `tint_black` is True.
+    `tint_color` is a hex string like '#RRGGBB' or an (R,G,B) / (R,G,B,A) tuple.
+    """
     try:
         img = Image.open(path).convert("RGBA").resize(size, Image.LANCZOS)
         if tint_black:
-            r, g, b, a = img.split()
-            black = Image.new("RGBA", img.size, (0, 0, 0, 255))
-            black.putalpha(a)
-            img = black
+            tint = (0, 0, 0, 255)
+        elif tint_color:
+            if isinstance(tint_color, str) and tint_color.startswith('#'):
+                rgb = tuple(int(tint_color.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+                tint = (*rgb, 255)
+            elif isinstance(tint_color, tuple):
+                tint = tint_color if len(tint_color)==4 else (*tint_color,255)
+            else:
+                tint = (0, 0, 0, 255)
+        else:
+            return ImageTk.PhotoImage(img)
+        r, g, b, a = img.split()
+        colored = Image.new("RGBA", img.size, tint)
+        colored.putalpha(a)
+        img = colored
         return ImageTk.PhotoImage(img)
     except Exception as e:
         logging.error(f"Failed to load icon {path}: {e}")
@@ -88,12 +103,18 @@ class StrategyTesterWindow:
     def __init__(self, parent, current_theme: str = "light"):
         self.filters = FilterConfig()    # “no-op” filter by default
         self.theme = current_theme
+        # initialize summary text colors from central THEMES
+        self.summary_txt_bg = THEMES[self.theme]["entry_bg"]
+        self.summary_txt_fg = THEMES[self.theme]["fg"]
+        self.current_wifi_status = "down"  # Track current WiFi status
+
         self.win = tk.Toplevel(parent)
         self._next_trade_iid = 1  # Track next trade IID for treeview
         self._last_progress_ts = 0.0 # Track last progress update time
         self.is_graph_fullscreen = False
         self.graph_original_parent = None
         self.fullscreen_button = None # Initialize here
+        
 
         self.win.title("Options Strategy Backtester")
         # buffer for trades waiting to be drawn
@@ -103,14 +124,14 @@ class StrategyTesterWindow:
         self.trade_marker = None  # Track plotted marker
         self.bounce = BounceOverlay(self.win) # Bounce overlay for long-running tasks
         
-        # --- Load icons ---
-        tint = (self.theme == "light")
+        # --- Load Wi-Fi icons tinted to our fg color ---
+        fg_color = THEMES[self.theme]['fg']
         self.icons = {
-            "down":   load_icon(ICON_DIR/"wifi_disconnected.png", tint_black=tint),
-            "weak":   load_icon(ICON_DIR/"wifi_weak.png",        tint_black=tint),
-            "medium": load_icon(ICON_DIR/"wifi_medium.png",      tint_black=tint),
-            "strong": load_icon(ICON_DIR/"wifi_strong.png",      tint_black=tint),
-            "secure": load_icon(ICON_DIR/"wifi_secure.png",      tint_black=tint),
+            "down":   load_icon(ICON_DIR/"wifi_disconnected.png", tint_color=fg_color),
+            "weak":   load_icon(ICON_DIR/"wifi_weak.png",        tint_color=fg_color),
+            "medium": load_icon(ICON_DIR/"wifi_medium.png",      tint_color=fg_color),
+            "strong": load_icon(ICON_DIR/"wifi_strong.png",      tint_color=fg_color),
+            "secure": load_icon(ICON_DIR/"wifi_secure.png",      tint_color=fg_color),
         }
 
 
@@ -135,16 +156,6 @@ class StrategyTesterWindow:
                 background=[('active', '#66bb6a'), ('!active', '#4caf50')]
             )
 
-        if self.theme == "dark":
-            mpl_style.use('dark_background')
-            self.win.configure(bg="#2e2e2e")
-            #self.style.theme_use('clam')
-            self._apply_dark_theme_settings()
-        else:
-            mpl_style.use('default')
-            self.win.configure(bg="#f0f0f0")
-            #self.style.theme_use('vista')
-            self._apply_light_theme_settings()
 
         ## ─── Set up the main window ────────────────────────────────────────────────
         self._create_widgets()
@@ -199,92 +210,10 @@ class StrategyTesterWindow:
         self._setup_default_values()
         logging.info("Strategy Tester window initialized.")
 
-    def _apply_dark_theme_settings(self):
-        th = THEMES[self.theme]
-        bg, fg = th["bg"], th["fg"]
-        entry_bg, entry_fg = "#3c3c3c", "#ffffff"
-        tree_bg, tree_field_bg, tree_fg = "#3c3c3c", "#3c3c3c", "#ffffff"
-        button_bg, button_fg, header_bg = "#555555", "#ffffff", "#444444"
+        # apply central theme via the parent
+        if hasattr(parent, 'apply_theme_to_window'):
+            parent.apply_theme_to_window(self.win)
 
-        self.style.configure('.', background=bg, foreground=fg, fieldbackground=entry_bg, insertcolor=fg)
-        self.style.configure('TLabel', background=bg, foreground=fg, font=('Segoe UI', 9))
-        self.style.configure('TLabelframe', background=bg, foreground=fg)
-        self.style.configure('TLabelframe.Label', background=bg, foreground=fg, font=('Segoe UI', 10))
-        self.style.configure('TEntry', fieldbackground=entry_bg, foreground=entry_fg, font=('Segoe UI', 9))
-        self.style.configure('TCombobox', fieldbackground=entry_bg, foreground=entry_fg, arrowcolor=fg, font=('Segoe UI', 9))
-        self.style.map('TCombobox',
-                       fieldbackground=[('readonly', entry_bg)],
-                       foreground    =[('readonly', entry_fg)])
-        self.style.configure('TButton', background=button_bg, foreground=button_fg, font=('Segoe UI', 9))
-        self.style.map('TButton', background=[('active', '#666666')])
-        self.style.configure('Treeview', background=tree_bg, fieldbackground=tree_field_bg, foreground=tree_fg, font=('Segoe UI', 9))
-        self.style.configure('Treeview.Heading', background=header_bg, foreground=fg, font=('Segoe UI', 9))
-        self.style.map('Treeview.Heading', background=[('active', '#555555')])
-        self.style.map('Treeview',
-            background=[('selected', '#007acc')],
-            foreground=[('selected', '#ffffff')]
-        )
-
-        self.summary_txt_bg = tree_bg
-        self.summary_txt_fg = tree_fg
-
-
-    def _apply_light_theme_settings(self):
-        th = THEMES[self.theme]
-        bg, fg = th["bg"], th["fg"]
-        entry_bg, button_bg = "#ffffff", "#e0e0e0"
-
-        # base
-        self.style.configure('.', background=bg, foreground=fg, font=('Segoe UI', 9))
-
-        # labels & frames
-        self.style.configure('TLabel', background=bg, foreground=fg, font=('Segoe UI', 9))
-        self.style.configure('TLabelframe', background=bg, foreground=fg)
-        self.style.configure('TLabelframe.Label', background=bg, foreground=fg, font=('Segoe UI', 10))
-
-        # entries
-        self.style.configure('TEntry',
-                             fieldbackground=entry_bg,
-                             foreground=fg,
-                             font=('Segoe UI', 9))
-
-        # comboboxes
-        self.style.configure('TCombobox',
-                             fieldbackground=entry_bg,
-                             foreground=fg,
-                             arrowcolor=fg,
-                             font=('Segoe UI', 9))
-        # make sure readonly state also has white bg
-        self.style.map('TCombobox',
-                       fieldbackground=[('readonly', entry_bg)],
-                       foreground=[('readonly', fg)])
-
-        # buttons
-        self.style.configure('TButton',
-                             background=button_bg,
-                             foreground=fg,
-                             font=('Segoe UI', 9))
-
-        # Treeview (trade-log)
-        self.style.configure('Treeview',
-                             background=entry_bg,
-                             fieldbackground=entry_bg,
-                             foreground=fg,
-                             font=('Segoe UI', 9))
-        self.style.configure('Treeview.Heading',
-                             background=button_bg,
-                             foreground=fg,
-                             font=('Segoe UI', 9))
-        self.style.map('Treeview.Heading',
-                       background=[('active', button_bg)])
-        
-        self.style.map('Treeview',
-            background=[('selected', '#007acc')],
-            foreground=[('selected', '#ffffff')]
-        )
-
-        # text colors for summary panel
-        self.summary_txt_bg, self.summary_txt_fg = entry_bg, fg
 
     def _show_text_context_menu(self, event):
         # only show if there is a selection
@@ -522,35 +451,27 @@ class StrategyTesterWindow:
 
         # --- Add Fullscreen Button ---
         try:
-            # Load fullscreen and minimize icons with smaller size
+           # tint the fullscreen/minimize icons to match our fg color
+            fg_color = THEMES[self.theme]['fg']
             self.fullscreen_icon = load_icon(
                 ICON_DIR / "fullscreen.png",
-                tint_black=(self.theme == "light"),
-                size=(16, 16)  # Smaller size
+                tint_color=fg_color,
+                size=(16, 16)
             )
             self.minimize_icon = load_icon(
                 ICON_DIR / "minimize.png",
-                tint_black=(self.theme == "light"),
-                size=(16, 16)  # Smaller size
+                tint_color=fg_color,
+                size=(16, 16)
             )
-            
-            # Verify icons loaded correctly
-            if self.fullscreen_icon is None or self.minimize_icon is None:
-                raise ValueError("Failed to load fullscreen or minimize icon")
 
-            # Create a frame for the button, positioned further top-right
+            # Create and place the button using these tinted icons:
             button_container = ttk.Frame(plot_frame)
-            button_container.place(relx=0.99, rely=0.01, anchor='ne', x=11, y=2)  # Adjusted position
-
-            # Create button with transparent style
-            self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
+            button_container.place(relx=1.0, rely=0.0, anchor='ne', x=-5, y=5)
             self.fullscreen_button = ttk.Button(
                 button_container,
                 image=self.fullscreen_icon,
-                command=self._toggle_fullscreen_graph,
-                style='Transparent.TButton'
+                command=self._toggle_fullscreen_graph
             )
-            # Explicitly retain the icon reference
             self.fullscreen_button.image_ref = self.fullscreen_icon
             self.fullscreen_button.pack()
 
@@ -608,8 +529,7 @@ class StrategyTesterWindow:
             self.log_tree.heading(c, text=c, command=lambda cc=c: self._sort_treeview(self.log_tree, cc, False))
             self.log_tree.column(c, width=widths[i], anchor="c", stretch=True)
         self.log_tree.tag_configure('oddrow', background=self.summary_txt_bg)
-        alt = "#4a4a4a" if self.theme=="dark" else "#e8e8e8"
-        self.log_tree.tag_configure('evenrow', background=alt)
+        self.log_tree.tag_configure('evenrow', background=self.summary_txt_bg)
 
         profit_color, loss_color = ("#264d26", "#4d2626") if self.theme == "dark" else ("#d0f0c0", "#f0d0d0")
         self.log_tree.tag_configure('profit', background=profit_color, foreground=self.summary_txt_fg)
@@ -671,6 +591,7 @@ class StrategyTesterWindow:
 
             if self.win.winfo_exists():
                 # update on main thread
+                self.current_wifi_status = icon_key
                 self.win.after(0, lambda: self.wifi_label.configure(image=self.icons[icon_key]))
 
         # fire off the worker thread
@@ -2001,6 +1922,7 @@ class StrategyTesterWindow:
             self.canvas.draw_idle()
             self.is_graph_fullscreen = False
 
+   
 # Example Usage
 if __name__ == "__main__":
     root = tk.Tk()
