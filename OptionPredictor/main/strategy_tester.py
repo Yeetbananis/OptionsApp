@@ -32,13 +32,6 @@ from backtester import realized_vol
 
 ICON_DIR = Path(__file__).parent / "icons"
 
-# Theme definitions
-THEMES = {
-    "dark": {"bg":"#2e2e2e", "fg":"#ffffff", "entry_bg":"#3c3c3c"},
-    "light": {"bg":"#f0f0f0", "fg":"#000000", "entry_bg":"#ffffff"}
-}
-
-
 # Configure logging for the GUI part
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - GUI - %(message)s')
 
@@ -100,119 +93,114 @@ def load_icon(path, tint_color=None, tint_black=False, size=(24, 24)):
 
 
 class StrategyTesterWindow:
-    def __init__(self, parent, current_theme: str = "light"):
-        self.filters = FilterConfig()    # “no-op” filter by default
-        self.theme = current_theme
-        # initialize summary text colors from central THEMES
-        self.summary_txt_bg = THEMES[self.theme]["entry_bg"]
-        self.summary_txt_fg = THEMES[self.theme]["fg"]
-        self.current_wifi_status = "down"  # Track current WiFi status
+    def __init__(self, parent, app_instance):
+        self.app = app_instance
+        self.theme = self.app.current_theme # Get theme consistently from OptionAnalyzerApp
 
+        # Initialize attributes that update_theme might use before _create_widgets fully assigns them
+        # This prevents AttributeErrors if update_theme is called early or if a widget isn't created
+        self.copy_perf_btn = None
+        self.filter_button = None
+        self.export_btn = None
+        self.filter_entry = None
+        self.summary_txt = None
+        self.log_text = None # If you have a general log text for live logging from backtest engine
+        self.start_ent = None
+        self.end_ent = None
+        self.log_tree = None
+        self.history_tree = None
+        self.wifi_label = None
+        self.fullscreen_button = None
+        self.fig = None
+        self.ax = None
+        self.canvas = None
+        self.inputs_frame = None # For the calendar area fix
+
+        # Get initial theme settings from the parent app
+        # These will be used by _create_widgets for initial styling
+        theme_settings = self.app.theme_settings()
+        self.current_theme_settings = theme_settings # Store for use in _create_widgets if needed
+        self.summary_txt_bg = theme_settings.get("entry_bg", "#3c3c3c" if self.theme == "dark" else "#ffffff")
+        self.summary_txt_fg = theme_settings.get("fg", "#ffffff" if self.theme == "dark" else "#000000")
+
+        # --- Single Toplevel creation ---
         self.win = tk.Toplevel(parent)
-        self._next_trade_iid = 1  # Track next trade IID for treeview
-        self._last_progress_ts = 0.0 # Track last progress update time
+        self.win.title("Options Strategy Backtester") # Consistent title
+        self.win.geometry("1400x900") # Set desired geometry
+        self.win.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.filters = FilterConfig()
+        self.current_wifi_status = "down"
+        self._next_trade_iid = 1
+        self._last_progress_ts = 0.0
         self.is_graph_fullscreen = False
         self.graph_original_parent = None
-        self.fullscreen_button = None # Initialize here
-        
-
-        self.win.title("Options Strategy Backtester")
-        # buffer for trades waiting to be drawn
         self._pending_trades = []
         self._flush_scheduled = False
-        self.selected_trade_iid = None  # Track selected trade IID
-        self.trade_marker = None  # Track plotted marker
-        self.bounce = BounceOverlay(self.win) # Bounce overlay for long-running tasks
-        
-        # --- Load Wi-Fi icons tinted to our fg color ---
-        fg_color = THEMES[self.theme]['fg']
-        self.icons = {
-            "down":   load_icon(ICON_DIR/"wifi_disconnected.png", tint_color=fg_color),
-            "weak":   load_icon(ICON_DIR/"wifi_weak.png",        tint_color=fg_color),
-            "medium": load_icon(ICON_DIR/"wifi_medium.png",      tint_color=fg_color),
-            "strong": load_icon(ICON_DIR/"wifi_strong.png",      tint_color=fg_color),
-            "secure": load_icon(ICON_DIR/"wifi_secure.png",      tint_color=fg_color),
-        }
-
-
-        self.win.geometry("1050x780")
+        self.selected_trade_iid = None
+        self.trade_marker = None
+        self.bounce = BounceOverlay(self.win) # Ensure BounceOverlay is compatible
         self.custom_legs = []
 
-
-        self.style = ttk.Style(self.win)
-            # ─── use clam for richer styling, then define our “cool” progressbar ───
-        self.style.theme_use('clam')
-        self.style.configure(
-                "Cool.Horizontal.TProgressbar",
-                troughcolor="#2e2e2e",    # dark track
-                bordercolor="#2e2e2e",
-                background="#4caf50",     # bright green fill
-                lightcolor="#81c784",     # highlight
-                darkcolor="#388e3c",      # shadow
-                thickness=20              # taller bar
-            )
-        self.style.map(
-                "Cool.Horizontal.TProgressbar",
-                background=[('active', '#66bb6a'), ('!active', '#4caf50')]
-            )
+        # Load icons using the consistent foreground color
+        icon_fg_color = self.summary_txt_fg
+        self.icons = {
+            "down":   load_icon(ICON_DIR/"wifi_disconnected.png", tint_color=icon_fg_color),
+            "weak":   load_icon(ICON_DIR/"wifi_weak.png",        tint_color=icon_fg_color),
+            "medium": load_icon(ICON_DIR/"wifi_medium.png",      tint_color=icon_fg_color),
+            "strong": load_icon(ICON_DIR/"wifi_strong.png",      tint_color=icon_fg_color),
+            "secure": load_icon(ICON_DIR/"wifi_secure.png",      tint_color=icon_fg_color),
+        }
+        if ICON_DIR: # Check if ICON_DIR is valid
+            self.fullscreen_icon = load_icon(ICON_DIR / "fullscreen.png", tint_color=icon_fg_color, size=(16, 16))
+            self.minimize_icon = load_icon(ICON_DIR / "minimize.png", tint_color=icon_fg_color, size=(16, 16))
+        else:
+            self.fullscreen_icon = None
+            self.minimize_icon = None
 
 
-        ## ─── Set up the main window ────────────────────────────────────────────────
-        self._create_widgets()
+        self._create_widgets() # Create all GUI elements
 
-
-        # ─── Enable right-click “Copy” on summary and trade logs ───
-        # Text‐widget menu
-        self.summary_txt.bind("<Button-3>", self._show_text_context_menu)
+        # Set up right-click context menus (check if widgets exist)
+        if self.summary_txt:
+            self.summary_txt.bind("<Button-3>", self._show_text_context_menu)
         self._text_menu = tk.Menu(self.win, tearoff=0)
         self._text_menu.add_command(label="Copy", command=self._copy_text_selection)
 
-
-
-        # Treeview menu (applies to both Best Run and All History)
-        for tree in (self.log_tree, self.history_tree):
-            tree.bind("<Button-3>", self._show_tree_context_menu)
+        if self.log_tree and self.history_tree:
+            for tree_widget in (self.log_tree, self.history_tree):
+                if tree_widget: tree_widget.bind("<Button-3>", self._show_tree_context_menu)
         self._tree_menu = tk.Menu(self.win, tearoff=0)
         self._tree_menu.add_command(label="Copy", command=self._copy_tree_selection)
 
+        # Logging handler
+        if self.summary_txt:
+            class TextHandler(logging.Handler):
+                def __init__(self, text_widget):
+                    super().__init__()
+                    self.text_widget = text_widget
+                def emit(self, record):
+                    try:
+                        if not getattr(self.text_widget, "winfo_exists", lambda: False)(): return
+                        msg = self.format(record)
+                        self.text_widget.configure(state='normal')
+                        self.text_widget.insert('end', msg + '\n')
+                        self.text_widget.see('end')
+                        self.text_widget.configure(state='disabled')
+                    except tk.TclError: return
+            text_handler = TextHandler(self.summary_txt)
+            text_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            logging.getLogger().addHandler(text_handler) # Be cautious adding to root logger
 
-         # ─── Live‐log handler for the summary pane ────────────────────────────────
-        import logging
-
-        class TextHandler(logging.Handler):
-            """A logging.Handler that writes to a Tkinter Text widget."""
-            def __init__(self, text_widget):
-                super().__init__()
-                self.text_widget = text_widget
-
-            def emit(self, record):
-                try:
-                    # if widget was destroyed, do nothing
-                    if not getattr(self.text_widget, "winfo_exists", lambda: False)():
-                        return
-                    msg = self.format(record)
-                    # insert at end, scrolling as we go
-                    self.text_widget.configure(state='normal')
-                    self.text_widget.insert('end', msg + '\n')
-                    self.text_widget.see('end')
-                    self.text_widget.configure(state='disabled')
-                except tk.TclError:
-                    # widget dead or not writable
-                    return
-
-        # attach it to the root logger (or to a named one)
-        text_handler = TextHandler(self.summary_txt)
-        text_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logging.getLogger().addHandler(text_handler)
-        # ─────────────────────────────────────────────────────────────────────────
-
-        
         self._setup_default_values()
         logging.info("Strategy Tester window initialized.")
 
-        # apply central theme via the parent
-        if hasattr(parent, 'apply_theme_to_window'):
-            parent.apply_theme_to_window(self.win)
+        # OptionsApp applies general theme to tk widgets and basic window bg
+        self.app.apply_theme_to_window(self.win)
+
+        # Call update_theme to apply specific styles (plot, calendar, tags, etc.)
+        # This will also ensure initial state is correct.
+        self.update_theme(self.theme)
 
 
     def _show_text_context_menu(self, event):
@@ -255,11 +243,8 @@ class StrategyTesterWindow:
         self.win.clipboard_append(text)
 
 
-
-
-
     def _create_widgets(self):
-        main_pane = tk.PanedWindow(self.win, orient=tk.VERTICAL, sashrelief=tk.RAISED, bg=self.win.cget('bg'))
+        main_pane = tk.PanedWindow(self.win, orient=tk.VERTICAL, sashrelief=tk.RAISED)
         main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Header with custom legs display
@@ -268,8 +253,7 @@ class StrategyTesterWindow:
 
         # Add custom legs display label
         self.custom_legs_label = ttk.Label(
-            hdr, text="Custom Strategy: None", font=('Segoe UI', 9, 'italic'),
-            foreground='#888888' if self.theme == 'dark' else '#666666'
+            hdr, text="Custom Strategy: None", font=('Segoe UI', 9, 'italic')
         )
         self.custom_legs_label.pack(anchor="nw", padx=10, pady=5)
 
@@ -281,34 +265,42 @@ class StrategyTesterWindow:
         inputs_frame = ttk.Frame(content_frame)
         inputs_frame.pack(side="left", fill="both", expand=True)
 
-                # Row 0: First row of parameters
+        # Row 0: First row of parameters
         ttk.Label(inputs_frame, text="Underlying:").grid(row=0, column=0, sticky="e", padx=(5, 2), pady=8)
         self.symbol_ent = ttk.Entry(inputs_frame, width=8)
         self.symbol_ent.grid(row=0, column=1, sticky="w", padx=(2, 10), pady=8)
 
-        th = THEMES[self.theme]  # pull in theme‐aware colors
 
         ttk.Label(inputs_frame, text="Start Date:").grid(row=0, column=2, sticky="e", padx=(5, 2), pady=8)
+        # Get theme settings from the parent app for DateEntry initialization
+        th_init = self.app.theme_settings() if hasattr(self.app, 'theme_settings') else {}
+        if not th_init:  # Fallback if theme_settings doesn't exist or returns empty
+            th_init = {"entry_bg": "#25a37e", "fg": "#E30303", "bg": "#e68e12ac"} #should not be hit
+        date_kwargs_init = {
+            'background': th_init["entry_bg"],
+            'foreground': th_init["fg"],
+            'bordercolor': th_init["bg"],
+            'headersbackground': th_init["bg"],
+            'headersforeground': th_init["fg"],
+        }
         self.start_ent = DateEntry(
             inputs_frame,
             width=10,
             date_pattern="yyyy-MM-dd",
-            background=th["entry_bg"],
-            foreground=th["fg"],
-            borderwidth=1
+            **date_kwargs_init # Apply the detailed styling
         )
-        self.start_ent.grid(row=0, column=3, sticky="w", padx=(2, 10), pady=8)
+        self.start_ent.grid(row=0, column=3, sticky='w', padx=5, pady=2)
+        self.start_ent.set_date(_dt.date.today() - _dt.timedelta(days=365*2))
 
         ttk.Label(inputs_frame, text="End Date:").grid(row=0, column=4, sticky="e", padx=(5, 2), pady=8)
         self.end_ent = DateEntry(
             inputs_frame,
             width=10,
             date_pattern="yyyy-MM-dd",
-            background=th["entry_bg"],
-            foreground=th["fg"],
-            borderwidth=1
+            **date_kwargs_init  # Apply the same detailed styling as start_ent
         )
         self.end_ent.grid(row=0, column=5, sticky="w", padx=(2, 10), pady=8)
+        self.end_ent.set_date(_dt.date.today() - _dt.timedelta(days=7))  # Default to one week ago
         
         ttk.Label(inputs_frame, text="DTE:").grid(row=0, column=6, sticky="e", padx=(5, 2), pady=8)
         self.dte_ent = ttk.Entry(inputs_frame, width=5)
@@ -363,14 +355,11 @@ class StrategyTesterWindow:
         button_frame = ttk.Frame(content_frame)
         button_frame.pack(side="right", fill="y", padx=15)
 
-        # get the labelframe background so our text blends in
-        bf = self.style.lookup('TLabelframe', 'background')
         # ─── tiny “WiFi status:” label above the icon ───
         self.wifi_text = ttk.Label(
             hdr,
             text="WiFi status:",
             font=('Segoe UI', 8),               # very small
-            foreground=self.summary_txt_fg       # white in dark mode
         )
         # place it just above the icon
         self.wifi_text.place(relx=1.0, rely=0.0, anchor="ne", x=0, y=-16)
@@ -381,10 +370,6 @@ class StrategyTesterWindow:
             image=self.icons["down"],
             style='Wifi.TLabel'
         )
-        self.wifi_label.place(relx=1.0, rely=0.0, anchor="ne", x=-5, y=0)
-
-        # define the style Wifi.TLabel to use the same background:
-        self.style.configure('Wifi.TLabel', background=bf)
         self.wifi_label.place(relx=1.0, rely=0.0, anchor="ne", x=-5, y=0)
         self.check_wifi()
 
@@ -411,15 +396,31 @@ class StrategyTesterWindow:
         self.opt_combo_lbl.pack(fill='x', padx=4, pady=(2,0))
         self.opt_progress_lbl = ttk.Label(button_frame, text="", font=('Segoe UI', 9))
         self.opt_progress_lbl.pack(fill='x', padx=4)
-        self.progress = ttk.Progressbar(button_frame, style="Cool.Horizontal.TProgressbar", mode="determinate", maximum=1, value=0)
+
+        #style progress
+
+        self.progress = ttk.Progressbar(button_frame, mode="determinate", maximum=1, value=0)
         self.progress.pack(fill='x', padx=4, pady=(2,10))
+        # Configure progress bar colors based on theme
+        progress_style = ttk.Style()
+        # Configure progress bar colors based on theme
+        if hasattr(self.app, 'progress_style'):
+            self.progress.configure(style=self.app.progress_style)
+        else:
+            # Fallback in case the parent app doesn't have a progress style defined
+            progress_style = ttk.Style()
+            theme = self.theme
+            progress_style.configure("TProgressbar", 
+                background="#187808" if theme == "dark" else "#4caf50",
+                troughcolor="#2e2e2e" if theme == "dark" else "#e0e0e0")
+            self.progress.configure(style="TProgressbar")
 
         self.opt_toolbar.pack_forget()
         self.opt_combo_lbl.pack_forget()
         self.opt_progress_lbl.pack_forget()
         self.progress.pack_forget()
 
-        results_pane = tk.PanedWindow(main_pane, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, bg=self.win.cget('bg'))
+        results_pane = tk.PanedWindow(main_pane, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
         main_pane.add(results_pane, stretch="always")
 
         self.win.update_idletasks()
@@ -428,31 +429,42 @@ class StrategyTesterWindow:
         left_frame = ttk.Frame(results_pane, padding=10)
         results_pane.add(left_frame, stretch="always")
         summary_frame = ttk.LabelFrame(left_frame, text="Performance Summary", padding=10)
-        self.summary_txt = tk.Text(summary_frame, height=10, width=42, bg=self.summary_txt_bg, fg=self.summary_txt_fg, relief=tk.FLAT, wrap="word", font=('Consolas', 10))
+        # Define text colors based on theme
+        self.summary_txt_bg = "#1e1e1e" if self.theme == "dark" else "#ffffff"
+        self.summary_txt_fg = "#ffffff" if self.theme == "dark" else "#000000"
+        
+        # Create the summary text widget with theme-appropriate colors
+        self.summary_txt = tk.Text(summary_frame, height=10, width=42, 
+                      bg=self.summary_txt_bg, 
+                      fg=self.summary_txt_fg, 
+                      relief=tk.FLAT, 
+                      wrap="word", 
+                      font=('Consolas', 10))
+        
         self.summary_txt.pack(fill="both", expand=True)
         summary_frame.pack(fill="x", expand=False, pady=(0,5))
-        copy_perf_btn = tk.Button(summary_frame, text="📋 Copy Metrics", command=self._copy_performance_metrics,
-                          bg="#555555" if self.theme == "dark" else "#e0e0e0", fg=THEMES[self.theme]["fg"])
-        copy_perf_btn.pack(anchor="ne", pady=(0, 5))
+        self.copy_perf_btn = ttk.Button(summary_frame, text="📋 Copy Metrics", command=self._copy_performance_metrics)
+        self.copy_perf_btn.pack(anchor="ne", pady=(0, 5))
         plot_frame = ttk.LabelFrame(left_frame, text="Equity Curve", padding=5)
         plot_frame.pack(fill="both", expand=True)
 
-        fig_bg = "#2e2e2e" if self.theme == "dark" else "#f0f0f0"
+        fig_bg = "#0f0f0f" if self.theme == "dark" else "#f0f0f0"
         self.fig, self.ax = plt.subplots(facecolor=fig_bg)
-        self.ax.set_facecolor(self.summary_txt_bg)
+        self.ax.set_facecolor("#0f0f0f" if self.theme == "dark" else "#ffffff")
         self.ax.tick_params(colors=self.summary_txt_fg)
         self.ax.xaxis.label.set_color(self.summary_txt_fg)
         self.ax.yaxis.label.set_color(self.summary_txt_fg)
         self.ax.title.set_color(self.summary_txt_fg)
-        for s in self.ax.spines.values(): s.set_edgecolor(self.summary_txt_fg)
+        for s in self.ax.spines.values(): s.set_color(self.summary_txt_fg)
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         self.fig.tight_layout()
 
         # --- Add Fullscreen Button ---
         try:
-           # tint the fullscreen/minimize icons to match our fg color
-            fg_color = THEMES[self.theme]['fg']
+            # Get foreground color based on the theme from the parent app
+            fg_color = self.summary_txt_fg  # Already defined based on theme in __init__
+            
             self.fullscreen_icon = load_icon(
                 ICON_DIR / "fullscreen.png",
                 tint_color=fg_color,
@@ -475,12 +487,13 @@ class StrategyTesterWindow:
             self.fullscreen_button.image_ref = self.fullscreen_icon
             self.fullscreen_button.pack()
 
+
         except Exception as e:
             logging.error(f"Could not load fullscreen/minimize icons: {e}")
             # Fallback to minimal text button
             button_container = ttk.Frame(plot_frame)
             button_container.place(relx=0.99, rely=0.01, anchor='ne', x=-2, y=2)
-            self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
+
             self.fullscreen_button = ttk.Button(
                 button_container,
                 text="FS",
@@ -510,15 +523,15 @@ class StrategyTesterWindow:
         widths = (60, 90, 90, 70, 70, 70, 80, 90)
 
         # --- Filter Entry Box ---
-        filter_frame = tk.Frame(best_tab, bg=self.win.cget('bg'))
+        filter_frame = tk.Frame(best_tab)
         filter_frame.pack(fill="x", padx=10, pady=(10, 0))
 
         self.filter_var = tk.StringVar()
-        filter_entry = tk.Entry(filter_frame, textvariable=self.filter_var, bg=THEMES[self.theme]["entry_bg"], fg=THEMES[self.theme]["fg"], insertbackground=THEMES[self.theme]["fg"])
-        filter_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.filter_entry = tk.Entry(filter_frame, textvariable=self.filter_var)
+        self.filter_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-        filter_button = tk.Button(filter_frame, text="Filter Trades", command=self._filter_trades, bg="#555555" if self.theme == "dark" else "#e0e0e0", fg=THEMES[self.theme]["fg"])
-        filter_button.pack(side="left")
+        self.filter_button = tk.Button(filter_frame, text="Filter Trades", command=self._filter_trades)
+        self.filter_button.pack(side="left")
 
         # Create a frame for the Treeview and scrollbars to avoid mixing pack and grid
         tree_frame = ttk.Frame(best_tab)
@@ -528,12 +541,9 @@ class StrategyTesterWindow:
         for i, c in enumerate(cols):
             self.log_tree.heading(c, text=c, command=lambda cc=c: self._sort_treeview(self.log_tree, cc, False))
             self.log_tree.column(c, width=widths[i], anchor="c", stretch=True)
-        self.log_tree.tag_configure('oddrow', background=self.summary_txt_bg)
-        self.log_tree.tag_configure('evenrow', background=self.summary_txt_bg)
+        self.log_tree.tag_configure('oddrow')
+        self.log_tree.tag_configure('evenrow')
 
-        profit_color, loss_color = ("#264d26", "#4d2626") if self.theme == "dark" else ("#d0f0c0", "#f0d0d0")
-        self.log_tree.tag_configure('profit', background=profit_color, foreground=self.summary_txt_fg)
-        self.log_tree.tag_configure('loss', background=loss_color, foreground=self.summary_txt_fg)
 
         vsb_best = ttk.Scrollbar(tree_frame, orient="vertical", command=self.log_tree.yview)
         hsb_best = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.log_tree.xview)
@@ -545,9 +555,8 @@ class StrategyTesterWindow:
         self.log_tree.grid(row=0, column=0, sticky="nsew")
         vsb_best.grid(row=0, column=1, sticky="ns")
         hsb_best.grid(row=1, column=0, sticky="ew")
-        export_btn = tk.Button(best_tab, text="💾 Export Trades", command=self._export_trades_to_csv,
-                       bg="#555555" if self.theme == "dark" else "#e0e0e0", fg=THEMES[self.theme]["fg"])
-        export_btn.pack(anchor="ne", pady=5, padx=10)
+        self.export_btn = tk.Button(best_tab, text="💾 Export Trades", command=self._export_trades_to_csv)
+        self.export_btn.pack(anchor="ne", pady=5, padx=10)
         self.log_tree.bind('<<TreeviewSelect>>', self._on_trade_select)
         self.log_tree.bind("<Button-3>", self._show_trade_right_click)
 
@@ -556,8 +565,8 @@ class StrategyTesterWindow:
         for c in hist_cols:
             self.history_tree.heading(c, text=c)
             self.history_tree.column(c, width=80, anchor="c")
-        self.history_tree.tag_configure('profit', background=profit_color, foreground=self.summary_txt_fg)
-        self.history_tree.tag_configure('loss', background=loss_color, foreground=self.summary_txt_fg)
+        self.history_tree.tag_configure('oddrow')
+        self.history_tree.tag_configure('evenrow')
 
         vsb_hist = ttk.Scrollbar(hist_tab, orient="vertical", command=self.history_tree.yview)
         hsb_hist = ttk.Scrollbar(hist_tab, orient="horizontal", command=self.history_tree.xview)
@@ -567,6 +576,7 @@ class StrategyTesterWindow:
         self.history_tree.grid(row=0, column=0, sticky="nsew")
         vsb_hist.grid(row=0, column=1, sticky="ns")
         hsb_hist.grid(row=1, column=0, sticky="ew")
+
 
     def check_wifi(self):
         def worker():
@@ -601,8 +611,119 @@ class StrategyTesterWindow:
             self.win.after(5000, self.check_wifi)
 
 
+    def on_close(self):
+            """Handles window closing and notifies the parent app."""
+            self.app.remove_strategy_tester(self)
+            self.win.destroy()
 
+    def recreate_date_entries(self): #destroy and recreate calendar fields (only fix found for improper theme switch)
+        th = self.app.theme_settings()
+
+        date_kwargs = {
+            'background': th["entry_bg"],
+            'foreground': th["fg"],
+            'bordercolor': th["bg"],
+            'headersbackground': th["bg"],
+            'headersforeground': th["fg"],
+            'selectbackground': th["entry_bg"],
+            'selectforeground': th["fg"]
+        }
+
+        # Save current dates
+        start_date = self.start_ent.get_date()
+        end_date = self.end_ent.get_date()
+
+        # Destroy existing widgets
+        self.start_ent.destroy()
+        self.end_ent.destroy()
+
+        # Recreate start_ent
+        self.start_ent = DateEntry(
+            self.start_ent.master,
+            width=10,
+            date_pattern="yyyy-MM-dd",
+            **date_kwargs
+        )
+        self.start_ent.grid(row=0, column=3, sticky='w', padx=5, pady=2)
+        self.start_ent.set_date(start_date)
+
+        # Recreate end_ent
+        self.end_ent = DateEntry(
+            self.end_ent.master,
+            width=10,
+            date_pattern="yyyy-MM-dd",
+            **date_kwargs
+        )
+        self.end_ent.grid(row=0, column=5, sticky="w", padx=(2, 10), pady=8)
+        self.end_ent.set_date(end_date)
+
+
+    def update_theme(self, new_theme):
+        """Updates the window's theme-dependent elements."""
+        self.theme = new_theme
+        th = self.app.theme_settings()
+        if not th:
+            logging.error("StrategyTester: No theme settings found from app, cannot update theme.")
+            return
+
+        self.summary_txt_bg = th.get("entry_bg", "#3c3c3c" if self.theme == "dark" else "#ffffff")
+        self.summary_txt_fg = th.get("fg", "#ffffff" if self.theme == "dark" else "#000000")
+        fg_color = self.summary_txt_fg
+        bg_color = th.get("bg", "#2e2e2e" if self.theme == "dark" else "#f0f0f0")
+
+        print(f"StrategyTester: Updating theme to {self.theme}")
+
+        # 1. Update Plot Colors
+        if self.fig and self.ax and self.canvas: # Check if plot elements exist
+            self.fig.patch.set_facecolor(bg_color)
+            self.ax.set_facecolor(self.summary_txt_bg)
+            self.ax.tick_params(colors=self.summary_txt_fg, which='both')
+            if hasattr(self.ax.xaxis, 'label'): self.ax.xaxis.label.set_color(self.summary_txt_fg)
+            if hasattr(self.ax.yaxis, 'label'): self.ax.yaxis.label.set_color(self.summary_txt_fg)
+            if hasattr(self.ax, 'title'): self.ax.title.set_color(self.summary_txt_fg)
+            for s in self.ax.spines.values(): s.set_edgecolor(self.summary_txt_fg)
+            self.ax.grid(True, linestyle='--', linewidth=0.5, color=self.summary_txt_fg, alpha=0.3)
+            self.canvas.draw_idle()
+
+        # 2. Update Calendar (DateEntry) - both popup and entry field   
+        self.recreate_date_entries()
+
+        # 3. Update Treeview Tags
+        if self.log_tree and self.history_tree: # Check if trees exist
+            profit_color, loss_color = ("#006400", "#8B0000") if self.theme == "dark" else ("#d0f0c0", "#f0d0d0")
+            self.log_tree.tag_configure('profit', background=profit_color, foreground=self.summary_txt_fg)
+            self.log_tree.tag_configure('loss', background=loss_color, foreground=self.summary_txt_fg)
+            self.history_tree.tag_configure('profit', background=profit_color, foreground=self.summary_txt_fg)
+            self.history_tree.tag_configure('loss', background=loss_color, foreground=self.summary_txt_fg)
         
+        # 4. Update Icons
+        icon_fg_color = self.summary_txt_fg
+        self.icons = { # Re-load icons with new tint color
+            "down": load_icon(ICON_DIR/"wifi_disconnected.png", tint_color=icon_fg_color),
+            "weak": load_icon(ICON_DIR/"wifi_weak.png", tint_color=icon_fg_color),
+            "medium": load_icon(ICON_DIR/"wifi_medium.png", tint_color=icon_fg_color),
+            "strong": load_icon(ICON_DIR/"wifi_strong.png", tint_color=icon_fg_color),
+            "secure": load_icon(ICON_DIR/"wifi_secure.png", tint_color=icon_fg_color),
+        }
+        self.fullscreen_icon = load_icon(ICON_DIR / "fullscreen.png", tint_color=icon_fg_color, size=(16, 16))
+        self.minimize_icon = load_icon(ICON_DIR / "minimize.png", tint_color=icon_fg_color, size=(16, 16))
+        
+        if self.wifi_label: self.wifi_label.config(image=self.icons.get(self.current_wifi_status, self.icons["down"]))
+        if self.fullscreen_button: self.fullscreen_button.config(image=self.fullscreen_icon if not self.is_graph_fullscreen else self.minimize_icon)
+
+
+        # 5. Update tk Widgets
+        btn_bg_color = "#555555" if self.theme == "dark" else "#e0e0e0" # Example for tk.Button
+        if self.filter_button: self.filter_button.config(bg=btn_bg_color, fg=fg_color) # tk.Button
+        if self.export_btn: self.export_btn.config(bg=btn_bg_color, fg=fg_color)     # tk.Button
+        if self.filter_entry: self.filter_entry.config(bg=self.summary_txt_bg, fg=fg_color, insertbackground=fg_color) # tk.Entry
+        if self.summary_txt: self.summary_txt.config(bg=self.summary_txt_bg, fg=fg_color)
+        if hasattr(self, 'log_text') and self.log_text:
+            self.log_text.config(bg=self.summary_txt_bg, fg=fg_color)
+
+        # 6. Re-apply general theme from OptionsApp
+        self.app.apply_theme_to_window(self.win)
+
 
     def _setup_tooltip(self):
         self.tooltip = None
@@ -715,7 +836,10 @@ class StrategyTesterWindow:
             self.custom_legs_label.configure(text="Custom Strategy: None")
 
     def _open_custom_builder(self):
-        dlg = CustomLegBuilder(self.win, theme=self.theme, existing_legs=self.custom_legs.copy(), controller=self)
+        dlg = CustomLegBuilder(self.win, existing_legs=self.custom_legs.copy(), controller=self)
+        # You MUST ensure OptionsApp applies its theme to 'dlg' after creation
+        if hasattr(self.win.master, 'apply_theme_to_window'):
+             self.win.master.apply_theme_to_window(dlg)
         self.win.wait_window(dlg)
         self.custom_legs = dlg.legs
         if dlg.legs is not None:
@@ -732,7 +856,10 @@ class StrategyTesterWindow:
 
 
     def _open_optimize_dialog(self):
-        OptimizeDialog(self.win, controller=self, theme=self.theme)
+        dlg = OptimizeDialog(self.win, controller=self)
+        # You MUST ensure OptionsApp applies its theme to 'dlg' after creation
+        if hasattr(self.win.master, 'apply_theme_to_window'):
+             self.win.master.apply_theme_to_window(dlg)
 
     def _start_optimization(self, param_grid: dict):
         """Kick off a batch run over our param grid with live progress & trades."""
@@ -777,7 +904,7 @@ class StrategyTesterWindow:
         self.opt_progress_lbl.configure(text="")
         self.opt_progress_lbl.pack(fill='x', padx=4)
 
-        # Configure & show progress bar
+        # Configure progress bar
         self.progress.configure(mode='determinate', value=0, maximum=1)
         self.progress.pack(fill='x', padx=4, pady=(2,10))
 
@@ -1161,12 +1288,10 @@ class StrategyTesterWindow:
 
 
     def _open_filter_dialog(self):
-        dlg = FilterDialog(self.win, controller=self, theme=self.theme)
+        dlg = FilterDialog(self.win, controller=self)
         self.win.wait_window(dlg)
         self.filters = dlg.filter_config
         self._rebuild_trade_log_from_last_run()
-
-
      
 
 
@@ -1524,19 +1649,15 @@ class StrategyTesterWindow:
                 )
 
             self.ax.legend()
-            self.ax.set_title("Equity Curve", color=self.summary_txt_fg)
-            self.ax.set_xlabel("Date", color=self.summary_txt_fg)
-            self.ax.set_ylabel("Account Value ($)", color=self.summary_txt_fg)
+            self.ax.set_title("Equity Curve")
+            self.ax.set_xlabel("Date")
+            self.ax.set_ylabel("Account Value ($)")
             fmt = plt.FuncFormatter(lambda x, p: f'${x:,.0f}')
             self.ax.yaxis.set_major_formatter(fmt)
             self.ax.grid(True, linestyle='--', linewidth=0.5,
                         color=self.summary_txt_fg, alpha=0.7)
         else:
-            self.ax.set_title("Equity Curve (No Data)", color=self.summary_txt_fg)
-
-        for spine in self.ax.spines.values():
-            spine.set_edgecolor(self.summary_txt_fg)
-        self.ax.tick_params(colors=self.summary_txt_fg)
+            self.ax.set_title("Equity Curve (No Data)")
 
         # ─── tooltip handler (unchanged) ───────────────────────────
         if hasattr(self, 'tooltip_cid'):
@@ -1740,6 +1861,11 @@ class StrategyTesterWindow:
         if not summary_text:
             messagebox.showwarning("No Metrics", "No performance metrics available to copy.", parent=self.win)
             return
+        
+        style = ttk.Style()
+        bg = style.lookup('TFrame', 'background')
+        fg = style.lookup('TLabel', 'foreground')
+        notify.configure(bg=bg)
 
         # Copy the summary text to the clipboard
         self.win.clipboard_clear()
@@ -1754,10 +1880,6 @@ class StrategyTesterWindow:
         notify.lift()  # Ensure window is on top
         notify.update()  # Force redraw
 
-        # Style based on theme
-        bg = THEMES[self.theme]["bg"]
-        fg = THEMES[self.theme]["fg"]
-        notify.configure(bg=bg)
 
         # Create label with "Metrics Copied!" message
         label = ttk.Label(
@@ -1832,19 +1954,16 @@ class StrategyTesterWindow:
                 # Load minimize icon with smaller size
                 self.minimize_icon = load_icon(
                     ICON_DIR / "minimize.png",
-                    tint_black=(self.theme == "light"),
                     size=(16, 16)  # Smaller size
                 )
                 if self.minimize_icon is None:
                     raise ValueError("Failed to load minimize icon")
 
-                # Create button with transparent style
-                self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
+                # Create button    
                 self._fs_close_btn = ttk.Button(
                     self._fs_window,
                     image=self.minimize_icon,
                     command=self._toggle_fullscreen_graph,
-                    style='Transparent.TButton'
                 )
                 # Explicitly retain the icon reference
                 self._fs_close_btn.image_ref = self.minimize_icon
@@ -1935,7 +2054,7 @@ if __name__ == "__main__":
             theme = "dark" if sum(root.winfo_rgb(bg)) / 3 < 32768 else "light"
         except:
             theme = "light"
-        StrategyTesterWindow(root, current_theme=theme)
+        StrategyTesterWindow(root)
 
     ttk.Button(root, text="Open Strategy Tester", command=open_tester).pack(pady=20)
     root.mainloop()
@@ -1943,7 +2062,7 @@ if __name__ == "__main__":
 
 class CustomLegBuilder(tk.Toplevel):
     """Modal window for adding custom strategy legs with a modern UI."""
-    def __init__(self, master, theme="light", existing_legs=None, controller=None):
+    def __init__(self, master, existing_legs=None, controller=None):
         super().__init__(master)
         self.title("Build Custom Strategy")
         self.geometry("600x450")
@@ -1951,26 +2070,10 @@ class CustomLegBuilder(tk.Toplevel):
         self.transient(master)
         self.grab_set()
         self.legs = existing_legs or []
-        self.theme = theme
         self.controller = controller  # Reference to StrategyTesterWindow instance
-        self._make_widgets(theme)
+        self._make_widgets()
 
-    def _make_widgets(self, theme):
-        bg, fg = ("#2e2e2e", "#ffffff") if theme == "dark" else ("#f0f0f0", "#000000")
-        entry_bg = "#3c3c3c" if theme == "dark" else "#ffffff"
-        button_bg = "#555555" if theme == "dark" else "#e0e0e0"
-        self.configure(bg=bg)
-
-        style = ttk.Style()
-        style.configure('CustomLeg.TLabel', background=bg, foreground=fg, font=('Segoe UI', 10))
-        style.configure('CustomLeg.TEntry', fieldbackground=entry_bg, foreground=fg, font=('Segoe UI', 10))
-        style.configure('CustomLeg.TCombobox', fieldbackground=entry_bg, foreground=fg, arrowcolor=fg, font=('Segoe UI', 10))
-        style.map('CustomLeg.TCombobox', fieldbackground=[('readonly', entry_bg)])
-        style.configure('CustomLeg.TButton', background=button_bg, foreground=fg, font=('Segoe UI', 10))
-        style.map('CustomLeg.TButton', background=[('active', '#666666' if theme == 'dark' else '#d0d0d0')])
-        style.configure('CustomLeg.Treeview', background=entry_bg, fieldbackground=entry_bg, foreground=fg, font=('Segoe UI', 10))
-        style.configure('CustomLeg.Treeview.Heading', background=button_bg, foreground=fg, font=('Segoe UI', 10))
-
+    def _make_widgets(self):
         frm = ttk.Frame(self, padding=20)
         frm.pack(fill="both", expand=True)
 
@@ -1978,32 +2081,32 @@ class CustomLegBuilder(tk.Toplevel):
         input_frm = ttk.Frame(frm)
         input_frm.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(input_frm, text="Strike", style='CustomLeg.TLabel').grid(row=0, column=0, padx=5, pady=5)
-        self.strike_e = ttk.Entry(input_frm, width=10, style='CustomLeg.TEntry')
+        ttk.Label(input_frm, text="Strike").grid(row=0, column=0, padx=5, pady=5)
+        self.strike_e = ttk.Entry(input_frm, width=10)
         self.strike_e.grid(row=1, column=0, padx=5, pady=5)
 
-        ttk.Label(input_frm, text="Type", style='CustomLeg.TLabel').grid(row=0, column=1, padx=5, pady=5)
-        self.type_c = ttk.Combobox(input_frm, values=["Call", "Put"], width=8, state="readonly", style='CustomLeg.TCombobox')
+        ttk.Label(input_frm, text="Type").grid(row=0, column=1, padx=5, pady=5)
+        self.type_c = ttk.Combobox(input_frm, values=["Call", "Put"], width=8, state="readonly")
         self.type_c.grid(row=1, column=1, padx=5, pady=5)
         self.type_c.current(0)
 
-        ttk.Label(input_frm, text="Long/Short", style='CustomLeg.TLabel').grid(row=0, column=2, padx=5, pady=5)
-        self.dir_c = ttk.Combobox(input_frm, values=["Long (+1)", "Short (-1)"], width=12, state="readonly", style='CustomLeg.TCombobox')
+        ttk.Label(input_frm, text="Long/Short").grid(row=0, column=2, padx=5, pady=5)
+        self.dir_c = ttk.Combobox(input_frm, values=["Long (+1)", "Short (-1)"], width=12, state="readonly")
         self.dir_c.grid(row=1, column=2, padx=5, pady=5)
         self.dir_c.current(1)
 
-        ttk.Label(input_frm, text="Quantity", style='CustomLeg.TLabel').grid(row=0, column=3, padx=5, pady=5)
+        ttk.Label(input_frm, text="Quantity").grid(row=0, column=3, padx=5, pady=5)
         self.qty_e = ttk.Entry(input_frm, width=8, style='CustomLeg.TEntry')
         self.qty_e.grid(row=1, column=3, padx=5, pady=5)
         self.qty_e.insert(0, "1")
 
-        ttk.Button(input_frm, text="➕ Add", command=self._add_leg, style='CustomLeg.TButton').grid(row=1, column=4, padx=10, pady=5)
+        ttk.Button(input_frm, text="➕ Add", command=self._add_leg).grid(row=1, column=4, padx=10, pady=5)
 
         # Legs table
         table_frm = ttk.Frame(frm)
         table_frm.pack(fill="both", expand=True, pady=10)
         cols = ("Strike", "Type", "Direction", "Quantity")
-        self.legs_tree = ttk.Treeview(table_frm, columns=cols, show="headings", height=10, style='CustomLeg.Treeview')
+        self.legs_tree = ttk.Treeview(table_frm, columns=cols, show="headings", height=10)
         for col in cols:
             self.legs_tree.heading(col, text=col)
             self.legs_tree.column(col, width=120, anchor="center")
@@ -2021,14 +2124,14 @@ class CustomLegBuilder(tk.Toplevel):
         # Remove and Confirm buttons
         action_frm = ttk.Frame(frm)
         action_frm.pack(fill="x", pady=5)
-        ttk.Button(action_frm, text="🗑 Remove Selected", command=self._remove_leg, style='CustomLeg.TButton').pack(side="left", padx=5)
-        ttk.Button(action_frm, text="✔ Confirm Strategy", command=self._confirm, style='CustomLeg.TButton').pack(side="left", padx=5)
+        ttk.Button(action_frm, text="🗑 Remove Selected", command=self._remove_leg).pack(side="left", padx=5)
+        ttk.Button(action_frm, text="✔ Confirm Strategy", command=self._confirm).pack(side="left", padx=5)
 
         # Control buttons
         btn_frm = ttk.Frame(frm)
         btn_frm.pack(fill="x", pady=15)
-        ttk.Button(btn_frm, text="Done", command=self._finish, style='CustomLeg.TButton').pack(side="right", padx=5)
-        ttk.Button(btn_frm, text="Cancel", command=self._cancel, style='CustomLeg.TButton').pack(side="right", padx=5)
+        ttk.Button(btn_frm, text="Done", command=self._finish).pack(side="right", padx=5)
+        ttk.Button(btn_frm, text="Cancel", command=self._cancel).pack(side="right", padx=5)
 
     def _add_leg(self):
         try:
@@ -2096,7 +2199,7 @@ class CustomLegBuilder(tk.Toplevel):
 
 class OptimizeDialog(tk.Toplevel):
     """Gather ranges for DTE, Alloc %, Profit Target."""
-    def __init__(self, master, controller, theme="light"):
+    def __init__(self, master, controller):
         super().__init__(master)
         self.controller = controller
         self.transient(master)

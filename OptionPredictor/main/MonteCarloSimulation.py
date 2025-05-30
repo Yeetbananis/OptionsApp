@@ -914,6 +914,34 @@ def generate_option_surface_data(S0, K, T, r, sigma, option_type, style='america
 
     return P_grid, T_grid, V_grid
 
+def generate_volatility_surface_data(S0, K, T, base_sigma, price_steps=30, time_steps=30):
+    """Generates artificial data for a 3D volatility surface."""
+    price_range = np.linspace(S0 * 0.75, S0 * 1.25, price_steps) # Range of strikes
+    time_range = np.linspace(max(T / 20, 0.01), T * 1.2, time_steps) # Range of times (avoiding zero)
+    P_grid, T_grid = np.meshgrid(price_range, time_range)
+    IV_grid = np.zeros_like(P_grid)
+
+    for i in range(time_steps):
+        for j in range(price_steps):
+            s = P_grid[i, j]
+            t = T_grid[i, j]
+            moneyness = np.log(s / K) # Log-moneyness
+
+            # --- Artificial Volatility Components ---
+            # 1. Smile: Quadratic, higher IV away from ATM, steeper for shorter T
+            smile = 0.5 * (moneyness**2) / np.sqrt(t + 0.1)
+            # 2. Skew: Linear, lower IV for higher strikes (common in equity options)
+            skew = -0.25 * moneyness
+            # 3. Term Structure: Slightly lower IV for longer T (can be adjusted)
+            term = 0.03 * np.exp(-t * 2)
+            # 4. Base Level
+            iv = base_sigma + smile + skew + term
+
+            # Ensure IV is within a reasonable range (e.g., 5% to 150%)
+            IV_grid[i, j] = max(0.05, min(iv, 1.50))
+
+    return P_grid, T_grid, IV_grid
+
 
 # --- Plotting Functions for Heatmap and 3D Surface ---
 
@@ -1100,4 +1128,74 @@ def plot_option_surface_3d(parent_window, P_grid, T_grid, V_grid, option_type, s
     fig.tight_layout()
     canvas.draw()
 
+def plot_volatility_surface_3d(plot_frame, P_grid, T_grid, IV_grid, title="3D Volatility Surface", dark_mode=False):
+    """Plots the 3D Implied Volatility surface in the provided Tkinter frame."""
+    if dark_mode:
+        plt.style.use('dark_background')
+        fig_bg = '#1e1e1e'
+        text_fg = '#ffffff'
+    else:
+        plt.style.use('default')
+        fig_bg = '#f0f0f0'
+        text_fg = '#000000'
+
+    fig = plt.Figure(figsize=(9, 7), dpi=100, facecolor=fig_bg)
+    ax = fig.add_subplot(111, projection='3d', facecolor=fig_bg)
+
+    T_days_grid = T_grid * 365 # Convert time to days for the axis
+
+    # Check if V_grid contains valid data
+    if np.isnan(IV_grid).all():
+        ax.text2D(0.5, 0.5, "No valid surface data to display.", transform=ax.transAxes, ha='center', va='center', color=text_fg)
+    else:
+        # Plot the surface using coolwarm colormap (Blue=Low, Red=High)
+        surf = ax.plot_surface(P_grid, T_days_grid, IV_grid * 100, cmap='jet', edgecolor='none', antialiased=True)
+
+        # Add a color bar
+        cbar = fig.colorbar(surf, shrink=0.5, aspect=5, label='Implied Volatility (%)')
+        cbar.ax.yaxis.label.set_color(text_fg)
+        cbar.ax.tick_params(axis='y', colors=text_fg)
+
+        # Formatting
+        ax.set_title(title, color=text_fg)
+        ax.set_xlabel('Strike Price ($)', color=text_fg)
+        ax.set_ylabel('Days Remaining', color=text_fg)
+        ax.set_zlabel('Implied Volatility (%)', color=text_fg)
+        ax.tick_params(axis='x', colors=text_fg)
+        ax.tick_params(axis='y', colors=text_fg)
+        ax.tick_params(axis='z', colors=text_fg)
+
+        # Make panes transparent and set edge color
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor('grey' if dark_mode else '#dddddd')
+        ax.yaxis.pane.set_edgecolor('grey' if dark_mode else '#dddddd')
+        ax.zaxis.pane.set_edgecolor('grey' if dark_mode else '#dddddd')
+
+        # Set view angle and zoom
+        ax.view_init(elev=28., azim=-125) # Adjust for a good view
+        ax.dist = 11
+
+    # Create Tkinter canvas and add toolbar
+    canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+    toolbar_frame = tk.Frame(plot_frame, bg=fig_bg) # Match background
+    toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+    toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
+    toolbar.update()
+
+    # Apply theme to toolbar
+    if dark_mode:
+        toolbar.configure(background="#1e1e1e")
+        for child in toolbar.winfo_children():
+            try: child.configure(background="#1e1e1e", foreground="#f0f0f0")
+            except: pass
+    else:
+         toolbar.configure(background="#f0f0f0")
+         for child in toolbar.winfo_children():
+            try: child.configure(background="#f0f0f0", foreground="#000000")
+            except: pass
 # --- End of MonteCarloSimulation.py ---

@@ -7,10 +7,20 @@ import time # For small delay in animation
 import traceback # Import traceback for detailed error logging
 import pandas as pd
 import sys
+import logging # For error logging
 import time # Make sure time is imported 
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.lines import Line2D # Needed for Line2D used in educational mode
 from llm_helper import LLMHelper
 from StockChartWindow import StockChartWindow
+try:
+    from strategy_tester import StrategyTesterWindow
+except ImportError:
+    StrategyTesterWindow = None
+    print("Warning: strategy_tester.py not found.")
+
 
 def configure_global_styles(theme: str):
     """
@@ -22,12 +32,19 @@ def configure_global_styles(theme: str):
 
     if theme == 'dark':
         bg, fg           = "#0f0f0f", '#ffffff'
-        entry_bg         = '#3c3c3c'
-        button_bg        = '#555555'
-        header_bg        = '#444444'
+        entry_bg         = '#0f0f0f'
+        button_bg        = "#3B3939"
+        header_bg        = "#0f0f0f"
         combobox_bg      = entry_bg
-        notebook_sel_bg  = '#333333'
+        notebook_sel_bg  = "#0f0f0f"
         tree_bg, field_bg= entry_bg, entry_bg
+        calendar_bg      = "#0f0f0f"
+        calendar_fg      = "#ffffff"
+        calendar_select  = "#2e7d32"
+        progressbar_trough_color = "#3c3c3c"
+        progressbar_bar_color = "#138317" # Example green
+        #profit_bg        = "#2e7d32"  # Trade log profit color
+        #loss_bg          = "#c62828"  # Trade log loss color
     else:
         bg, fg           = '#f0f0f0', '#000000'
         entry_bg         = '#ffffff'
@@ -36,6 +53,13 @@ def configure_global_styles(theme: str):
         combobox_bg      = entry_bg
         notebook_sel_bg  = '#ffffff'
         tree_bg, field_bg= entry_bg, entry_bg
+        calendar_bg      = "#ffffff"
+        calendar_fg      = "#000000"
+        calendar_select  = "#1976d2"
+        progressbar_trough_color = "#e0e0e0"
+        progressbar_bar_color = "#4caf50" # Example green
+        #profit_bg        = "#a5d6a7"  # Trade log profit color
+        #loss_bg          = "#ef9a9a"  # Trade log loss color
 
     # Base
     style.configure('.', background=bg, foreground=fg, font=('Segoe UI', 9))
@@ -55,6 +79,11 @@ def configure_global_styles(theme: str):
     # Checkbuttons & Radiobuttons
     style.configure('TCheckbutton', background=bg, foreground=fg)
     style.configure('TRadiobutton', background=bg, foreground=fg)
+
+    style.configure(".", background=bg, foreground=fg) # Sets default for all ttk
+    style.configure("TFrame", background=bg)
+    style.configure("TLabelframe", background=bg, foreground=fg)
+    style.configure("TLabelframe.Label", background=bg, foreground=fg)
 
     # Entries
     style.configure('TEntry', fieldbackground=entry_bg, foreground=fg)
@@ -77,7 +106,24 @@ def configure_global_styles(theme: str):
     style.configure('Treeview.Heading', background=header_bg, foreground=fg)
     style.map('Treeview.Heading', background=[('active', header_bg)])
     style.map('Treeview', background=[('selected', '#007acc')], foreground=[('selected', '#ffffff')])
+    # Trade log profit/loss tags
+    #style.configure('profit.Treeview', background=profit_bg)
+    #style.configure('loss.Treeview', background=loss_bg)
 
+    # Calendar (tkcalendar)
+    style.configure('Calendar', background=calendar_bg, foreground=calendar_fg)
+    style.configure('Calendar.Month', background=calendar_bg, foreground=calendar_fg)
+    style.configure('Calendar.Selected', background=calendar_select, foreground=fg)
+    style.map('Calendar', selectbackground=[('selected', calendar_select)])
+
+    
+    # --- TProgressbar (or modify if you have it) ---
+    style.configure("TProgressbar",
+                troughcolor=progressbar_trough_color,
+                bordercolor=progressbar_trough_color,
+                background=progressbar_bar_color
+               )
+    # -----------------------------------------------------------
 
 
 def calculate_binomial_greeks(S, K, T, r, sigma, option_type='call', N=500):
@@ -166,6 +212,8 @@ class Tooltip:
 
 
 
+
+
 # Import logic functions from the separate file
 try:
     from MonteCarloSimulation import (
@@ -177,6 +225,8 @@ try:
         generate_option_surface_data, plot_option_surface_3d,
         calculate_trigger_stats_correctly as recalculate_trigger_price_correctly,
         set_max_paths, cached_binomial_price, 
+        generate_volatility_surface_data,
+        plot_volatility_surface_3d,   
         #cached_lsm_price
 
     )
@@ -188,6 +238,8 @@ class OptionAnalyzerApp:
     def __init__(self, root):
 
         self.current_theme = 'light'  # or 'dark'
+        self.theme_callbacks = []  # Store callbacks for theme updates
+        self.strategy_tester_instance = None
         self.root = root
         self.root.title("Option Analyzer")
         self.root.geometry("900x800") # Give main window a bit more space
@@ -290,6 +342,7 @@ class OptionAnalyzerApp:
         # --- State Variables ---
         self.input_data = {} # To store results from analysis
         self.is_loading = False # Flag for loading animation
+        self.strategy_testers = [] # Keep track of StrategyTester windows
         self.animation_chars = ['|', '/', '-', '\\'] # Animation characters
         self.animation_step = 0
 
@@ -297,42 +350,65 @@ class OptionAnalyzerApp:
         # expose our theming helper on the root for children to call
         self.root.apply_theme_to_window = self.apply_theme_to_window
 
+    def theme_settings(self):
+        return {
+            "light": {
+                "bg": "#f0f0f0",
+                "fg": "#000000",
+                "entry_bg": "#ffffff"
+            },
+            "dark": {
+                "bg": "#0f0f0f",
+                "fg": "#ffffff",
+                "entry_bg": "#3c3c3c"
+            }
+        }[self.current_theme]
+
+
     def apply_theme_to_window(self, window):
-            """Central recursive theming for every widget in `window`."""
-            try:
-                if not window.winfo_exists():
-                    return
-            except:
+        """Central recursive theming for every widget in `window`."""
+        try:
+            if not window.winfo_exists():
                 return
+        except:
+            return
 
-            # derive our colors from the current_theme
-            bg       = "#0f0f0f" if self.current_theme == 'dark' else "#f0f0f0"
-            fg       = "#ffffff" if self.current_theme == 'dark' else "#000000"
-            entry_bg = "#3c3c3c" if self.current_theme == 'dark' else "#ffffff"
+        # derive our colors from the current_theme
+        bg       = "#0f0f0f" if self.current_theme == 'dark' else "#f0f0f0"
+        fg       = "#ffffff" if self.current_theme == 'dark' else "#000000"
+        entry_bg = "#3c3c3c" if self.current_theme == 'dark' else "#ffffff"
 
-            # theme this container
-            try:
-                window.configure(bg=bg)
-            except:
-                pass
+        # theme this container
+        try:
+            window.configure(bg=bg)
+        except:
+            pass
 
-            # walk all children
-            for w in window.winfo_children():
-                # ttk widgets respond to style → (we already set that globally)
-                # raw tk widgets need explicit bg/fg
-                if isinstance(w, (tk.Label, tk.Button, tk.Checkbutton, tk.Radiobutton)):
-                    try: w.configure(bg=bg, fg=fg)
-                    except: pass
-                if isinstance(w, tk.Entry):
-                    try: w.configure(bg=entry_bg, fg=fg)
-                    except: pass
-                if isinstance(w, tk.Text):
-                    try: w.configure(bg=entry_bg, fg=fg)
-                    except: pass
+        # walk all children
+        for w in window.winfo_children():
+            # ttk widgets respond to style → (we already set that globally)
+            # raw tk widgets need explicit bg/fg
+            if isinstance(w, (tk.Label, tk.Button, tk.Checkbutton, tk.Radiobutton)):
+                try: w.configure(bg=bg, fg=fg)
+                except: pass
+            if isinstance(w, tk.Entry):
+                try: w.configure(bg=entry_bg, fg=fg)
+                except: pass
+            if isinstance(w, tk.Text):
+                try: w.configure(bg=entry_bg, fg=fg)
+                except: pass
 
-                # recurse into frames & toplevels
-                if hasattr(w, 'winfo_children'):
-                    self.apply_theme_to_window(w)
+            # recurse into frames & toplevels
+            if hasattr(w, 'winfo_children'):
+                self.apply_theme_to_window(w)
+
+        # Call apply_custom_theme if the window supports it
+        try:
+            if hasattr(window, 'apply_custom_theme'):
+                window.apply_custom_theme()
+        except:
+            pass
+
 
 
     def set_status(self, text, color=None):
@@ -374,11 +450,35 @@ class OptionAnalyzerApp:
 
 
     def launch_strategy_tester(self):
-        # import here to avoid circular import
-        from strategy_tester import StrategyTesterWindow
-        tester = StrategyTesterWindow(self.root, self.current_theme)
-        self.child_windows.append(tester.win)
-        self.apply_theme_to_window(tester.win)
+        """Launches the Strategy Tester window, ensuring only one instance is active."""
+        if self.strategy_tester_instance and self.strategy_tester_instance.win.winfo_exists():
+            self.strategy_tester_instance.win.lift()
+            self.strategy_tester_instance.win.focus_force()
+            return
+
+        try:
+            from strategy_tester import StrategyTesterWindow # Keep import local
+        except ImportError:
+            messagebox.showerror("Error", "strategy_tester.py not found.")
+            return
+
+        try:
+            tester = StrategyTesterWindow(self.root, self)
+            self.strategy_tester_instance = tester # Store the current instance
+            self.strategy_testers.append(tester)   # Keep for theme updates
+            self.apply_theme_to_window(tester.win)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open Strategy Tester:\n{e}")
+            import traceback
+            traceback.print_exc()
+
+    def remove_strategy_tester(self, tester_instance):
+        """Removes a closed tester window from the tracking list."""
+        if tester_instance in self.strategy_testers:
+            self.strategy_testers.remove(tester_instance)
+        if self.strategy_tester_instance == tester_instance: 
+            self.strategy_tester_instance = None
+
 
 
 
@@ -783,9 +883,16 @@ class OptionAnalyzerApp:
                 inputs['option_type'], initial_option_price=fair_price,
                 low_pct_factor=0.5, high_pct_factor=2.0
             )
+
+            # 7. Option Surface Data
             self.input_data['surface_data'] = generate_option_surface_data(
                 inputs['S0'], inputs['strike'], T, inputs['r'], inputs['sigma'],
                 inputs['option_type'], low_pct_factor=0.5, high_pct_factor=2.0
+            )
+
+            # 8. Volatility Surface Data
+            self.input_data['vol_surface_data'] = generate_volatility_surface_data(
+                 inputs['S0'], inputs['strike'], T, inputs['sigma']
             )
 
             # 7. Done → schedule UI update
@@ -860,7 +967,7 @@ class OptionAnalyzerApp:
             ("Show Simulation Paths", self.show_simulation_plot),
             ("Show Trigger Distribution", self.show_distribution_plot),
             ("Show Profit Heatmap ($/%)", self.show_heatmap_plot),
-            ("Show 3D Value Surface", self.show_3d_surface_plot),
+            ("Show 3D Value Surface", self.show_3d_volatility_plot),
             ("📉 Analyze Greeks", self.show_greek_analysis),
             ("📈 View Stock Chart", self.show_stock_chart_window),
             ("Explain my position", self.show_llm_explanation)
@@ -996,49 +1103,28 @@ class OptionAnalyzerApp:
 
     # --- Plotting Window Launchers ---
 
-    def _launch_plot_window(self, plot_function, *args, title="Plot", **kwargs):
-        """Helper to create a Toplevel window and run a plotting function safely."""
-        if not self.input_data:
-             messagebox.showwarning("No Data", "Run an analysis first.", parent=self.root)
-             return
-        if self.is_loading:
-             messagebox.showwarning("Busy", "Analysis is in progress. Cannot show plot yet.", parent=self.root)
-             return
-
-        plot_win = None # Initialize plot_win to None
+    def _launch_plot_window(self, plot_function, *args, **kwargs):
+        """Launches a new window to display a plot."""
         try:
-            plot_win = tk.Toplevel(self.root)
-            plot_win.title(title)
-            plot_win.geometry("850x650") # Default size for plot windows
-            plot_win.transient(self.root) # Keep on top
+            popup = tk.Toplevel(self.root)
+            # Use pop to get title but also remove it from kwargs if present
+            # We use 'plot_title' to avoid potential conflicts with a 'title' kwarg
+            # that the plot_function itself might need.
+            popup.title(kwargs.pop('plot_title', "Plot Window"))
+            popup.geometry("800x600")
+            self.apply_theme_to_window(popup)
 
-        
-            self.apply_theme_to_window(plot_win) # Apply theme to the new window
-            plot_win.grab_set()
-
-            # Add a frame for the plot content
-            plot_frame = ttk.Frame(plot_win, padding="5 5 5 5")
+            plot_frame = ttk.Frame(popup, padding=10)
             plot_frame.pack(expand=True, fill=tk.BOTH)
 
-            # Add a close button to the plot window
-            close_button = ttk.Button(plot_frame, text="Close Plot", command=plot_win.destroy)
-            close_button.pack(side=tk.BOTTOM, pady=(5,0)) # Pack at bottom
-
-            # Run the plot function, passing the frame as the parent
-            # Plotting should happen in the main thread as it interacts with Tkinter canvas
+            # Call the actual plotting function, passing the frame and all args/kwargs
             plot_function(plot_frame, *args, **kwargs)
 
-
         except Exception as e:
-            print(f"Plotting Error Traceback ({title}):\n{traceback.format_exc()}")
-            # Ensure window is closed if plotting fails mid-way
-            try:
-                if plot_win and plot_win.winfo_exists():
-                    plot_win.destroy()
-            except tk.TclError: pass # Ignore errors during cleanup if window already gone
-
-            messagebox.showerror("Plotting Error", f"Could not generate plot '{title}':\n{e}", parent=self.root)
-            self.set_status(f"Error plotting {title}", "red")
+            traceback.print_exc()  # Log the full traceback
+            messagebox.showerror("Plot Error", f"Failed to generate plot: {e}", parent=self.root)
+        finally:
+            self.set_status("")
 
 
     # Wrapper functions to call _launch_plot_window for each plot type
@@ -1077,7 +1163,6 @@ class OptionAnalyzerApp:
                                  self.input_data['S0'],
                                  self.input_data['correct_avg_trigger'],
                                  self.input_data['correct_std_trigger'],
-                                 title="Trigger Price Distribution",
                                  dark_mode=(self.current_theme == 'dark'))
         self.set_status("")
 
@@ -1103,25 +1188,45 @@ class OptionAnalyzerApp:
             self.set_status("")
 
 
-    def show_3d_surface_plot(self):
-        if not self.input_data or 'surface_data' not in self.input_data or not self.input_data['surface_data']:
-             messagebox.showwarning("Missing Data", "Surface data is not available. Please run analysis.", parent=self.root)
-             return
-        self.set_status("Generating 3D Surface plot...")
-        # Unpack surface data
+    def show_3d_volatility_plot(self):
+        """
+        Launch a 3D implied volatility surface plot.
+        """
+        if not self.input_data or 'vol_surface_data' not in self.input_data or not self.input_data['vol_surface_data']:
+            messagebox.showwarning(
+                "Missing Data",
+                "Volatility surface data is not available. Please run analysis first.",
+                parent=self.root
+            )
+            return
+
+        self.set_status("Generating 3D Volatility Surface plot...")
+
         try:
-            p_grid, t_grid, v_grid = self.input_data['surface_data']
-            self._launch_plot_window(plot_option_surface_3d,
-                                    p_grid, t_grid, v_grid,
-                                    self.input_data['option_type'], self.input_data['strike'],
-                                    title="3D Option Value Surface", 
-                                    educational_mode=self.input_data.get('educational_mode', False),
-                                     dark_mode=(self.current_theme == 'dark'))
-        except Exception as e: # Catch potential errors during unpacking or plotting call
-             messagebox.showerror("Plot Error", f"Failed to display 3D surface:\n{e}", parent=self.root)
-             print(f"3D Surface display error: {traceback.format_exc()}")
+            # Import the new plotting function here or ensure it's imported at the top
+            from MonteCarloSimulation import plot_volatility_surface_3d
+
+            p_grid, t_grid, iv_grid = self.input_data['vol_surface_data']
+            self._launch_plot_window(
+                plot_volatility_surface_3d, # <--- Use the NEW plot function
+                p_grid,
+                t_grid,
+                iv_grid,
+                plot_title="3D Implied Volatility Surface", # <-- Window Title
+                title="3D Implied Volatility Surface",    # <-- Plot Title
+                dark_mode=(self.current_theme == 'dark')
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Plot Error",
+                f"Failed to display 3D volatility surface:\n{e}",
+                parent=self.root
+            )
+            logging.error(f"3D Volatility Surface display error: {e}")
+            traceback.print_exc() # Print detailed error
         finally:
             self.set_status("")
+
 
     def show_stock_chart_window(self):
             ticker = self.input_data.get("ticker", "")
@@ -1140,6 +1245,15 @@ class OptionAnalyzerApp:
 
         configure_global_styles(new_theme)
         self.apply_theme_to_window(self.root)
+
+        # Update any open Strategy Tester windows
+        for tester in self.strategy_testers[:]: # Use slice copy for safe iteration
+            if tester.win.winfo_exists():
+                tester.update_theme(self.current_theme)
+            else:
+                # Clean up if window was closed unexpectedly
+                self.remove_strategy_tester(tester)
+        # ---------------------
 
         # rebuild child_windows list with only still-open windows
         live_children = []
