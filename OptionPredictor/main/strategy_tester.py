@@ -1864,8 +1864,6 @@ class StrategyTesterWindow:
         
         style = ttk.Style()
         bg = style.lookup('TFrame', 'background')
-        fg = style.lookup('TLabel', 'foreground')
-        notify.configure(bg=bg)
 
         # Copy the summary text to the clipboard
         self.win.clipboard_clear()
@@ -1874,6 +1872,7 @@ class StrategyTesterWindow:
 
         # Create a temporary notification window
         notify = tk.Toplevel(self.win)
+        notify.configure(bg=bg)
         notify.transient(self.win)
         notify.overrideredirect(True)  # Remove window decorations
         notify.geometry("200x50")  # Small window size

@@ -21,6 +21,13 @@ except ImportError:
     StrategyTesterWindow = None
     print("Warning: strategy_tester.py not found.")
 
+try:
+    from NewsSentimentAnalyzer import NewsSentimentAnalyzerWindow
+except ImportError:
+    NewsSentimentAnalyzerWindow = None
+    print("Warning: NewsSentimentAnalyzer.py not found.")
+
+
 
 def configure_global_styles(theme: str):
     """
@@ -315,6 +322,12 @@ class OptionAnalyzerApp:
                                                 command=self.launch_strategy_tester, width=25)
         self.strategy_tester_button.grid(row=0, column=2, padx=10, pady=5)
 
+        # News Sentiment Analyzer
+        news_sentiment_button = ttk.Button(button_frame, text="📰 News Sentiment Analyzer",
+                                        command=self.launch_news_sentiment_analyzer, width=25)
+        news_sentiment_button.grid(row=0, column=3, padx=10, pady=5)
+
+
         # 🌙 Dark‑mode toggle --------------------------------------------------
         self.is_dark_mode_var = tk.BooleanVar(value=(self.current_theme == 'dark'))
         self.toggle_theme_button = ttk.Checkbutton(
@@ -324,7 +337,7 @@ class OptionAnalyzerApp:
             variable=self.is_dark_mode_var,
             style="Theme.TCheckbutton"
         )
-        self.toggle_theme_button.grid(row=0, column=3, padx=10, pady=5)
+        self.toggle_theme_button.grid(row=0, column=4, padx=10, pady=5)
 
 
 
@@ -478,6 +491,12 @@ class OptionAnalyzerApp:
             self.strategy_testers.remove(tester_instance)
         if self.strategy_tester_instance == tester_instance: 
             self.strategy_tester_instance = None
+
+    def launch_news_sentiment_analyzer(self):
+        window = NewsSentimentAnalyzerWindow(self.root, theme=self.current_theme)
+        self.child_windows.append(window.win)
+        self.apply_theme_to_window(window.win)
+
 
 
 
