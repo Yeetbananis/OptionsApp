@@ -7,8 +7,10 @@ import time # For small delay in animation
 import traceback # Import traceback for detailed error logging
 import pandas as pd
 import sys
+import os # Import os for path operations
 import logging # For error logging
 import time # Make sure time is imported 
+import subprocess # For launching external processes
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -27,7 +29,11 @@ except ImportError:
     NewsSentimentAnalyzerWindow = None
     print("Warning: NewsSentimentAnalyzer.py not found.")
 
-
+try:
+    from Chatbot import FinancialChatbotApp as ChatBot
+except ImportError:
+    ChatBot = None
+    print("Warning: ChatBot.py not found.")
 
 def configure_global_styles(theme: str):
     """
@@ -327,6 +333,11 @@ class OptionAnalyzerApp:
                                         command=self.launch_news_sentiment_analyzer, width=25)
         news_sentiment_button.grid(row=0, column=3, padx=10, pady=5)
 
+        #Chatbot
+        self.chatbot_button = ttk.Button(button_frame, text="💬 Financial Chatbot"
+                                         , command=self.launch_chatbot, width=25)
+        self.chatbot_button.grid(row=0, column=4, padx=10, pady=5)
+
 
         # 🌙 Dark‑mode toggle --------------------------------------------------
         self.is_dark_mode_var = tk.BooleanVar(value=(self.current_theme == 'dark'))
@@ -337,7 +348,7 @@ class OptionAnalyzerApp:
             variable=self.is_dark_mode_var,
             style="Theme.TCheckbutton"
         )
-        self.toggle_theme_button.grid(row=0, column=4, padx=10, pady=5)
+        self.toggle_theme_button.grid(row=0, column=5, padx=10, pady=5)
 
 
 
@@ -498,11 +509,58 @@ class OptionAnalyzerApp:
         self.apply_theme_to_window(window.win)
 
 
+    def _get_python_executable(self):
+        """
+        Finds the correct Python executable, prioritizing the one used to run the app.
+        This is important for when the app is bundled into an executable.
+        """
+        if getattr(sys, 'frozen', False):
+            # The application is frozen
+            return sys.executable
+        return sys.executable # In a normal environment, this is python.exe or python
 
+    def launch_chatbot(self):
+        """
+        Launches the Financial Chatbot in a separate, non-blocking process
+        to prevent any GUI conflicts.
+        """
+        if ChatBot is None:
+            messagebox.showerror("Unavailable", "Chatbot module not found.", parent=self.root)
+            return
 
+        try:
+            # --- Robust Path Calculation ---
+            # Get the directory where the current script (OptionsApp.py) is located.
+            # os.path.abspath(__file__) gets the full path to this script.
+            # os.path.dirname() gets the directory that contains the script.
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            
+            # Join this directory with the name of the chatbot script.
+            # os.path.join is the correct way to build paths that work on all operating systems.
+            chatbot_script_path = os.path.join(current_dir, "Chatbot.py")
+            # --------------------------------
 
+            if not os.path.exists(chatbot_script_path):
+                messagebox.showerror("File Not Found", f"Could not find the chatbot script at:\n{chatbot_script_path}", parent=self.root)
+                return
 
+            # Get the correct python executable
+            python_executable = self._get_python_executable()
+            
+            # Pass the current theme as a command-line argument
+            theme_arg = self.current_theme
 
+            # Use Popen to launch the script in a new process.
+            # This is non-blocking, so OptionsApp remains fully responsive.
+            # We store the process object in case we want to manage it later.
+            self._chatbot_proc = subprocess.Popen([python_executable, chatbot_script_path, theme_arg])
+
+        except Exception as exc:
+            messagebox.showerror("Chatbot Error", f"Could not start the Fin-Bot process:\n{exc}",
+                                 parent=self.root)
+            import traceback
+            traceback.print_exc()
+            
     def open_input_window(self):
         """Opens a Toplevel window for user inputs."""
 
@@ -1290,9 +1348,6 @@ class OptionAnalyzerApp:
 
 
 
-
-
-
     def launch_strategy_builder(self):
         # import here to avoid circular import
         from strategy_builder import StrategyBuilderWindow
@@ -1308,6 +1363,10 @@ class OptionAnalyzerApp:
     def _close_window(self):
         try:
             self.root.destroy()
+            # kill chatbot process if it is still alive
+            if hasattr(self, "_chatbot_proc") and self._chatbot_proc.poll() is None:
+                self._chatbot_proc.terminate()
+
         except Exception as e:
             print(f"Error closing window: {e}")
 

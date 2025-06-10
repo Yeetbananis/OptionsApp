@@ -18,6 +18,8 @@ class StockEventTracker:
         self.alpha_api_key = alpha_api_key  # Alpha Vantage API key
         self.finnhub_api_key = finnhub_api_key      # Financial Modeling Prep API key
         self.vader = SentimentIntensityAnalyzer()
+        self.last_earnings_source = None  # track if earnings date is from Nasdaq or Finnhub
+
 
     def fetch_upcoming_events(self, ticker, earnings_date=None):
         """
@@ -180,12 +182,15 @@ class StockEventTracker:
         if nasdaq_date:
             if finnhub_date == nasdaq_date:
                 final_date = finnhub_date
+                self.last_earnings_source = "nasdaq"
                 print(f"[INFO] Earnings date confirmed by both sources: {final_date}")
             else:
                 final_date = nasdaq_date
+                self.last_earnings_source = "nasdaq"
                 print(f"[INFO] Nasdaq earnings date used (differs from Finnhub): {final_date}")
         elif finnhub_date:
             final_date = finnhub_date
+            self.last_earnings_source = "finnhub"
             print(f"[INFO] Earnings date from Finnhub used: {final_date}")
         else:
             print(f"[WARN] No earnings date found for {ticker} from either source.")
