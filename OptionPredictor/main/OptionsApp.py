@@ -15,6 +15,13 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.lines import Line2D # Needed for Line2D used in educational mode
+import matplotlib.dates as mdates  # Import matplotlib dates module for date formatting
+import json, pathlib
+import webbrowser  # Add import for opening URLs
+import threading, webview, textwrap, time
+# Using ttk from tkinter import ttk instead of ttkbootstrap
+from functools import partial
+
 from llm_helper import LLMHelper
 from StockChartWindow import StockChartWindow
 try:
@@ -221,9 +228,513 @@ class Tooltip:
         if self.tipwindow:
             self.tipwindow.destroy()
             self.tipwindow = None
+class CandlestickChartPane(ttk.Frame):
+    """
+    Right-hand pane: candlestick chart + timeframe buttons (1W, 1M, 1Y).
+    """
+    # --- FIX 1: Imports moved here for efficiency ---
+    import io, zipfile, requests
+    import pandas as pd
+    import yfinance as yf
+    import mplfinance as mpf
+    # ----------------------------------------------------
+
+    def __init__(self, parent, theme, ticker="SPY"):
+        super().__init__(parent, padding=0)
+        self.theme = theme
+        self.ticker = ticker
+        self._last_period = "30d"
+        self.figure, self.ax = plt.subplots(figsize=(4, 3), dpi=100)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
+        self.canvas.get_tk_widget().grid(row=0, column=0, columnspan=3, sticky="nsew")
+        ttk.Button(self, text="1 W", command=lambda: self.draw("7d")).grid(row=1, column=0, sticky="ew")
+        ttk.Button(self, text="1 M", command=lambda: self.draw("30d")).grid(row=1, column=1, sticky="ew")
+        ttk.Button(self, text="1 Y", command=lambda: self.draw("365d")).grid(row=1, column=2, sticky="ew")
+        self.columnconfigure((0, 1, 2), weight=1)
+        self.rowconfigure(0, weight=1)
+        self.draw("365d")  # default view
+
+    def set_ticker(self, ticker: str):
+        """Switch the chart to a new ticker and redraw the same period."""
+        self.ticker = ticker
+        self.draw(self._last_period)
+
+    def draw(self, period: str):
+        """
+        Redraw the candlestick chart for the chosen period.
+        - primary  source: yfinance
+        - fallback source: Stooq CSV
+        """
+        self.ax.clear()
+        self._last_period = period
+
+        # --- Theming ---
+        bg = "#0f0f0f" if self.theme == "dark" else "#ffffff"
+        fg = "#ffffff" if self.theme == "dark" else "#000000"
+        self.figure.patch.set_facecolor(bg)
+        self.ax.set_facecolor(bg)
+        self.ax.tick_params(axis='x', colors=fg)
+        self.ax.tick_params(axis='y', colors=fg)
+        for spine in self.ax.spines.values():
+            spine.set_color(fg)
+
+        # --- Data Fetching ---
+        def _from_yf():
+            try:
+                df = self.yf.download(self.ticker,
+                                 period=period,
+                                 interval="1d",
+                                 auto_adjust=False,
+                                 progress=False)
+                return df if isinstance(df, self.pd.DataFrame) and not df.empty else None
+            except:
+                return None
+
+        def _from_stooq():
+            try:
+                url = f"https://stooq.com/q/d/l/?s={self.ticker.lower()}.us&i=d"
+                raw = self.requests.get(url, timeout=15).content
+                if raw[:2] == b"PK":
+                    with self.zipfile.ZipFile(self.io.BytesIO(raw)) as zf:
+                        raw = zf.read(zf.namelist()[0])
+                df = (self.pd.read_csv(self.io.BytesIO(raw), parse_dates=["Date"])
+                        .set_index("Date").sort_index())
+                if   period == "7d":   df = df.iloc[-7:]
+                elif period == "30d":  df = df.iloc[-30:]
+                elif period == "365d": df = df.iloc[-252:]
+                return df
+            except:
+                return None
+
+        data = _from_yf()
+        if data is None or data.empty:
+            data = _from_stooq()
+
+        if data is None or data.empty:
+            self.ax.text(0.5, 0.5, "Chart unavailable", ha="center", va="center")
+        else:
+            if isinstance(data.columns, self.pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+
+            data.columns = [str(col).lower() for col in data.columns]
+            
+            ohlc_cols = ["open", "high", "low", "close"]
+            for col in ohlc_cols:
+                if col in data.columns:
+                    data[col] = self.pd.to_numeric(data[col], errors="coerce")
+            
+            subset = [c for c in ohlc_cols if c in data.columns]
+            if subset:
+                data.dropna(subset=subset, inplace=True)
+
+            # --- FIX 2: Check if data is empty AFTER cleaning ---
+            if data.empty:
+                self.ax.text(0.5, 0.5, "Chart unavailable\n(No valid data)", ha="center", va="center")
+            else:
+                data.index.name = "Date"
+                self.mpf.plot(
+                    data,
+                    type="candle", ax=self.ax, volume=False,
+                    style="nightclouds" if self.theme == "dark" else "charles",
+                    datetime_format="%b %d" if period in ("7d", "30d") else "%b"
+                )
+                self.ax.title.set_color(fg)
+                self.ax.yaxis.label.set_color(fg)
+
+        # --- Final adjustments ---
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+
+    def set_theme(self, theme: str):
+        """
+        Switch between 'light' and 'dark' palettes and re-draw
+        using the last-selected period.
+        """
+        if theme not in ("light", "dark"):
+            return
+        if theme != self.theme:
+            self.theme = theme
+            self.draw(self._last_period)
 
 
 
+class SettingsManager:
+    """Tiny JSON persistence for user prefs across app restarts."""
+    _FILE = pathlib.Path.home() / ".option_analyzer_settings.json"
+
+    _DEFAULTS = {
+        "user_name": "Trader",
+        "theme": "light",
+        "timezone": "America/Vancouver",
+        "default_ticker": "SPY",            
+        "watchlist": "SPY|^VIX"             
+    }
+
+
+
+    def __init__(self):
+        self.data = self._DEFAULTS.copy()
+        if self._FILE.exists():
+            try:
+                self.data.update(json.loads(self._FILE.read_text()))
+            except Exception:
+                pass  # Corrupt settings ➜ fallback to defaults
+
+    def save(self):
+        try:
+            self._FILE.write_text(json.dumps(self.data))
+        except Exception:
+            print("⚠ Could not write settings file.")
+
+    # convenient shortcuts
+    def get(self, k, default=None):
+        return self.data.get(k, default)
+
+    def set(self, k, v):
+        self.data[k] = v
+        self.save()
+
+
+
+
+class HomeDataManager:
+    """Centralised, lightweight fetchers for the dashboard."""
+    def __init__(self):
+        from datetime import datetime
+        self.now = datetime.now
+
+    def get_latest_price(self, ticker: str) -> float | None:
+        """
+        Return the most-recent close for any ticker via yfinance (1d).
+        """
+        try:
+            import yfinance as yf
+            h = yf.Ticker(ticker).history(period="1d", auto_adjust=False)
+            return float(h["Close"].iloc[-1])
+        except Exception:
+            return None
+
+    def get_index_prices(self):
+        """
+        Return the latest SPY & VIX close prices as plain floats.
+        Falls back to (None, None) if yfinance or the network is unavailable.
+        """
+        try:
+            import yfinance as yf
+
+            # Using Ticker().history keeps the columns simple (no MultiIndex)
+            spy_price = yf.Ticker("SPY").history(period="1d")["Close"].iloc[-1]
+            vix_price = yf.Ticker("^VIX").history(period="1d")["Close"].iloc[-1]
+
+            return float(spy_price), float(vix_price)
+        except Exception:
+            return None, None
+
+
+    # ── News  ────────────────────────────────────────────────────────────
+    def get_news_headlines(self, n: int = 20) -> tuple[list[tuple[str, float | None, str]], float | None]:
+        """
+        Return (headlines_list, overall_score)
+
+        headlines_list : up to *n* entries of (headline, sentiment, url)
+        overall_score  : average sentiment of the last 50 stories (or None)
+
+        Sentiment scores are –1 … +1 (positive = bullish).
+        """
+        import datetime as dt, time, math, webbrowser
+
+        # ── nested scorer (prefer your in-house analyser) ────────────────
+        def _score(txt: str) -> float | None:
+            try:
+                from NewsSentimentAnalyzer import score_text
+                return float(score_text(txt))
+            except Exception:
+                try:
+                    from nltk.sentiment import SentimentIntensityAnalyzer
+                    return SentimentIntensityAnalyzer().polarity_scores(txt)["compound"]
+                except Exception:
+                    return None
+
+        cutoff_ts = dt.datetime.now().timestamp() - 86_400         # last 24 h
+        rows: list[tuple[str, float | None, str]] = []             # table rows
+        scores: list[float] = []                                   # for overall
+
+        def _append(title: str, link: str):
+            s = _score(title)
+            rows.append((title, s, link))
+            if s is not None:
+                scores.append(s)
+
+        # ── news feed via yfinance first ────────────────────────────────
+        try:
+            import yfinance as yf
+            for item in (yf.Ticker("SPY").news or []):
+                ts = item.get("providerPublishTime", 0)
+                if ts >= cutoff_ts:
+                    _append(item["title"], item.get("link", ""))
+        except Exception:
+            pass
+
+        # ── fallback RSS if needed ──────────────────────────────────────
+        if not rows:
+            try:
+                import feedparser
+                rss = feedparser.parse(
+                    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY&region=US&lang=en-US"
+                )
+                for entry in rss.entries:
+                    ts = time.mktime(getattr(entry, "published_parsed", time.gmtime(0)))
+                    if ts >= cutoff_ts:
+                        _append(entry.title, entry.link)
+            except Exception:
+                pass
+
+                # newest first
+        rows.sort(key=lambda x: x[0])     # already time-ordered
+        if len(rows) < n:
+            # ----- TOP-UP with older stories until we reach *n* --------------  NEW
+            leftovers = []
+            try:
+                import yfinance as yf
+                leftovers = yf.Ticker("SPY").news or []
+            except Exception:
+                pass
+            try:
+                import feedparser, time as _t
+                rss2 = feedparser.parse(
+                    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY&region=US&lang=en-US"
+                ).entries
+                leftovers += rss2
+            except Exception:
+                pass
+
+            # iterate oldest→newest so we don't duplicate
+            for item in sorted(leftovers, key=lambda d: d.get("providerPublishTime", 0)):
+                title = item.get("title") or getattr(item, "title", "")
+                link  = item.get("link")  or getattr(item, "link", "")
+                if any(r[0] == title for r in rows):      # already added
+                    continue
+                rows.append((title, _score(title), link))
+                if len(rows) >= n:
+                    break
+        # ---------------------------------------------------------------------
+
+        top_rows = rows[:n]
+        overall  = sum(scores) / len(scores) if scores else None
+        return top_rows, overall
+
+
+
+class HomeDashboard(ttk.Frame):
+    """Visual dashboard that sits inside OptionAnalyzerApp.main_frame."""
+    def __init__(self, parent, controller):
+        super().__init__(parent, padding="10 10 10 10")
+        self.controller = controller
+        self.data_mgr   = controller.data_mgr
+        self._build_ui()
+        self._refresh()          # initial fill
+        self._auto_refresh()     # 30-second loop
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        # 1. Header
+        self.header_lbl = ttk.Label(self, text="", style="Title.TLabel")
+        self.header_lbl.grid(row=0, column=0, sticky="w")
+
+        self.time_lbl   = ttk.Label(self, text="")
+        self.time_lbl.grid(row=0, column=1, sticky="e")
+        self._start_clock()
+
+
+        # 2. Market module
+        box = ttk.LabelFrame(self, text="Market Overview")
+        box.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
+        self.index_lbl     = ttk.Label(box, text="Indices:")
+        self.index_lbl.pack(anchor="w")
+
+        # ── Watchlist display ─────────────────────────────────────────────
+        self.watchlist_lbl = ttk.Label(box, text="Watchlist:")
+        self.watchlist_lbl.pack(anchor="w")
+
+        # 3. News + Chart container (row 2, two columns 50 / 50)
+        row2 = ttk.Frame(self)
+        row2.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
+        row2.columnconfigure(0, weight=1, uniform="col")   # news
+        row2.columnconfigure(1, weight=1, uniform="col")   # chart
+        row2.rowconfigure(0, weight=1)
+
+
+        # --- 3a. News box (left) ---
+        news_box = ttk.LabelFrame(row2, text="Market News (last 24 h)")
+        news_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        news_box.columnconfigure(0, weight=1)
+
+        self.overall_news_lbl = ttk.Label(news_box, text="Overall sentiment: …")
+        self.overall_news_lbl.pack(anchor="w", padx=6, pady=(2, 0))
+
+        cols = ("headline", "sentiment")
+        self.news_tv = ttk.Treeview(news_box, columns=cols, show="headings", height=20)
+        self.news_tv.heading("headline",  text="Headline")
+        self.news_tv.heading("sentiment", text="Score")
+        self.news_tv.column("headline", width=400, anchor="w")
+        self.news_tv.column("sentiment", width=60,  anchor="e")
+
+        vsb = ttk.Scrollbar(news_box, orient="vertical", command=self.news_tv.yview)
+        self.news_tv.configure(yscrollcommand=vsb.set)
+        self.news_tv.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.news_tv.bind("<Double-1>", self._open_selected_article)
+
+        # --- 3b. Candlestick chart (right) -----------------------------------
+        chart_box = ttk.LabelFrame(row2, text=f"{self.controller.settings.get('default_ticker', 'SPY')} Chart")
+        chart_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        chart_box.columnconfigure(0, weight=1); chart_box.rowconfigure(0, weight=1)
+
+        default_tkr = self.controller.settings.get("default_ticker", "SPY")
+        self.chart_pane = CandlestickChartPane(
+            chart_box,
+            theme="dark" if self.controller.current_theme == "dark" else "light",
+            ticker=default_tkr
+        )
+
+        self.chart_pane.grid(row=0, column=0, sticky="nsew")
+
+
+
+        # 4. Quick Actions
+        qa = ttk.Frame(self)
+        qa.grid(row=3, column=0, columnspan=2, pady=15)
+        btn = lambda txt, cmd: ttk.Button(qa, text=txt, command=cmd, width=20)
+        btn("📊 New Analysis",         self.controller.open_input_window).grid(row=0, column=0, padx=5, pady=3)
+        btn("📐 Strategy Builder",      self.controller.launch_strategy_builder).grid(row=0, column=1, padx=5, pady=3)
+        btn("🧪 Strategy Tester",       self.controller.launch_strategy_tester).grid(row=0, column=2, padx=5, pady=3)
+        btn("📰 Sentiment Analyzer",    self.controller.launch_news_sentiment_analyzer).grid(row=0, column=3, padx=5, pady=3)
+        btn("💬 Chatbot",               self.controller.launch_chatbot).grid(row=0, column=4, padx=5, pady=3)
+
+        # 5. Settings + Reset
+        bottom = ttk.Frame(self)
+        bottom.grid(row=4, column=0, columnspan=2, pady=(10,0), sticky="ew")
+        ttk.Button(bottom, text="⚙ Settings", width=12,
+                   command=self.controller.open_settings_window).pack(side="left")
+
+        # layout stretch
+        self.columnconfigure(0, weight=1); self.columnconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
+
+        news_box.rowconfigure(0, weight=1)
+
+    def _start_clock(self):
+        """Kick off the per-second clock."""
+        self._update_time()
+
+    def _update_time(self):
+        """Update self.time_lbl with seconds in the chosen timezone."""
+        from datetime import datetime
+        try:
+            # stdlib zoneinfo, Python 3.9+
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(self.controller.settings.get("timezone"))
+            now = datetime.now(tz)
+        except Exception:
+            now = datetime.now()   # fallback to local
+        self.time_lbl.config(text=now.strftime("%b %d %Y  %H:%M:%S"))
+        # schedule next update in 1 second
+        self.after(1000, self._update_time)
+
+
+
+    def _open_selected_article(self, event=None):
+        sel = self.news_tv.selection()
+        if not sel:
+            return
+        url = self.news_tv.item(sel[0], "values")[2]   # hidden third value
+        if url:
+            webbrowser.open(url)
+
+
+
+    # ---------- Data refresh ----------
+    def _refresh(self):
+        from datetime import datetime
+        # Header
+        self.header_lbl.config(text=f"Welcome back, {self.controller.user_name}!")
+        self.time_lbl.config(text=datetime.now().strftime("%b %d %Y  %H:%M"))
+
+        # Indices
+        spy, vix = self.data_mgr.get_index_prices()
+        if spy is not None:
+            self.index_lbl.config(text=f"SPY {spy:,.2f}   |   VIX {vix:,.2f}")
+        else:
+            self.index_lbl.config(text="Indices: N/A")
+
+        # ── Refresh watchlist prices ───────────────────────────────────────
+        wl = self.controller.settings.get("watchlist", "")
+        tickers = [t.strip() for t in wl.split("|") if t.strip()]
+
+        good = []
+        parts = []
+        # validate each ticker exactly once
+        for t in tickers:
+            price = self.data_mgr.get_latest_price(t)
+            if price is None:
+                messagebox.showerror(
+                    "Invalid or Delisted Ticker",
+                    f"Ticker “{t}” is invalid or has been delisted and has been removed."
+                )
+            else:
+                good.append(t)
+                parts.append(f"{t} {price:,.2f}")
+
+        # if any were dropped, immediately persist a cleaned watchlist
+        if set(good) != set(tickers):
+            new_wl = "|".join(good)
+            self.controller.settings.set("watchlist", new_wl)
+
+        # finally update the label
+        self.watchlist_lbl.config(text="Watchlist: " + " | ".join(parts))
+
+
+
+
+        # News table ----------------------------------------------------------------
+        rows, overall = self.data_mgr.get_news_headlines(20)
+
+        # headline label
+        if overall is None:
+            txt, color = "Overall sentiment: N/A", "gray"
+        elif overall > 0.25:
+            txt, color = f"Overall sentiment: Bullish ({overall:+.2f})", "green"
+        elif overall < -0.25:
+            txt, color = f"Overall sentiment: Bearish ({overall:+.2f})", "red"
+        else:
+            txt, color = f"Overall sentiment: Neutral ({overall:+.2f})", "orange"
+        self.overall_news_lbl.config(text=txt, foreground=color)
+
+        # rebuild table
+        self.news_tv.delete(*self.news_tv.get_children())
+        for title, score, url in rows:
+            tag = ""
+            if score is not None:
+                if score > 0.25:   tag = "pos"
+                elif score < -0.25: tag = "neg"
+                else:               tag = "neu"
+
+            self.news_tv.insert(
+                "", "end",
+                values=(title, f"{score:+.2f}" if score is not None else "N/A", url),
+                tags=(tag,)
+            )
+
+        # tag colours
+        self.news_tv.tag_configure("pos", foreground="green")
+        self.news_tv.tag_configure("neg", foreground="red")
+        self.news_tv.tag_configure("neu", foreground="orange")
+
+
+    def _auto_refresh(self):
+        self._refresh()
+        self.after(30_000, self._auto_refresh)  # 30 s
 
 
 
@@ -249,14 +760,42 @@ except ImportError:
 
 class OptionAnalyzerApp:
     def __init__(self, root):
+        # -------------------------------------------------
+        # 1️⃣  PERSISTENT SETTINGS (must come first!)
+        self.settings      = SettingsManager()         # NEW → now exists
+        self.current_theme = self.settings.get("theme", "light")
+        # a BooleanVar so other code can read/update dark-mode setting
+        self.is_dark_mode_var = tk.BooleanVar(value=(self.current_theme == "dark"))
+        # -------------------------------------------------
 
-        self.current_theme = 'light'  # or 'dark'
+        self.theme_callbacks = []  # Store callbacks for theme updates
+        self.strategy_tester_instance = None
+        self.root = root
+        self.root.title("Option Analyzer")
+        self.root.geometry("900x800")
+
+        # handy access later
+        self.data_mgr  = HomeDataManager()
+        self.user_name = self.settings.get("user_name", "Trader")
+
+        # Apply base ttk styles once at start-up
+        configure_global_styles(self.current_theme)
+
+
+
+        self.current_theme = self.settings.get("theme", "light") 
         self.theme_callbacks = []  # Store callbacks for theme updates
         self.strategy_tester_instance = None
         self.root = root
         self.root.title("Option Analyzer")
         self.root.geometry("900x800") # Give main window a bit more space
         self.llm = LLMHelper(model="deepseek-q4ks")
+
+        self.settings    = SettingsManager()      # persistent prefs
+        self.data_mgr    = HomeDataManager()      # live data fetcher
+        self.user_name   = self.settings.get("user_name", "Trader")
+        # --------------------------------
+
 
         # keep track of all child windows for theme propagation
         self.child_windows: list = []
@@ -274,6 +813,7 @@ class OptionAnalyzerApp:
         except tk.TclError:
             print(" ttk themes not fully available, using default.")
 
+
         style.configure("TButton", padding=6, relief="flat", font=('Helvetica', 10))
         style.map("TButton", background=[('active', '#e0e0e0')]) # Subtle hover effect
         style.configure("TLabel", padding=3, font=('Helvetica', 10))
@@ -284,91 +824,29 @@ class OptionAnalyzerApp:
 
         
 
-        # --- Main Layout ---
-        self.main_frame = ttk.Frame(root, padding="20 20 20 20", style="TFrame")
+        # --- Main Layout (Dashboard) ---
+        self.main_frame = ttk.Frame(root, padding="0 0 0 0", style="TFrame")
         self.main_frame.pack(expand=True, fill=tk.BOTH)
-        # Configure row/column weights for resizing behavior
-        self.main_frame.rowconfigure(0, weight=0) # Title row
-        self.main_frame.rowconfigure(1, weight=0) # Button row
-        self.main_frame.rowconfigure(2, weight=1) # Results buttons frame (allow expansion)
-        self.main_frame.rowconfigure(3, weight=0) # Status label row
-        self.main_frame.columnconfigure(0, weight=1)
+
+        self.dashboard = HomeDashboard(self.main_frame, self)
+        self.dashboard.pack(expand=True, fill=tk.BOTH)
+
+        # Status bar (must exist before animate_loading can update it)
+        self.status_label = ttk.Label(self.root, text="Ready.", style="Status.TLabel", anchor="center")
+        self.status_label.pack(fill="x", pady=4)
 
 
-        self.title_label = ttk.Label(self.main_frame, text="Option Analysis Tool", style="Title.TLabel", anchor="center")
-        self.title_label.grid(row=0, column=0, pady=(10, 30), sticky="ew")
-
-        topbar = ttk.Frame(self.root, padding=(0, 5))
-        topbar.place(relx=1.0, y=5, anchor="ne")  # Top right corner
-
-        fullscreen_btn = ttk.Button(topbar, text="⛶", width=3, command=self._toggle_fullscreen)
-        fullscreen_btn.pack(side=tk.RIGHT)
-
-        close_btn = ttk.Button(topbar, text="✖", width=3, command=self._close_window)
-        close_btn.pack(side=tk.RIGHT, padx=(0, 5))
-
-
-        # Create a neat button row with grid layout
-        button_frame = ttk.Frame(self.main_frame)
-        button_frame.grid(row=1, column=0, pady=10)
-
-        # --- Button row -----------------------------------------------------------
-        # Start Analysis
-        self.start_button = ttk.Button(button_frame, text="📊 Start New Analysis",
-                                    command=self.open_input_window, width=25)
-        self.start_button.grid(row=0, column=0, padx=10, pady=5)
-
-        # Strategy Builder
-        self.strategy_builder_button = ttk.Button(button_frame, text="📐 Strategy Builder",
-                                                command=self.launch_strategy_builder, width=25)
-        self.strategy_builder_button.grid(row=0, column=1, padx=10, pady=5)
-
-        # ── Strategy Tester *before* dark‑mode toggle
-        self.strategy_tester_button = ttk.Button(button_frame, text="🧪 Strategy Tester",
-                                                command=self.launch_strategy_tester, width=25)
-        self.strategy_tester_button.grid(row=0, column=2, padx=10, pady=5)
-
-        # News Sentiment Analyzer
-        news_sentiment_button = ttk.Button(button_frame, text="📰 News Sentiment Analyzer",
-                                        command=self.launch_news_sentiment_analyzer, width=25)
-        news_sentiment_button.grid(row=0, column=3, padx=10, pady=5)
-
-        #Chatbot
-        self.chatbot_button = ttk.Button(button_frame, text="💬 Financial Chatbot"
-                                         , command=self.launch_chatbot, width=25)
-        self.chatbot_button.grid(row=0, column=4, padx=10, pady=5)
-
-
-        # 🌙 Dark‑mode toggle --------------------------------------------------
-        self.is_dark_mode_var = tk.BooleanVar(value=(self.current_theme == 'dark'))
-        self.toggle_theme_button = ttk.Checkbutton(
-            button_frame,
-            text="🌙 Dark Mode",
-            command=self.toggle_theme,
-            variable=self.is_dark_mode_var,
-            style="Theme.TCheckbutton"
-        )
-        self.toggle_theme_button.grid(row=0, column=5, padx=10, pady=5)
-
-
-
-
-        # Frame to hold buttons for displaying results
-        self.results_buttons_frame = ttk.Frame(self.main_frame, style="TFrame")
-        self.results_buttons_frame.grid(row=2, column=0, pady=10, sticky="nsew")
-        # Configure grid inside results frame
-        self.results_buttons_frame.columnconfigure(0, weight=1)
-        self.results_buttons_frame.columnconfigure(1, weight=1)
-
-        self.status_label = ttk.Label(self.main_frame, text="Ready.", style="Status.TLabel", anchor="center")
-        self.status_label.grid(row=3, column=0, pady=10, sticky="ew")
-
-        # --- State Variables ---
-        self.input_data = {} # To store results from analysis
-        self.is_loading = False # Flag for loading animation
-        self.strategy_testers = [] # Keep track of StrategyTester windows
-        self.animation_chars = ['|', '/', '-', '\\'] # Animation characters
+        # animation state
+        self.is_loading     = False
+        self.animation_chars = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"]
         self.animation_step = 0
+        # ─────────────────────────────────────────────────────
+
+        # --- other State Variables ---
+        self.input_data = {} # To store results from analysis
+        self.strategy_testers = [] # Keep track of StrategyTester windows
+
+
 
         
         # expose our theming helper on the root for children to call
@@ -452,20 +930,142 @@ class OptionAnalyzerApp:
 
     def animate_loading(self):
         """Cycles through animation characters in the status label."""
-        if not self.is_loading: # Stop animation if flag is false
+        if not self.is_loading:
             return
 
         char = self.animation_chars[self.animation_step % len(self.animation_chars)]
         self.set_status(f"Running analysis {char}", "orange")
         self.animation_step += 1
-        # Schedule the next animation frame
-        self.root.after(150, self.animate_loading) # Update ~6 times per second
+        self.root.after(150, self.animate_loading)  # ~6fps
 
 
-    def clear_results_buttons(self):
-        """Removes old result buttons."""
-        for widget in self.results_buttons_frame.winfo_children():
-            widget.destroy()
+    # ---------------- SETTINGS ----------------
+    def open_settings_window(self):
+        win = tk.Toplevel(self.root); win.title("Settings"); win.geometry("700x700")
+        self.apply_theme_to_window(win)
+        frm = ttk.Frame(win, padding=20); frm.pack(expand=True, fill="both")
+
+        # Name
+        ttk.Label(frm, text="Display Name:").grid(row=0, column=0, sticky="w", pady=6)
+        name_var = tk.StringVar(value=self.user_name)
+        ttk.Entry(frm, textvariable=name_var, width=22).grid(row=0, column=1, pady=6)
+
+        # Theme
+        ttk.Label(frm, text="Theme:").grid(row=1, column=0, sticky="w", pady=6)
+        theme_var = tk.StringVar(value=self.current_theme)
+        ttk.Radiobutton(frm, text="Light", variable=theme_var, value="light").grid(row=1, column=1, sticky="w")
+        ttk.Radiobutton(frm, text="Dark",  variable=theme_var, value="dark").grid(row=1, column=1, sticky="e")
+
+        def save_and_close():
+            self.user_name = name_var.get().strip() or "Trader"
+            self.settings.set("user_name", self.user_name)
+            if theme_var.get() != self.current_theme:
+                self.is_dark_mode_var.set(theme_var.get() == "dark")
+                self.toggle_theme()  # triggers apply & persistence
+            self.dashboard._refresh()  # update header
+            self.settings.set("timezone", tz_var.get())            # Persist new defaults
+            self.settings.set("default_ticker", ticker_var.get().strip() or "SPY")
+            # collect non-empty tickers from our chip vars
+            # new: validate each chip via get_latest_price
+            valid = []
+            for var in chips:
+                t = var.get().strip().upper()
+                if not t:
+                    continue
+                if self.data_mgr.get_latest_price(t) is None:
+                    messagebox.showerror(
+                        "Invalid or Delisted Ticker",
+                        f"Ticker “{t}” is invalid or has been delisted and won’t be added."
+                    )
+                else:
+                    valid.append(t)
+
+            self.settings.set("watchlist", "|".join(valid) if valid else "SPY|^VIX")
+
+
+
+            # Tell the dashboard to use the new ticker & redraw
+            new_tkr = self.settings.get("default_ticker")
+            self.dashboard.chart_pane.set_ticker(new_tkr)
+            self.dashboard.chart_pane.draw(self.dashboard.chart_pane._last_period)
+            # Also refresh watchlist display
+            self.dashboard._refresh()
+
+            win.destroy()
+
+        ttk.Button(frm, text="Save", command=save_and_close).grid(row=5, column=0, columnspan=2, pady=15)
+        win.bind("<Return>", lambda e: save_and_close())
+
+        # ── Timezone chooser ───────────────────────────────────────────────
+        ttk.Label(frm, text="Timezone:").grid(row=2, column=0, sticky="w", pady=6)
+        tz_list = [
+            "America/Vancouver", "America/New_York", "Europe/London",
+            "Asia/Tokyo", "Australia/Sydney", "Europe/Paris",
+            "Europe/Berlin", "Asia/Kolkata", "Asia/Shanghai",
+            "America/Sao_Paulo"
+        ]
+        tz_var = tk.StringVar(value=self.settings.get("timezone"))
+        ttk.Combobox(
+            frm, textvariable=tz_var, values=tz_list,
+            state="readonly", width=25
+        ).grid(row=2, column=1, pady=6)
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Default Chart Ticker ────────────────────────────────────────────
+        ttk.Label(frm, text="Default Chart Ticker:").grid(row=3, column=0, sticky="w", pady=6)
+        ticker_var = tk.StringVar(value=self.settings.get("default_ticker"))
+        ttk.Entry(frm, textvariable=ticker_var, width=25).grid(row=3, column=1, pady=6)
+
+
+        # ── Watchlist editor (individual boxes + “＋” button) ───────────────
+        ttk.Label(frm, text="Watchlist:").grid(row=4, column=0, sticky="nw", pady=6)
+        watchlist_frame = ttk.Frame(frm)
+        watchlist_frame.grid(row=4, column=1, sticky="w", pady=6)
+
+        # Helper: add one ticker chip
+        def add_watchlist_chip(ticker=""):
+            var = tk.StringVar(value=ticker)
+            ent = ttk.Entry(watchlist_frame, textvariable=var, width=8)
+            ent.pack(side="left", padx=(0, 4))
+            # “×” to remove
+            btn = ttk.Button(watchlist_frame, text="✕", width=2,
+                            command=lambda e=ent, b=None: (e.destroy(), btn.destroy()))
+            btn.pack(side="left", padx=(0, 8))
+            return var
+
+        # Pre-populate from settings
+        chips = []
+        initial = self.settings.get("watchlist", "").split("|")
+        for tkrs in filter(None, (t.strip() for t in initial)):
+            chips.append(add_watchlist_chip(tkrs))
+
+        # “＋” button to add new empty chip
+        add_btn = ttk.Button(watchlist_frame, text="＋", width=2,
+                            command=lambda: chips.append(add_watchlist_chip()))
+        add_btn.pack(side="left")
+
+        # Reset
+        ttk.Button(frm, text="⟳ Reset App", command=self.reset_app).grid(
+        row=6, column=0, columnspan=2, pady=(5, 0))
+
+
+
+        
+
+
+
+    # ---------------- RESET ----------------
+    def reset_app(self):
+        ok = messagebox.askyesno("Reset App", "This will clear saved settings and restart the application.\nContinue?", parent=self.root)
+        if not ok: return
+        # 1. Clear settings file
+        try:
+            SettingsManager._FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # 2. Relaunch self
+        python = self._get_python_executable()
+        os.execl(python, python, *sys.argv)
 
     def _toggle_fullscreen_input(self, window):
             is_full = window.attributes('-fullscreen')
@@ -580,14 +1180,11 @@ class OptionAnalyzerApp:
             messagebox.showwarning("Busy", "Analysis is already in progress.", parent=self.root)
             return
 
-        self.clear_results_buttons()
-        self.set_status("")
 
         input_win = tk.Toplevel(self.root)
         input_win.title("Input Parameters")
         input_win.geometry("760x900")
         input_win.transient(self.root)
-        input_win.grab_set()
 
         self.apply_theme_to_window(input_win)
 
@@ -723,6 +1320,7 @@ class OptionAnalyzerApp:
                 for key, entry in param_entries.items():
                     val = float(entry.get())
                     self.input_data["model_params"][key] = val
+
                 win.destroy()
 
             ttk.Button(win, text="Save", command=save_and_close).pack(pady=10)
@@ -837,14 +1435,17 @@ class OptionAnalyzerApp:
             # If inputs are valid, close input window and start analysis
             window.destroy()
 
-            # --- Start Loading Animation ---
+            # 3) Start the spinner *after* the window is gone
             self.is_loading = True
             self.animation_step = 0
             self.animate_loading()
-            # --- ----------------------- ---
 
-            # Start analysis in a separate thread
-            analysis_thread = threading.Thread(target=self.run_analysis_thread, args=(input_values,), daemon=True)
+            # 4) Spawn the analysis thread
+            analysis_thread = threading.Thread(
+                target=self.run_analysis_thread,
+                args=(input_values,),
+                daemon=True
+            )
             analysis_thread.start()
 
         except ValueError as e:
@@ -983,9 +1584,8 @@ class OptionAnalyzerApp:
         """Updates GUI after successful analysis."""
         self.is_loading = False # Stop animation flag
         time.sleep(0.1) # Small delay to ensure last animation frame clears
-        self.set_status("Analysis complete. View results below.", color="green")
-        # self.display_results_summary_console() # Optionally print summary to console
-        self.create_results_buttons()
+        self.set_status("Analysis complete. Launching results...", color="green")
+        self.launch_analysis_results_window()    # NEW → pop up results window
 
     # ******** FIX: Moved analysis_failed inside the class ********
     def analysis_failed(self, error):
@@ -994,7 +1594,6 @@ class OptionAnalyzerApp:
         # Short delay might prevent status update race condition if analysis fails instantly
         time.sleep(0.1)
         self.set_status("Analysis failed!", color="red")
-        self.clear_results_buttons()
 
         # Log the full traceback to the console for debugging
         traceback_str = traceback.format_exception(type(error), error, error.__traceback__)
@@ -1007,6 +1606,48 @@ class OptionAnalyzerApp:
                                 f"Failed to complete analysis:\n{error}\n\n(Check console for detailed traceback)",
                                 parent=self.root)
     # ******** END FIX ********
+
+    def launch_analysis_results_window(self):
+        """
+        Pop up a Toplevel to house all the analysis-result buttons
+        (summary, paths, heatmap, etc.), just like strat-tester does.
+        """
+        # 1. Create window
+        win = tk.Toplevel(self.root)
+        win.title("Analysis Results")
+        win.geometry("600x400")
+        win.transient(self.root)
+        self.apply_theme_to_window(win)
+
+        # 2. Container frame
+        frm = ttk.Frame(win, padding=20)
+        frm.pack(expand=True, fill=tk.BOTH)
+
+        # 3. Button configs (same as create_results_buttons)
+        buttons = [
+            ("Show Summary Info",        self.show_summary_popup),
+            ("Show Simulation Paths",    self.show_simulation_plot),
+            ("Show Trigger Distribution",self.show_distribution_plot),
+            ("Show Profit Heatmap ($)",  self.show_heatmap_plot),
+            ("Show 3D Vol Surface",      self.show_3d_volatility_plot),
+            ("📉 Analyze Greeks",        self.show_greek_analysis),
+            ("📈 View Stock Chart",      self.show_stock_chart_window),
+            ("Explain Position",         self.show_llm_explanation)
+        ]
+
+        # 4. Grid them in two columns
+        for idx, (label, cmd) in enumerate(buttons):
+            btn = ttk.Button(frm, text=label, command=cmd)
+            btn.grid(row=idx // 2, column=idx % 2, padx=10, pady=8, sticky="ew")
+
+        # 5. Close button
+        close = ttk.Button(frm, text="✖ Close Results", command=win.destroy)
+        close.grid(row=(len(buttons)+1)//2, column=0, columnspan=2, pady=(15,0))
+
+        # 6. Make columns stretch
+        frm.columnconfigure(0, weight=1)
+        frm.columnconfigure(1, weight=1)
+
 
     def display_results_summary_console(self):
          """Prints a simple text summary to the console (optional)."""
@@ -1032,38 +1673,6 @@ class OptionAnalyzerApp:
              f"--------------------------------------\n"
          )
          print(summary)
-
-
-    def create_results_buttons(self):
-        """Creates buttons to display plots and results."""
-        self.clear_results_buttons() # Ensure frame is empty
-
-        # Button configurations: (Text, command)
-        buttons_config = [
-            ("Show Summary Info", self.show_summary_popup),
-            ("Show Simulation Paths", self.show_simulation_plot),
-            ("Show Trigger Distribution", self.show_distribution_plot),
-            ("Show Profit Heatmap ($/%)", self.show_heatmap_plot),
-            ("Show 3D Value Surface", self.show_3d_volatility_plot),
-            ("📉 Analyze Greeks", self.show_greek_analysis),
-            ("📈 View Stock Chart", self.show_stock_chart_window),
-            ("Explain my position", self.show_llm_explanation)
-        ]
-
-        # Arrange buttons in a grid within the results frame
-        num_cols = 2
-        for i, (text, command) in enumerate(buttons_config):
-            button = ttk.Button(self.results_buttons_frame, text=text, command=command)
-            button.grid(row=i // num_cols, column=i % num_cols, padx=5, pady=5, sticky="ew")
-
-        # Return to Main Menu button
-        return_btn = ttk.Button(self.results_buttons_frame, text="⬅ Return to Main Menu", command=self.clear_results_buttons)
-        return_btn.grid(row=(len(buttons_config) // 2) + 1, column=0, columnspan=2, pady=(15, 0), sticky="ew")
-
-        # Add a return to main menu button
-        return_btn = ttk.Button(self.results_buttons_frame, text="⬅ Return to Main Menu", command=self.clear_results_buttons)
-        return_btn.grid(row=(len(buttons_config) // 2) + 1, column=0, columnspan=2, pady=(15, 0), sticky="ew")
-
 
 
     def show_summary_popup(self):
@@ -1332,6 +1941,9 @@ class OptionAnalyzerApp:
                 self.remove_strategy_tester(tester)
         # ---------------------
 
+        self.dashboard.chart_pane.set_theme(self.current_theme) # Update dashboard chart theme
+
+
         # rebuild child_windows list with only still-open windows
         live_children = []
         for win in self.child_windows:
@@ -1343,6 +1955,8 @@ class OptionAnalyzerApp:
                 # if anything goes wrong, just drop this window
                 continue
         self.child_windows = live_children
+        self.settings.set("theme", self.current_theme)   # persist
+
 
 
 
