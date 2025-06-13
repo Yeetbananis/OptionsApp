@@ -1,6 +1,6 @@
 # app.py
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, colorchooser, simpledialog
 import threading
 import numpy as np # Import numpy if needed for default values or checks
 import time # For small delay in animation
@@ -9,7 +9,8 @@ import pandas as pd
 import sys
 import os # Import os for path operations
 import logging # For error logging
-import time # Make sure time is imported 
+from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo  # Import ZoneInfo for timezone handling
 import subprocess # For launching external processes
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
@@ -17,10 +18,17 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.lines import Line2D # Needed for Line2D used in educational mode
 import matplotlib.dates as mdates  # Import matplotlib dates module for date formatting
 import json, pathlib
+from pathlib import Path
 import webbrowser  # Add import for opening URLs
-import threading, webview, textwrap, time
+import threading, webview, textwrap, time, queue
 # Using ttk from tkinter import ttk instead of ttkbootstrap
 from functools import partial
+import threading
+from strategy_tester import load_icon, ICON_DIR
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="mplfinance")
+
+
 
 from llm_helper import LLMHelper
 from StockChartWindow import StockChartWindow
@@ -228,135 +236,456 @@ class Tooltip:
         if self.tipwindow:
             self.tipwindow.destroy()
             self.tipwindow = None
+
+
+
+import tkinter as tk
+from tkinter import ttk, colorchooser, simpledialog, messagebox
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.lines import Line2D
+import pandas as pd
+import yfinance as yf
+import mplfinance as mpf
+import requests
+import io
+import zipfile
+
 class CandlestickChartPane(ttk.Frame):
     """
-    Right-hand pane: candlestick chart + timeframe buttons (1W, 1M, 1Y).
+    A chart pane with always-visible timeframe buttons and an 
+    expandable “Tools” panel for chart-type toggle, annotations,
+    save/load/clear, undo, erase, and zoom.
     """
-    # --- FIX 1: Imports moved here for efficiency ---
-    import io, zipfile, requests
-    import pandas as pd
-    import yfinance as yf
-    import mplfinance as mpf
-    # ----------------------------------------------------
-
     def __init__(self, parent, theme, ticker="SPY"):
         super().__init__(parent, padding=0)
         self.theme = theme
         self.ticker = ticker
-        self._last_period = "30d"
-        self.figure, self.ax = plt.subplots(figsize=(4, 3), dpi=100)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
-        self.canvas.get_tk_widget().grid(row=0, column=0, columnspan=3, sticky="nsew")
-        ttk.Button(self, text="1 W", command=lambda: self.draw("7d")).grid(row=1, column=0, sticky="ew")
-        ttk.Button(self, text="1 M", command=lambda: self.draw("30d")).grid(row=1, column=1, sticky="ew")
-        ttk.Button(self, text="1 Y", command=lambda: self.draw("365d")).grid(row=1, column=2, sticky="ew")
-        self.columnconfigure((0, 1, 2), weight=1)
-        self.rowconfigure(0, weight=1)
-        self.draw("365d")  # default view
+        self._last_period = "365d"
+        self._chart_type = "candle"
+        self.type_var = tk.StringVar(value=self._chart_type)
 
-    def set_ticker(self, ticker: str):
-        """Switch the chart to a new ticker and redraw the same period."""
+        # Annotation state & history
+        self._annotations = []
+        self._history = [list(self._annotations)]
+        # Saved charts persistence
+        self._saved_charts = {}
+        self._saved_file = Path(__file__).with_name("saved_charts.json")
+        if self._saved_file.exists():
+            try:
+                self._saved_charts = json.loads(self._saved_file.read_text())
+            except:
+                self._saved_charts = {}
+
+        # Drawing defaults
+        self._brush_color = "#ff0000"
+        self._mode = None
+        self._current_line = None
+
+        # ── Figure & Canvas ──────────────────────────────────
+        self.figure = Figure()
+        self.ax = self.figure.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
+        self.canvas_widget = self.canvas.get_tk_widget()
+        self.canvas_widget.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        # ── Timeframe bar ────────────────────────────────────
+        tf_bar = ttk.Frame(self, padding=2)
+        tf_bar.grid(row=1, column=0, sticky="ew")
+        for lbl, per in [("1W","7d"),("1M","30d"),("1Y","365d"),("5Y","5y"),("All","max")]:
+            ttk.Button(tf_bar, text=lbl, width=4, command=lambda p=per: self.draw(p)).pack(side="left", padx=2)
+
+        # Tools expand/collapse
+        self._adv_visible = False
+        self._adv_btn = ttk.Button(tf_bar, text="Tools ▾", width=8, command=self._toggle_advanced)
+        self._adv_btn.pack(side="right", padx=2)
+
+        # Advanced tools panel (hidden initially)
+        self.advanced_frame = ttk.Frame(self, padding=2)
+        self.advanced_frame.grid(row=2, column=0, sticky="ew")
+        self.advanced_frame.grid_remove()
+        self._build_advanced()
+
+        # Initial draw
+        self.draw(self._last_period)
+
+    def _toggle_advanced(self):
+        if self._adv_visible:
+            self.advanced_frame.grid_remove()
+            self._adv_btn.config(text="Tools ▾")
+        else:
+            self.advanced_frame.grid()
+            self._adv_btn.config(text="Tools ▴")
+        self._adv_visible = not self._adv_visible
+
+    def _build_advanced(self):
+        # Chart type toggles
+        ttk.Radiobutton(self.advanced_frame, text="C", variable=self.type_var, value="candle",
+                        command=self._on_type_change, width=2).pack(side="left", padx=2)
+        ttk.Radiobutton(self.advanced_frame, text="L", variable=self.type_var, value="line",
+                        command=self._on_type_change, width=2).pack(side="left", padx=2)
+        ttk.Separator(self.advanced_frame, orient="vertical").pack(side="left", fill="y", padx=4)
+
+        # Brush & Text
+        ttk.Button(self.advanced_frame, text="🖌", command=self._activate_brush, width=3).pack(side="left", padx=2)
+        ttk.Button(self.advanced_frame, text="🅰", command=self._activate_text,  width=3).pack(side="left", padx=2)
+        ttk.Button(self.advanced_frame, text="🎨", command=self._pick_color,   width=3).pack(side="left", padx=2)
+        self.size_slider = ttk.Scale(self.advanced_frame, from_=1, to=20, orient="horizontal", length=80)
+        self.size_slider.set(3)
+        self.size_slider.pack(side="left", padx=4)
+        ttk.Separator(self.advanced_frame, orient="vertical").pack(side="left", fill="y", padx=4)
+
+        # Save / Load / Clear
+        ttk.Button(self.advanced_frame, text="💾", command=self._on_save, width=3).pack(side="left", padx=2)
+        ttk.Button(self.advanced_frame, text="Load", command=self._open_load_window, width=6).pack(side="left", padx=2)
+        ttk.Button(self.advanced_frame, text="🗑", command=self._clear_chart, width=3).pack(side="left", padx=2)
+        ttk.Separator(self.advanced_frame, orient="vertical").pack(side="left", fill="y", padx=4)
+
+        # Undo / Erase / Zoom
+        ttk.Button(self.advanced_frame, text="↶ Undo", command=self._undo, width=6).pack(side="left", padx=2)
+        ttk.Button(self.advanced_frame, text="🧹 Erase", command=self._activate_erase, width=8).pack(side="left", padx=2)
+        ttk.Button(self.advanced_frame, text="🔍", command=self._activate_zoom, width=3).pack(side="left", padx=2)
+
+    # ── Core functionality ────────────────────────────────────
+
+    def _save_to_file(self):
+        try:
+            self._saved_file.write_text(json.dumps(self._saved_charts))
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not persist charts:\n{e}")
+
+    def _on_type_change(self):
+        self._chart_type = self.type_var.get()
+        self.draw(self._last_period)
+
+    def set_ticker(self, ticker):
         self.ticker = ticker
         self.draw(self._last_period)
 
-    def draw(self, period: str):
-        """
-        Redraw the candlestick chart for the chosen period.
-        - primary  source: yfinance
-        - fallback source: Stooq CSV
-        """
+    def draw(self, period):
         self.ax.clear()
         self._last_period = period
-
-        # --- Theming ---
-        bg = "#0f0f0f" if self.theme == "dark" else "#ffffff"
-        fg = "#ffffff" if self.theme == "dark" else "#000000"
+        bg = "#0f0f0f" if self.theme=="dark" else "#ffffff"
+        fg = "#ffffff" if self.theme=="dark" else "#000000"
         self.figure.patch.set_facecolor(bg)
         self.ax.set_facecolor(bg)
-        self.ax.tick_params(axis='x', colors=fg)
-        self.ax.tick_params(axis='y', colors=fg)
+        self.ax.tick_params(colors=fg)
         for spine in self.ax.spines.values():
             spine.set_color(fg)
 
-        # --- Data Fetching ---
-        def _from_yf():
-            try:
-                df = self.yf.download(self.ticker,
-                                 period=period,
-                                 interval="1d",
-                                 auto_adjust=False,
-                                 progress=False)
-                return df if isinstance(df, self.pd.DataFrame) and not df.empty else None
-            except:
-                return None
-
-        def _from_stooq():
-            try:
-                url = f"https://stooq.com/q/d/l/?s={self.ticker.lower()}.us&i=d"
-                raw = self.requests.get(url, timeout=15).content
-                if raw[:2] == b"PK":
-                    with self.zipfile.ZipFile(self.io.BytesIO(raw)) as zf:
-                        raw = zf.read(zf.namelist()[0])
-                df = (self.pd.read_csv(self.io.BytesIO(raw), parse_dates=["Date"])
-                        .set_index("Date").sort_index())
-                if   period == "7d":   df = df.iloc[-7:]
-                elif period == "30d":  df = df.iloc[-30:]
-                elif period == "365d": df = df.iloc[-252:]
-                return df
-            except:
-                return None
-
-        data = _from_yf()
-        if data is None or data.empty:
-            data = _from_stooq()
-
-        if data is None or data.empty:
-            self.ax.text(0.5, 0.5, "Chart unavailable", ha="center", va="center")
+        # Data fetch
+        df = self._fetch_data_from_yf(period) 
+        if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+            df = self._fetch_data_from_stooq(period)
+        if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+            self.ax.text(0.5,0.5,"Chart unavailable", ha="center", va="center", color=fg)
         else:
-            if isinstance(data.columns, self.pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-
-            data.columns = [str(col).lower() for col in data.columns]
-            
-            ohlc_cols = ["open", "high", "low", "close"]
-            for col in ohlc_cols:
-                if col in data.columns:
-                    data[col] = self.pd.to_numeric(data[col], errors="coerce")
-            
-            subset = [c for c in ohlc_cols if c in data.columns]
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df.columns = [str(c).lower() for c in df.columns]
+            for col in ("open","high","low","close"):
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            subset = [c for c in ("open","high","low","close") if c in df.columns]
             if subset:
-                data.dropna(subset=subset, inplace=True)
+                df.dropna(subset=subset, inplace=True)
 
-            # --- FIX 2: Check if data is empty AFTER cleaning ---
-            if data.empty:
-                self.ax.text(0.5, 0.5, "Chart unavailable\n(No valid data)", ha="center", va="center")
-            else:
-                data.index.name = "Date"
-                self.mpf.plot(
-                    data,
-                    type="candle", ax=self.ax, volume=False,
-                    style="nightclouds" if self.theme == "dark" else "charles",
-                    datetime_format="%b %d" if period in ("7d", "30d") else "%b"
-                )
-                self.ax.title.set_color(fg)
-                self.ax.yaxis.label.set_color(fg)
+            mpf.plot(df,
+                     type=("line" if self._chart_type=="line" else "candle"),
+                     ax=self.ax, volume=False,
+                     style=("nightclouds" if self.theme=="dark" else "charles"),
+                     datetime_format="%Y-%m-%d",
+                     warn_too_much_data=len(df))
 
-        # --- Final adjustments ---
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
-
     def set_theme(self, theme: str):
-        """
-        Switch between 'light' and 'dark' palettes and re-draw
-        using the last-selected period.
-        """
-        if theme not in ("light", "dark"):
-            return
-        if theme != self.theme:
+        if theme in ("light","dark") and theme != self.theme:
             self.theme = theme
             self.draw(self._last_period)
 
+    def _fetch_data_from_yf(self, period):
+        try:
+            df = yf.download(self.ticker, period=period, interval="1d",
+                             auto_adjust=False, progress=False)
+            return df if isinstance(df, pd.DataFrame) and not df.empty else None
+        except:
+            return None
+
+    def _fetch_data_from_stooq(self, period):
+        try:
+            url = f"https://stooq.com/q/d/l/?s={self.ticker.lower()}.us&i=d"
+            raw = requests.get(url, timeout=15).content
+            if raw[:2]==b"PK":
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    raw = zf.read(zf.namelist()[0])
+            df = (pd.read_csv(io.BytesIO(raw), parse_dates=["Date"])
+                    .set_index("Date").sort_index())
+            if period=="7d":    df = df.iloc[-7:]
+            elif period=="30d": df = df.iloc[-30:]
+            elif period=="365d":df = df.iloc[-252:]
+            return df
+        except:
+            return None
+
+    # ── Annotation & Undo ─────────────────────────────────────
+
+    def _disable_current_mode(self):
+        if self._mode=="brush":
+            for cid in (self._cid_press, self._cid_move, getattr(self, "_cid_release", None)):
+                if cid: self.canvas.mpl_disconnect(cid)
+        elif self._mode=="text":
+            self.canvas.mpl_disconnect(getattr(self, "_cid_press", None))
+        elif self._mode=="erase":
+            for cid in (self._er_press, self._er_move, self._er_rel):
+                if cid: self.canvas.mpl_disconnect(cid)
+            if hasattr(self, "_erase_rect"):
+                self._erase_rect.remove()
+                del self._erase_rect
+            self.canvas_widget.configure(cursor="")
+        self._mode = None
+
+    def _undo(self):
+        if len(self._history)<=1:
+            return
+        self._history.pop()
+        last = self._history[-1]
+        for art in list(self._annotations):
+            if art not in last:
+                try: art.remove()
+                except: pass
+        self._annotations = list(last)
+        self.canvas.draw_idle()
+
+    def _activate_brush(self):
+        if self._mode=="brush":
+            self._disable_current_mode(); return
+        self._disable_current_mode()
+        self._mode="brush"; self.canvas_widget.focus_set()
+        self._cid_press   = self.canvas.mpl_connect("button_press_event",   self._brush_press)
+        self._cid_move    = self.canvas.mpl_connect("motion_notify_event",  self._brush_move)
+        self._cid_release = self.canvas.mpl_connect("button_release_event", self._brush_release)
+
+    def _brush_press(self, evt):
+        if evt.inaxes!=self.ax or self._mode!="brush": return
+        self._history.append(list(self._annotations))
+        lw = int(float(self.size_slider.get()))
+        line = Line2D([evt.xdata],[evt.ydata], color=self._brush_color, linewidth=lw, solid_capstyle="round")
+        self.ax.add_line(line)
+        self._annotations.append(line)
+        self._current_line=line; self.canvas.draw_idle()
+
+    def _brush_move(self, evt):
+        if evt.inaxes!=self.ax or self._mode!="brush" or not self._current_line: return
+        xs,ys=self._current_line.get_data(); xs.append(evt.xdata); ys.append(evt.ydata)
+        self._current_line.set_data(xs,ys); self.canvas.draw_idle()
+
+    def _brush_release(self, evt):
+        if self._mode=="brush": self._current_line=None
+
+    def _activate_text(self):
+        if self._mode=="text":
+            self._disable_current_mode(); return
+        self._disable_current_mode()
+        self._mode="text"; self.canvas_widget.focus_set()
+        self._cid_press=self.canvas.mpl_connect("button_press_event", self._add_text)
+
+    def _add_text(self, evt):
+        if evt.inaxes!=self.ax or self._mode!="text": return
+        self._history.append(list(self._annotations))
+        txt=simpledialog.askstring("Text","Annotation text:")
+        if not txt: return
+        fs=int(float(self.size_slider.get()))
+        text=self.ax.text(evt.xdata,evt.ydata,txt, color=self._brush_color,fontsize=fs,
+                          va="center",ha="center")
+        self._annotations.append(text); self.canvas.draw_idle()
+
+    def _pick_color(self):
+        c=colorchooser.askcolor()[1]
+        if c: self._brush_color=c
+
+    def _clear_chart(self):
+        for art in self._annotations:
+            try: art.remove()
+            except: pass
+        self._annotations.clear(); self.draw(self._last_period)
+
+    # ── Erase ────────────────────────────────────────────────
+
+    def _activate_erase(self):
+        if self._mode=="erase":
+            self._disable_current_mode(); return
+        self._disable_current_mode()
+        self._mode="erase"
+        size=int(float(self.size_slider.get()))
+        self.canvas_widget.configure(cursor=f"circle {size}")
+        self._er_press=self.canvas.mpl_connect("button_press_event",   self._erase_press)
+        self._er_move =self.canvas.mpl_connect("motion_notify_event",  self._erase_move)
+        self._er_rel  =self.canvas.mpl_connect("button_release_event",self._erase_release)
+
+    def _erase_press(self,evt):
+        if evt.inaxes!=self.ax or self._mode!="erase" or evt.xdata is None: return
+        self._erase_start=(evt.xdata,evt.ydata)
+        from matplotlib.patches import Rectangle
+        self._erase_rect=Rectangle((evt.xdata,evt.ydata),0,0,
+                                   linewidth=1,edgecolor="red",facecolor="none",linestyle="--")
+        self.ax.add_patch(self._erase_rect); self.canvas.draw_idle()
+
+    def _erase_move(self,evt):
+        if (evt.inaxes!=self.ax or self._mode!="erase"
+            or not hasattr(self,"_erase_rect") or evt.xdata is None): return
+        x0,y0=self._erase_start; w=evt.xdata-x0; h=evt.ydata-y0
+        self._erase_rect.set_width(w); self._erase_rect.set_height(h)
+        if w<0: self._erase_rect.set_x(evt.xdata)
+        if h<0: self._erase_rect.set_y(evt.ydata)
+        self.canvas.draw_idle()
+
+    def _erase_release(self,evt):
+        if (evt.inaxes!=self.ax or self._mode!="erase"
+            or not hasattr(self,"_erase_rect") or evt.xdata is None): return
+        self._history.append(list(self._annotations))
+        x0=self._erase_rect.get_x(); y0=self._erase_rect.get_y()
+        w=self._erase_rect.get_width(); h=self._erase_rect.get_height()
+        xmin,xmax=sorted([x0,x0+w]); ymin,ymax=sorted([y0,y0+h])
+        survivors=[]
+        for art in self._annotations:
+            if isinstance(art,Line2D):
+                xs,ys=art.get_data()
+                if any(xmin<=x<=xmax and ymin<=y<=ymax for x,y in zip(xs,ys)):
+                    art.remove(); continue
+            else:
+                x,y=art.get_position()
+                if xmin<=x<=xmax and ymin<=y<=ymax:
+                    art.remove(); continue
+            survivors.append(art)
+        self._annotations=survivors
+        self._erase_rect.remove(); del self._erase_rect
+        self._mode=None; self.canvas_widget.configure(cursor="")
+        self.canvas.draw_idle()
+
+    # ── Zoom/Pan ─────────────────────────────────────────────
+
+    def _activate_zoom(self):
+        if self._mode=="zoom":
+            for cid in (self._zoom_cid,
+                        getattr(self,"_pan_press_cid",None),
+                        getattr(self,"_pan_move_cid",None),
+                        getattr(self,"_pan_release_cid",None)):
+                if cid: self.canvas.mpl_disconnect(cid)
+            self._mode=None; self.canvas_widget.configure(cursor="")
+            self.ax.set_xlim(self._zoom_orig_xlim); self.ax.set_ylim(self._zoom_orig_ylim)
+            self.canvas.draw_idle(); return
+        self._disable_current_mode(); self._mode="zoom"
+        self._zoom_orig_xlim=self.ax.get_xlim(); self._zoom_orig_ylim=self.ax.get_ylim()
+        self.canvas_widget.configure(cursor="tcross")
+        self._zoom_cid       = self.canvas.mpl_connect("scroll_event",     self._on_zoom)
+        self._pan_press_cid  = self.canvas.mpl_connect("button_press_event",self._pan_press)
+        self._pan_move_cid   = self.canvas.mpl_connect("motion_notify_event",self._pan_move)
+        self._pan_release_cid=self.canvas.mpl_connect("button_release_event",self._pan_release)
+
+    def _pan_press(self,evt):
+        if self._mode!="zoom" or evt.inaxes!=self.ax: return
+        if evt.button==1:
+            self._pan_start=(evt.xdata,evt.ydata)
+            self._pan_xlim_start=self.ax.get_xlim()
+            self._pan_ylim_start=self.ax.get_ylim()
+        elif evt.button==3:
+            self.ax.set_xlim(self._zoom_orig_xlim); self.ax.set_ylim(self._zoom_orig_ylim)
+            self.canvas.draw_idle()
+
+    def _pan_move(self,evt):
+        if (self._mode!="zoom" or not hasattr(self,"_pan_start")
+            or evt.button!=1 or evt.inaxes!=self.ax): return
+        x0,y0=self._pan_start; dx=x0-evt.xdata; dy=y0-evt.ydata
+        x0_lim,x1_lim=self._pan_xlim_start; y0_lim,y1_lim=self._pan_ylim_start
+        self.ax.set_xlim(x0_lim+dx,x1_lim+dx); self.ax.set_ylim(y0_lim+dy,y1_lim+dy)
+        self.canvas.draw_idle()
+
+    def _pan_release(self,evt):
+        if hasattr(self,"_pan_start"): del self._pan_start
+
+    def _on_zoom(self,evt):
+        if (self._mode!="zoom" or evt.inaxes!=self.ax or
+            evt.xdata is None or evt.ydata is None): return
+        factor = 0.9 if evt.button=="up" else 1.1
+        x0,x1=self.ax.get_xlim(); y0,y1=self.ax.get_ylim()
+        xd,yd=evt.xdata,evt.ydata
+        nx0=xd-(xd-x0)*factor; nx1=xd+(x1-xd)*factor
+        ny0=yd-(yd-y0)*factor; ny1=yd+(y1-yd)*factor
+        self.ax.set_xlim(nx0,nx1); self.ax.set_ylim(ny0,ny1)
+        self.canvas.draw_idle()
+
+    # ── Save/Load ──────────────────────────────────────────────
+
+    def _on_save(self):
+        name=simpledialog.askstring("Save Chart","Name this view:")
+        if not name or name in self._saved_charts: return
+        self._saved_charts[name]={
+            "ticker":self.ticker,"period":self._last_period,
+            "type":self._chart_type,
+            "annotations":[self._serialize_artist(a) for a in self._annotations]
+        }
+        self._save_to_file()
+        messagebox.showinfo("Saved",f"Chart saved as “{name}”.")
+
+    def _open_load_window(self):
+        win=tk.Toplevel(self); win.title("Saved Charts"); win.transient(self)
+        for name,meta in self._saved_charts.items():
+            f=ttk.Frame(win,padding=4); f.pack(fill="x",padx=8,pady=2)
+            ttk.Label(f,text=f"{name} [{meta['ticker']}]",width=25).pack(side="left")
+            ttk.Button(f,text="Load",width=6,
+                       command=lambda n=name,w=win:(self.load_saved(n),w.destroy())
+                      ).pack(side="left",padx=4)
+            ttk.Button(f,text="➖",width=3,
+                       command=lambda n=name,fr=f:(
+                           messagebox.askyesno("Delete",f"Remove “{n}”?"),
+                           self._saved_charts.pop(n,None),
+                           self._save_to_file(),
+                           fr.destroy()
+                       )
+                      ).pack(side="left")
+
+    def load_saved(self,name):
+        meta=self._saved_charts.get(name)
+        if not meta:
+            messagebox.showerror("Not found",f"No saved chart “{name}”"); return
+        # clear annotations
+        for art in self._annotations:
+            try: art.remove()
+            except: pass
+        self._annotations.clear()
+        # restore settings
+        self.ticker=meta["ticker"]
+        self._last_period=meta["period"]
+        self._chart_type=meta["type"]
+        self.type_var.set(self._chart_type)
+        self.draw(self._last_period)
+        # reapply
+        for art in meta["annotations"]:
+            if art["kind"]=="line":
+                ln,=self.ax.plot(art["xs"],art["ys"],color=art["color"],linewidth=art["lw"])
+                self._annotations.append(ln); self._history.append(list(self._annotations))
+            else:
+                tx=self.ax.text(art["x"],art["y"],art["text"],color=art["color"],fontsize=art["size"])
+                self._annotations.append(tx); self._history.append(list(self._annotations))
+        self.canvas.draw_idle()
+        if hasattr(self.master,"config"):
+            self.master.config(text=f"{self.ticker} Chart")
+
+    def _serialize_artist(self,artist):
+        if isinstance(artist,Line2D):
+            xs,ys=artist.get_data()
+            return {"kind":"line","xs":list(xs),"ys":list(ys),
+                    "color":artist.get_color(),"lw":artist.get_linewidth()}
+        else:
+            x,y=artist.get_position()
+            return {"kind":"text","x":x,"y":y,
+                    "text":artist.get_text(),
+                    "color":artist.get_color(),
+                    "size":artist.get_fontsize()}
 
 
 class SettingsManager:
@@ -527,180 +856,313 @@ class HomeDataManager:
 
 
 class HomeDashboard(ttk.Frame):
-    """Visual dashboard that sits inside OptionAnalyzerApp.main_frame."""
+    """
+    A professionally organized visual dashboard that provides a clear, at-a-glance
+    view of market information and application actions.
+    """
     def __init__(self, parent, controller):
-        super().__init__(parent, padding="10 10 10 10")
+        super().__init__(parent, padding="15 15 15 15")
         self.controller = controller
-        self.data_mgr   = controller.data_mgr
+        self.data_mgr = controller.data_mgr
+        # NYSE open hours in Eastern Time
+        self._ny_open  = dt_time(hour=9,  minute=30)
+        self._ny_close = dt_time(hour=16, minute=0)
+
+
+        
+        # Configure the main frame's grid layout
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(2, weight=1) # Main content area should expand
+
         self._build_ui()
-        self._refresh()          # initial fill
-        self._auto_refresh()     # 30-second loop
+        self._refresh()          # Initial data load
+        self._auto_refresh()     # Start 30-second refresh loop
 
-    # ---------- UI ----------
+    # --- UI Construction ---
+
     def _build_ui(self):
-        # 1. Header
-        self.header_lbl = ttk.Label(self, text="", style="Title.TLabel")
+        """Constructs the UI by building and placing modular components."""
+        self._build_header()
+        self._build_overview()
+        self._build_main_panes()
+        
+        # Add a visual separator before the footer
+        ttk.Separator(self).grid(row=3, column=0, pady=15, sticky="ew")
+        
+        self._build_footer()
+        
+    def _build_header(self):
+        """Builds the top header bar with title, clock, and status icons."""
+        header_frame = ttk.Frame(self)
+        header_frame.grid(row=0, column=0, sticky="ew")
+        header_frame.columnconfigure(1, weight=1) # Spacer column
+
+        self.header_lbl = ttk.Label(header_frame, text="", style="Title.TLabel")
         self.header_lbl.grid(row=0, column=0, sticky="w")
+        
+        self.time_lbl = ttk.Label(header_frame, text="", style="Secondary.TLabel")
+        self.time_lbl.grid(row=0, column=2, sticky="e", padx=10)
 
-        self.time_lbl   = ttk.Label(self, text="")
-        self.time_lbl.grid(row=0, column=1, sticky="e")
-        self._start_clock()
-
-
-        # 2. Market module
-        box = ttk.LabelFrame(self, text="Market Overview")
-        box.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
-        self.index_lbl     = ttk.Label(box, text="Indices:")
-        self.index_lbl.pack(anchor="w")
-
-        # ── Watchlist display ─────────────────────────────────────────────
-        self.watchlist_lbl = ttk.Label(box, text="Watchlist:")
-        self.watchlist_lbl.pack(anchor="w")
-
-        # 3. News + Chart container (row 2, two columns 50 / 50)
-        row2 = ttk.Frame(self)
-        row2.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
-        row2.columnconfigure(0, weight=1, uniform="col")   # news
-        row2.columnconfigure(1, weight=1, uniform="col")   # chart
-        row2.rowconfigure(0, weight=1)
-
-
-        # --- 3a. News box (left) ---
-        news_box = ttk.LabelFrame(row2, text="Market News (last 24 h)")
-        news_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        news_box.columnconfigure(0, weight=1)
-
-        self.overall_news_lbl = ttk.Label(news_box, text="Overall sentiment: …")
-        self.overall_news_lbl.pack(anchor="w", padx=6, pady=(2, 0))
-
-        cols = ("headline", "sentiment")
-        self.news_tv = ttk.Treeview(news_box, columns=cols, show="headings", height=20)
-        self.news_tv.heading("headline",  text="Headline")
-        self.news_tv.heading("sentiment", text="Score")
-        self.news_tv.column("headline", width=400, anchor="w")
-        self.news_tv.column("sentiment", width=60,  anchor="e")
-
-        vsb = ttk.Scrollbar(news_box, orient="vertical", command=self.news_tv.yview)
-        self.news_tv.configure(yscrollcommand=vsb.set)
-        self.news_tv.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        self.news_tv.bind("<Double-1>", self._open_selected_article)
-
-        # --- 3b. Candlestick chart (right) -----------------------------------
-        chart_box = ttk.LabelFrame(row2, text=f"{self.controller.settings.get('default_ticker', 'SPY')} Chart")
-        chart_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        chart_box.columnconfigure(0, weight=1); chart_box.rowconfigure(0, weight=1)
-
-        default_tkr = self.controller.settings.get("default_ticker", "SPY")
-        self.chart_pane = CandlestickChartPane(
-            chart_box,
-            theme="dark" if self.controller.current_theme == "dark" else "light",
-            ticker=default_tkr
+        # ── Live Market Status Indicator ───────────────────────────
+        # Use our current theme’s background color; ttk styles don’t expose 'background' as a cget
+        bg_color = self.controller.theme_settings()['bg']
+        self.market_canvas = tk.Canvas(
+            header_frame,
+            width=12, height=12,
+            highlightthickness=0,
+            bg=bg_color
         )
 
+        self.market_canvas.grid(row=0, column=3, sticky="e", padx=(5,0))
+        self.market_circle = self.market_canvas.create_oval(2,2,10,10, fill="red", outline="")
+        self.market_lbl    = ttk.Label(header_frame, text="Closed", style="Status.TLabel")
+        self.market_lbl.grid(row=0, column=4, sticky="e", padx=(2,10))
+
+        self._build_wifi_icon(header_frame)
+        self.wifi_label.grid(row=0, column=5, sticky="e")
+        self._start_clock()
+
+        
+    def _build_overview(self):
+        """Builds the market overview section with stat cards."""
+        overview_frame = ttk.Frame(self)
+        overview_frame.grid(row=1, column=0, sticky="ew", pady=15)
+        overview_frame.columnconfigure(0, weight=1)
+        overview_frame.columnconfigure(1, weight=1)
+
+        # Indices Card
+        indices_card = ttk.LabelFrame(overview_frame, text="Market Indices")
+        indices_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.index_lbl = ttk.Label(indices_card, text="Loading...", padding=10, style="Stat.TLabel")
+        self.index_lbl.pack(expand=True, fill="both")
+        
+        # Watchlist Card
+        watchlist_card = ttk.LabelFrame(overview_frame, text="Watchlist")
+        watchlist_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self.watchlist_lbl = ttk.Label(watchlist_card, text="Loading...", padding=10, style="Stat.TLabel", wraplength=400, justify="left")
+        self.watchlist_lbl.pack(expand=True, fill="both")
+
+    def _build_main_panes(self):
+        """Builds the main split-pane view for news and charts."""
+        main_panes = ttk.PanedWindow(self, orient="horizontal")
+        main_panes.grid(row=2, column=0, sticky="nsew")
+
+        # --- Left Pane: Market News ---
+        news_box = ttk.LabelFrame(main_panes, text="Market News (Recent First)", padding=10)
+        news_box.columnconfigure(0, weight=1)
+        news_box.rowconfigure(1, weight=1) # Treeview row
+        main_panes.add(news_box, weight=1)
+
+        self.overall_news_lbl = ttk.Label(news_box, text="Overall sentiment: …")
+        self.overall_news_lbl.grid(row=0, column=0, sticky="w", pady=(0, 5))
+
+        cols = ("headline", "sentiment")
+        self.news_tv = ttk.Treeview(news_box, columns=cols, show="headings", height=15)
+        self.news_tv.heading("headline", text="Headline")
+        self.news_tv.heading("sentiment", text="Score")
+        self.news_tv.column("headline", width=400, stretch=True)
+        self.news_tv.column("sentiment", width=80, anchor="e", stretch=False)
+        self.news_tv.bind("<Double-1>", self._open_selected_article)
+        
+        vsb = ttk.Scrollbar(news_box, orient="vertical", command=self.news_tv.yview)
+        self.news_tv.configure(yscrollcommand=vsb.set)
+
+        self.news_tv.grid(row=1, column=0, sticky="nsew")
+        vsb.grid(row=1, column=1, sticky="ns")
+
+        # --- Right Pane: Candlestick Chart ---
+        self.chart_box = ttk.LabelFrame(main_panes, text="Chart", padding=5)
+        self.chart_box.columnconfigure(0, weight=1)
+        self.chart_box.rowconfigure(0, weight=1)
+        main_panes.add(self.chart_box, weight=1)
+        
+        default_ticker = self.controller.settings.get('default_ticker', 'SPY')
+        self.chart_box.config(text=f"{default_ticker} Chart")
+        self.chart_pane = CandlestickChartPane(
+            self.chart_box,
+            theme=self.controller.current_theme,
+            ticker=default_ticker
+        )
         self.chart_pane.grid(row=0, column=0, sticky="nsew")
 
+    def _build_footer(self):
+        """Builds the bottom footer with quick actions and settings."""
+        footer_frame = ttk.Frame(self)
+        footer_frame.grid(row=4, column=0, sticky="ew")
+        footer_frame.columnconfigure(1, weight=1) # Spacer column
 
+        # Settings button on the left
+        ttk.Button(footer_frame, text="⚙ Settings",
+                   command=self.controller.open_settings_window, style="Pill.TButton")\
+                   .grid(row=0, column=0, sticky="w")
 
-        # 4. Quick Actions
-        qa = ttk.Frame(self)
-        qa.grid(row=3, column=0, columnspan=2, pady=15)
-        btn = lambda txt, cmd: ttk.Button(qa, text=txt, command=cmd, width=20)
-        btn("📊 New Analysis",         self.controller.open_input_window).grid(row=0, column=0, padx=5, pady=3)
-        btn("📐 Strategy Builder",      self.controller.launch_strategy_builder).grid(row=0, column=1, padx=5, pady=3)
-        btn("🧪 Strategy Tester",       self.controller.launch_strategy_tester).grid(row=0, column=2, padx=5, pady=3)
-        btn("📰 Sentiment Analyzer",    self.controller.launch_news_sentiment_analyzer).grid(row=0, column=3, padx=5, pady=3)
-        btn("💬 Chatbot",               self.controller.launch_chatbot).grid(row=0, column=4, padx=5, pady=3)
+        # Quick actions on the right
+        actions_frame = ttk.Frame(footer_frame)
+        actions_frame.grid(row=0, column=2, sticky="e")
+        
+        btn_map = {
+            "📊 New Analysis": self.controller.open_input_window,
+            "📰 Sentiment Analyzer": self.controller.launch_news_sentiment_analyzer,
+            "📐 Strategy Builder": self.controller.launch_strategy_builder,
+            "🧪 Strategy Tester": self.controller.launch_strategy_tester,
+            "💬 Chatbot": self.controller.launch_chatbot,
+        }
 
-        # 5. Settings + Reset
-        bottom = ttk.Frame(self)
-        bottom.grid(row=4, column=0, columnspan=2, pady=(10,0), sticky="ew")
-        ttk.Button(bottom, text="⚙ Settings", width=12,
-                   command=self.controller.open_settings_window).pack(side="left")
+        for i, (text, cmd) in enumerate(btn_map.items()):
+            ttk.Button(actions_frame, text=text, command=cmd).pack(side="left", padx=(5, 0))
 
-        # layout stretch
-        self.columnconfigure(0, weight=1); self.columnconfigure(1, weight=1)
-        self.rowconfigure(2, weight=1)
+    def _build_wifi_icon(self, parent_frame):
+        """Initializes the Wi-Fi icon and its related resources."""
+        fg_color = "#ffffff" if self.controller.current_theme == "dark" else "#000000"
+        
+        # Determine the background color reliably from the current theme
+        bg_color = "#0f0f0f" if self.controller.current_theme == 'dark' else '#f0f0f0'
 
-        news_box.rowconfigure(0, weight=1)
+        self.wifi_icons = {
+            key: load_icon(ICON_DIR / f"wifi_{key}.png", tint_color=fg_color)
+            for key in ("disconnected", "weak", "medium", "strong", "secure")
+        }
+
+        self.wifi_label = tk.Label(parent_frame, bd=0)
+        
+       
+        self.wifi_label.configure(bg=bg_color)
+
+        # Only set the last status if icons were loaded successfully
+        if self.wifi_icons.get("disconnected"):
+            self._last_wifi_status = "disconnected"
+            self._update_wifi_icon("disconnected")
+        
+        self._wifi_queue = queue.Queue()
+        self._poll_wifi_queue()
+        self.check_wifi()
+
+    
+    # --- Core Logic & Data Refresh ---
 
     def _start_clock(self):
-        """Kick off the per-second clock."""
         self._update_time()
 
     def _update_time(self):
-        """Update self.time_lbl with seconds in the chosen timezone."""
-        from datetime import datetime
         try:
-            # stdlib zoneinfo, Python 3.9+
-            from zoneinfo import ZoneInfo
             tz = ZoneInfo(self.controller.settings.get("timezone"))
             now = datetime.now(tz)
         except Exception:
-            now = datetime.now()   # fallback to local
-        self.time_lbl.config(text=now.strftime("%b %d %Y  %H:%M:%S"))
-        # schedule next update in 1 second
+            now = datetime.now()
+        self.time_lbl.config(text=now.strftime("%b %d, %Y  %H:%M:%S"))
+        # ← new: refresh the market‐open indicator
+        self._update_market_status(now)
         self.after(1000, self._update_time)
 
+    def _update_market_status(self, now_local):
+        # convert to New York time
+        ny = now_local.astimezone(ZoneInfo("America/New_York"))
+        # default: closed
+        status, color = "Closed", "red"
+        if ny.weekday() < 5:  # Mon–Fri
+            t = ny.time()
+            if self._ny_open <= t <= self._ny_close:
+                status, color = "Open", "green"
+            else:
+                status, color = "After-Hours", "orange"
+        # apply it
+        self.market_canvas.itemconfig(self.market_circle, fill=color)
+        self.market_lbl.config(text=status, foreground=color)
+
+
+
+    def check_wifi(self):
+        def worker():
+            import time, requests
+            try:
+                start = time.time()
+                resp = requests.get("https://www.google.com", timeout=2.0)
+                lat = (time.time() - start) * 1000
+                if not resp.ok: status = "disconnected"
+                elif resp.url.startswith("https://"): status = "secure"
+                elif lat < 100: status = "strong"
+                elif lat < 300: status = "medium"
+                else: status = "weak"
+            except Exception:
+                status = "disconnected"
+            self._wifi_queue.put(status)
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(5000, self.check_wifi)
+
+    def _poll_wifi_queue(self):
+        try:
+            while True:
+                status = self._wifi_queue.get_nowait()
+                self._update_wifi_icon(status)
+        except queue.Empty:
+            pass
+        self.after(100, self._poll_wifi_queue)
+
+    def _update_wifi_icon(self, status_key):
+        if not hasattr(self, "wifi_label"): return
+        self._last_wifi_status = status_key
+        icon = self.wifi_icons.get(status_key)
+        if icon:
+            self.wifi_label.configure(image=icon)
+            self.wifi_label.image = icon
+
+    def apply_custom_theme(self):
+        """
+        Called when the application theme changes. Re-tints icons and updates
+        the background of the tk.Label holding the icon.
+        """
+        fg = "#ffffff" if self.controller.current_theme == "dark" else "#000000"
+        # Determine the background color reliably from the current theme
+        bg = "#0f0f0f" if self.controller.current_theme == 'dark' else '#f0f0f0'
+
+        # FIX: Explicitly update the label's background color during theme changes.
+        if hasattr(self, "wifi_label"):
+            self.wifi_label.configure(bg=bg)
+
+        # Re-tint all icons
+        for key in self.wifi_icons:
+            path = ICON_DIR / f"wifi_{key}.png"
+            self.wifi_icons[key] = load_icon(path, tint_color=fg)
+            
+        # Re-apply the current icon to the label
+        if hasattr(self, "_last_wifi_status"):
+            self._update_wifi_icon(self._last_wifi_status)
 
 
     def _open_selected_article(self, event=None):
-        sel = self.news_tv.selection()
-        if not sel:
-            return
-        url = self.news_tv.item(sel[0], "values")[2]   # hidden third value
-        if url:
-            webbrowser.open(url)
+        selected_item = self.news_tv.selection()
+        if not selected_item: return
+        # Assuming URL is the third value (hidden) in the Treeview row
+        item_values = self.news_tv.item(selected_item[0], "values")
+        if len(item_values) > 2:
+            url = item_values[2]
+            if url and url.startswith("http"):
+                webbrowser.open(url)
 
-
-
-    # ---------- Data refresh ----------
     def _refresh(self):
-        from datetime import datetime
         # Header
-        self.header_lbl.config(text=f"Welcome back, {self.controller.user_name}!")
-        self.time_lbl.config(text=datetime.now().strftime("%b %d %Y  %H:%M"))
-
-        # Indices
+        self.header_lbl.config(text=f"Welcome, {self.controller.user_name}!")
+        
+        # Market Overview Cards
         spy, vix = self.data_mgr.get_index_prices()
-        if spy is not None:
-            self.index_lbl.config(text=f"SPY {spy:,.2f}   |   VIX {vix:,.2f}")
-        else:
-            self.index_lbl.config(text="Indices: N/A")
+        self.index_lbl.config(text=f"SPY {spy:,.2f}   |   VIX {vix:,.2f}" if spy is not None else "Indices: N/A")
 
-        # ── Refresh watchlist prices ───────────────────────────────────────
-        wl = self.controller.settings.get("watchlist", "")
-        tickers = [t.strip() for t in wl.split("|") if t.strip()]
-
-        good = []
-        parts = []
-        # validate each ticker exactly once
-        for t in tickers:
-            price = self.data_mgr.get_latest_price(t)
-            if price is None:
-                messagebox.showerror(
-                    "Invalid or Delisted Ticker",
-                    f"Ticker “{t}” is invalid or has been delisted and has been removed."
-                )
-            else:
-                good.append(t)
-                parts.append(f"{t} {price:,.2f}")
-
-        # if any were dropped, immediately persist a cleaned watchlist
-        if set(good) != set(tickers):
-            new_wl = "|".join(good)
-            self.controller.settings.set("watchlist", new_wl)
-
-        # finally update the label
-        self.watchlist_lbl.config(text="Watchlist: " + " | ".join(parts))
-
-
-
-
-        # News table ----------------------------------------------------------------
+        # Watchlist Card
+        watchlist_tickers = [t.strip() for t in self.controller.settings.get("watchlist", "").split("|") if t.strip()]
+        price_parts = []
+        valid_tickers = []
+        for ticker in watchlist_tickers:
+            price = self.data_mgr.get_latest_price(ticker)
+            if price is not None:
+                price_parts.append(f"{ticker} {price:,.2f}")
+                valid_tickers.append(ticker)
+            # This version omits the disruptive messagebox on auto-refresh for a smoother UX
+        if len(valid_tickers) != len(watchlist_tickers):
+            self.controller.settings.set("watchlist", "|".join(valid_tickers))
+        self.watchlist_lbl.config(text=" | ".join(price_parts) if price_parts else "No valid tickers in watchlist.")
+        
+        # News Panel
         rows, overall = self.data_mgr.get_news_headlines(20)
-
-        # headline label
         if overall is None:
             txt, color = "Overall sentiment: N/A", "gray"
         elif overall > 0.25:
@@ -711,31 +1173,21 @@ class HomeDashboard(ttk.Frame):
             txt, color = f"Overall sentiment: Neutral ({overall:+.2f})", "orange"
         self.overall_news_lbl.config(text=txt, foreground=color)
 
-        # rebuild table
         self.news_tv.delete(*self.news_tv.get_children())
         for title, score, url in rows:
             tag = ""
             if score is not None:
-                if score > 0.25:   tag = "pos"
+                if score > 0.25: tag = "pos"
                 elif score < -0.25: tag = "neg"
-                else:               tag = "neu"
-
-            self.news_tv.insert(
-                "", "end",
-                values=(title, f"{score:+.2f}" if score is not None else "N/A", url),
-                tags=(tag,)
-            )
-
-        # tag colours
+                else: tag = "neu"
+            self.news_tv.insert("", "end", values=(title, f"{score:+.2f}" if score is not None else "N/A", url), tags=(tag,))
         self.news_tv.tag_configure("pos", foreground="green")
         self.news_tv.tag_configure("neg", foreground="red")
         self.news_tv.tag_configure("neu", foreground="orange")
-
-
+        
     def _auto_refresh(self):
         self._refresh()
-        self.after(30_000, self._auto_refresh)  # 30 s
-
+        self.after(30_000, self._auto_refresh)
 
 
 # Import logic functions from the separate file
@@ -939,118 +1391,203 @@ class OptionAnalyzerApp:
         self.root.after(150, self.animate_loading)  # ~6fps
 
 
-    # ---------------- SETTINGS ----------------
-    def open_settings_window(self):
-        win = tk.Toplevel(self.root); win.title("Settings"); win.geometry("700x700")
-        self.apply_theme_to_window(win)
-        frm = ttk.Frame(win, padding=20); frm.pack(expand=True, fill="both")
 
-        # Name
-        ttk.Label(frm, text="Display Name:").grid(row=0, column=0, sticky="w", pady=6)
+  # ---------------- SETTINGS (Refactored UI) ----------------
+    def open_settings_window(self):
+        """
+        Opens a settings window with a professional and organized layout.
+        Uses Labelframes to group related settings and provides clear spacing.
+        """
+        win = tk.Toplevel(self.root)
+        win.title("Settings")
+        win.geometry("750x650")  # Adjusted size for better spacing
+        win.transient(self.root) # Keep window on top of main app
+        win.grab_set() # Modal behavior
+        self.apply_theme_to_window(win)
+
+        # --- Main container frame ---
+        main_frame = ttk.Frame(win, padding=(20, 10))
+        main_frame.pack(expand=True, fill="both")
+
+        # --- Section 1: User Preferences ---
+        prefs_frame = ttk.Labelframe(main_frame, text="User Preferences", padding=15)
+        prefs_frame.pack(fill="x", padx=10, pady=10)
+        prefs_frame.columnconfigure(1, weight=1)
+
+        # Display Name
+        ttk.Label(prefs_frame, text="Display Name:").grid(row=0, column=0, sticky="w", pady=6, padx=5)
         name_var = tk.StringVar(value=self.user_name)
-        ttk.Entry(frm, textvariable=name_var, width=22).grid(row=0, column=1, pady=6)
+        ttk.Entry(prefs_frame, textvariable=name_var).grid(row=0, column=1, sticky="ew", pady=6)
 
         # Theme
-        ttk.Label(frm, text="Theme:").grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Label(prefs_frame, text="Theme:").grid(row=1, column=0, sticky="w", pady=6, padx=5)
         theme_var = tk.StringVar(value=self.current_theme)
-        ttk.Radiobutton(frm, text="Light", variable=theme_var, value="light").grid(row=1, column=1, sticky="w")
-        ttk.Radiobutton(frm, text="Dark",  variable=theme_var, value="dark").grid(row=1, column=1, sticky="e")
+        theme_buttons_frame = ttk.Frame(prefs_frame)
+        theme_buttons_frame.grid(row=1, column=1, sticky="w")
+        ttk.Radiobutton(theme_buttons_frame, text="Light", variable=theme_var, value="light").pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(theme_buttons_frame, text="Dark", variable=theme_var, value="dark").pack(side="left")
 
+        # --- Section 2: Application Defaults ---
+        defaults_frame = ttk.Labelframe(main_frame, text="Application Defaults", padding=15)
+        defaults_frame.pack(fill="x", padx=10, pady=5)
+        defaults_frame.columnconfigure(1, weight=1)
+
+        # Timezone
+        ttk.Label(defaults_frame, text="Timezone:").grid(row=0, column=0, sticky="w", pady=6, padx=5)
+        tz_list = [
+            "America/Vancouver", "America/New_York", "Europe/London", "Asia/Tokyo",
+            "Australia/Sydney", "Europe/Paris", "Europe/Berlin", "Asia/Kolkata",
+            "Asia/Shanghai", "America/Sao_Paulo"
+        ]
+        tz_var = tk.StringVar(value=self.settings.get("timezone"))
+        ttk.Combobox(defaults_frame, textvariable=tz_var, values=tz_list, state="readonly").grid(row=0, column=1, sticky="ew", pady=6)
+
+        # Default Chart Ticker
+        ttk.Label(defaults_frame, text="Default Chart Ticker:").grid(row=1, column=0, sticky="w", pady=6, padx=5)
+        ticker_var = tk.StringVar(value=self.settings.get("default_ticker"))
+        ttk.Entry(defaults_frame, textvariable=ticker_var).grid(row=1, column=1, sticky="ew", pady=6)
+
+        # --- Section 3: Watchlist Editor ---
+        watchlist_outer_frame = ttk.Labelframe(main_frame, text="Watchlist Tickers", padding=15)
+        watchlist_outer_frame.pack(fill="x", expand=True, padx=10, pady=10)
+        
+        # This frame holds the chips and allows them to wrap if needed
+        watchlist_frame = ttk.Frame(watchlist_outer_frame)
+        watchlist_frame.pack(fill="x", pady=5)
+
+        chips = []
+        chip_frames = []
+        drag_data = {"widget": None, "start_x": 0}
+
+        add_btn = ttk.Button(watchlist_frame, text="＋", width=3)
+        add_btn.pack(side="left", pady=(0, 5))
+
+        def remove_chip(frame_to_remove, var_to_remove):
+            idx = chips.index(var_to_remove)
+            chips.pop(idx)
+            chip_frames.pop(idx)
+            frame_to_remove.destroy()
+
+        def on_drag_start(event):
+            widget = event.widget
+            # Travel up to find the parent chip frame if a child was clicked
+            while widget and not isinstance(widget, ttk.Frame) and widget.master != watchlist_frame:
+                widget = widget.master
+            
+            if widget in chip_frames:
+                drag_data["widget"] = widget
+                drag_data["start_x"] = event.x_root - widget.winfo_rootx()
+                x, y = widget.winfo_x(), widget.winfo_y()
+                widget.pack_forget()
+                widget.place(in_=watchlist_frame, x=x, y=y)
+                widget.lift()
+
+        def on_drag_motion(event):
+            w = drag_data["widget"]
+            if not w: return
+            x = event.x_root - watchlist_frame.winfo_rootx() - drag_data["start_x"]
+            x = max(0, min(x, watchlist_frame.winfo_width() - w.winfo_width()))
+            w.place_configure(x=x)
+
+        def on_drag_release(event):
+            w = drag_data["widget"]
+            if not w: return
+            
+            sorted_frames = sorted(chip_frames, key=lambda f: f.winfo_x())
+            for f in chip_frames:
+                f.place_forget()
+            
+            chip_frames[:] = sorted_frames
+            chips[:] = [f.var for f in sorted_frames]
+            
+            for f in chip_frames:
+                f.pack(side="left", padx=(0, 6), pady=(0, 5))
+            
+            add_btn.pack_forget()
+            add_btn.pack(side="left", pady=(0, 5))
+            drag_data["widget"] = None
+
+        def add_watchlist_chip(ticker=""):
+            var = tk.StringVar(value=ticker)
+            
+            # Style the chip frame
+            style_name = 'Chip.TFrame'
+            ttk.Style().configure(style_name, relief='solid', borderwidth=1, background=win.cget('bg'))
+            frame_chip = ttk.Frame(watchlist_frame, style=style_name)
+            frame_chip.var = var
+
+            ent = ttk.Entry(frame_chip, textvariable=var, width=8)
+            ent.pack(side="left", fill='x', expand=True, padx=(6, 4), pady=5)
+            
+            # Use a more subtle remove button
+            btn_remove = ttk.Button(frame_chip, text="✕", width=2, style='Toolbutton',
+                                    command=lambda f=frame_chip, v=var: remove_chip(f, v))
+            btn_remove.pack(side="left", padx=(0, 6), pady=5)
+
+            for w in (frame_chip, ent, btn_remove):
+                w.bind("<ButtonPress-1>", on_drag_start)
+                w.bind("<B1-Motion>", on_drag_motion)
+                w.bind("<ButtonRelease-1>", on_drag_release)
+
+            chip_frames.append(frame_chip)
+            chips.append(var)
+            
+            add_btn.pack_forget()
+            frame_chip.pack(side="left", padx=(0, 6), pady=(0, 5))
+            add_btn.pack(side="left", pady=(0, 5))
+            return var
+        
+        # Configure the add button command after add_watchlist_chip is defined
+        add_btn.config(command=lambda: add_watchlist_chip())
+
+        initial_watchlist = self.settings.get("watchlist", "").split("|")
+        for t in filter(None, (x.strip() for x in initial_watchlist)):
+            add_watchlist_chip(t)
+
+        # --- Separator and Action Buttons ---
+        ttk.Separator(main_frame).pack(fill='x', padx=10, pady=15)
+
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill='x', padx=10, pady=(5, 10))
+        button_frame.columnconfigure(0, weight=1) # Spacer
+
+        ttk.Button(button_frame, text="⟳ Reset App", command=self.reset_app)\
+            .grid(row=0, column=1, padx=5)
+        ttk.Button(button_frame, text="Save Settings", command=lambda: save_and_close(), style="Accent.TButton")\
+            .grid(row=0, column=2, padx=5)
+
+        # --- Save Logic ---
         def save_and_close():
             self.user_name = name_var.get().strip() or "Trader"
             self.settings.set("user_name", self.user_name)
+
             if theme_var.get() != self.current_theme:
                 self.is_dark_mode_var.set(theme_var.get() == "dark")
-                self.toggle_theme()  # triggers apply & persistence
-            self.dashboard._refresh()  # update header
-            self.settings.set("timezone", tz_var.get())            # Persist new defaults
-            self.settings.set("default_ticker", ticker_var.get().strip() or "SPY")
-            # collect non-empty tickers from our chip vars
-            # new: validate each chip via get_latest_price
-            valid = []
+                self.toggle_theme()
+            
+            self.settings.set("timezone", tz_var.get())
+            self.settings.set("default_ticker", ticker_var.get().strip().upper() or "SPY")
+
+            valid_tickers = []
             for var in chips:
-                t = var.get().strip().upper()
-                if not t:
+                ticker = var.get().strip().upper()
+                if not ticker:
                     continue
-                if self.data_mgr.get_latest_price(t) is None:
+                if self.data_mgr.get_latest_price(ticker) is None:
                     messagebox.showerror(
-                        "Invalid or Delisted Ticker",
-                        f"Ticker “{t}” is invalid or has been delisted and won’t be added."
+                        "Invalid Ticker",
+                        f"The ticker '{ticker}' is invalid or could not be found and will not be saved.",
+                        parent=win
                     )
                 else:
-                    valid.append(t)
-
-            self.settings.set("watchlist", "|".join(valid) if valid else "SPY|^VIX")
-
-
-
-            # Tell the dashboard to use the new ticker & redraw
-            new_tkr = self.settings.get("default_ticker")
-            self.dashboard.chart_pane.set_ticker(new_tkr)
-            self.dashboard.chart_pane.draw(self.dashboard.chart_pane._last_period)
-            # Also refresh watchlist display
+                    valid_tickers.append(ticker)
+            
+            self.settings.set("watchlist", "|".join(valid_tickers) if valid_tickers else "SPY|^VIX")
             self.dashboard._refresh()
-
             win.destroy()
 
-        ttk.Button(frm, text="Save", command=save_and_close).grid(row=5, column=0, columnspan=2, pady=15)
-        win.bind("<Return>", lambda e: save_and_close())
-
-        # ── Timezone chooser ───────────────────────────────────────────────
-        ttk.Label(frm, text="Timezone:").grid(row=2, column=0, sticky="w", pady=6)
-        tz_list = [
-            "America/Vancouver", "America/New_York", "Europe/London",
-            "Asia/Tokyo", "Australia/Sydney", "Europe/Paris",
-            "Europe/Berlin", "Asia/Kolkata", "Asia/Shanghai",
-            "America/Sao_Paulo"
-        ]
-        tz_var = tk.StringVar(value=self.settings.get("timezone"))
-        ttk.Combobox(
-            frm, textvariable=tz_var, values=tz_list,
-            state="readonly", width=25
-        ).grid(row=2, column=1, pady=6)
-        # ─────────────────────────────────────────────────────────────────────
-
-        # ── Default Chart Ticker ────────────────────────────────────────────
-        ttk.Label(frm, text="Default Chart Ticker:").grid(row=3, column=0, sticky="w", pady=6)
-        ticker_var = tk.StringVar(value=self.settings.get("default_ticker"))
-        ttk.Entry(frm, textvariable=ticker_var, width=25).grid(row=3, column=1, pady=6)
-
-
-        # ── Watchlist editor (individual boxes + “＋” button) ───────────────
-        ttk.Label(frm, text="Watchlist:").grid(row=4, column=0, sticky="nw", pady=6)
-        watchlist_frame = ttk.Frame(frm)
-        watchlist_frame.grid(row=4, column=1, sticky="w", pady=6)
-
-        # Helper: add one ticker chip
-        def add_watchlist_chip(ticker=""):
-            var = tk.StringVar(value=ticker)
-            ent = ttk.Entry(watchlist_frame, textvariable=var, width=8)
-            ent.pack(side="left", padx=(0, 4))
-            # “×” to remove
-            btn = ttk.Button(watchlist_frame, text="✕", width=2,
-                            command=lambda e=ent, b=None: (e.destroy(), btn.destroy()))
-            btn.pack(side="left", padx=(0, 8))
-            return var
-
-        # Pre-populate from settings
-        chips = []
-        initial = self.settings.get("watchlist", "").split("|")
-        for tkrs in filter(None, (t.strip() for t in initial)):
-            chips.append(add_watchlist_chip(tkrs))
-
-        # “＋” button to add new empty chip
-        add_btn = ttk.Button(watchlist_frame, text="＋", width=2,
-                            command=lambda: chips.append(add_watchlist_chip()))
-        add_btn.pack(side="left")
-
-        # Reset
-        ttk.Button(frm, text="⟳ Reset App", command=self.reset_app).grid(
-        row=6, column=0, columnspan=2, pady=(5, 0))
-
-
-
-        
+        win.bind("<Return>", lambda event: save_and_close())
+        win.bind("<Escape>", lambda event: win.destroy())
 
 
 
