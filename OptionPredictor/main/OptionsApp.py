@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser, simpledialog
 import threading
 import numpy as np # Import numpy if needed for default values or checks
+import math  # Import math for trigonometric functions
 import time # For small delay in animation
 import traceback # Import traceback for detailed error logging
 import pandas as pd
@@ -49,6 +50,7 @@ try:
 except ImportError:
     ChatBot = None
     print("Warning: ChatBot.py not found.")
+
 
 def configure_global_styles(theme: str):
     """
@@ -154,6 +156,7 @@ def configure_global_styles(theme: str):
     # -----------------------------------------------------------
 
 
+
 def calculate_binomial_greeks(S, K, T, r, sigma, option_type='call', N=500):
     from MonteCarloSimulation import cached_binomial_price
     
@@ -231,6 +234,13 @@ class Tooltip:
             font=("Helvetica", 9), wraplength=220
         )
         label.pack(ipadx=6, ipady=3)
+
+    def update(self, text: str):
+        self.text = text
+        # if the tip is showing, refresh it
+        if self.tipwindow:
+            self.hide_tooltip()
+            self.show_tooltip()
 
     def hide_tooltip(self, event=None):
         if self.tipwindow:
@@ -696,10 +706,10 @@ class SettingsManager:
         "user_name": "Trader",
         "theme": "light",
         "timezone": "America/Vancouver",
-        "default_ticker": "SPY",            
-        "watchlist": "SPY|^VIX"             
+        "default_ticker": "SPY",
+        "watchlist": "SPY|^VIX",
+        "marquee_speed": 1.5
     }
-
 
 
     def __init__(self):
@@ -760,7 +770,74 @@ class HomeDataManager:
         except Exception:
             return None, None
 
+    def get_ticker_details(self, ticker: str) -> dict | None:
+        """
+        Returns a dictionary with detailed quote info for a ticker.
+        Fetches current price, previous close, and symbol.
+        """
+        try:
+            import yfinance as yf
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            # Primary method: Use the 'info' dictionary for real-time data
+            if all(k in info for k in ['regularMarketPrice', 'previousClose', 'symbol']):
+                # yfinance sometimes returns numbers as None, handle this
+                if info['regularMarketPrice'] is not None and info['previousClose'] is not None:
+                    return info
 
+            # Fallback method: Use history for less common tickers or indices
+            hist = stock.history(period="2d")
+            if not hist.empty and len(hist) > 1:
+                return {
+                    'symbol': ticker,
+                    'regularMarketPrice': hist['Close'].iloc[-1],
+                    'previousClose': hist['Close'].iloc[-2]
+                }
+            return None
+        except Exception:
+            # If any error occurs (network, invalid ticker), return None
+            return None
+
+    # ── Fear & Greed (CNN index: 0‒100) ───────────────────────────────
+    def get_fear_greed(self) -> int | None:
+        """
+        Fetch the latest CNN Fear & Greed index (0-100) using a headless
+        browser (Playwright).  Returns None if the score cannot be obtained.
+        """
+        try:
+            from playwright.sync_api import sync_playwright, TimeoutError
+        except ImportError:
+            print(
+                "\n---\n"
+                "Playwright is not installed. Install with:\n"
+                "  pip install playwright && playwright install\n"
+                "---\n"
+            )
+            return None
+
+        page_url = "https://www.cnn.com/markets/fear-and-greed"
+        score_selector = "//*[contains(@class, 'market-fng-gauge__dial-number-value')]"
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(page_url, timeout=15_000)              # 15 s page load
+                page.wait_for_selector(score_selector, timeout=10_000)
+
+                score_text = page.locator(score_selector).first.inner_text().strip()
+                browser.close()
+
+                return int(score_text) if score_text.isdigit() else None
+
+        except TimeoutError:
+            print("Timeout: score element did not appear in time.")
+            return None
+        except Exception as e:
+            print(f"Playwright error: {e}")
+            return None
+
+    
     # ── News  ────────────────────────────────────────────────────────────
     def get_news_headlines(self, n: int = 20) -> tuple[list[tuple[str, float | None, str]], float | None]:
         """
@@ -869,12 +946,18 @@ class HomeDashboard(ttk.Frame):
         self._ny_close = dt_time(hour=16, minute=0)
 
 
-        
+       
         # Configure the main frame's grid layout
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1) # Main content area should expand
 
         self._build_ui()
+
+        self._wl_after_id = None
+        self._wl_animating = False
+        self._marquee_position = 0.0
+        self._pixels_per_frame = 1.
+
         self._refresh()          # Initial data load
         self._auto_refresh()     # Start 30-second refresh loop
 
@@ -892,35 +975,71 @@ class HomeDashboard(ttk.Frame):
         self._build_footer()
         
     def _build_header(self):
-        """Builds the top header bar with title, clock, and status icons."""
+        """Top bar with title, mini Fear-&-Greed gauge, clock and status icons."""
         header_frame = ttk.Frame(self)
         header_frame.grid(row=0, column=0, sticky="ew")
-        header_frame.columnconfigure(1, weight=1) # Spacer column
 
+        # ── column map ───────────────────────────────────────────────
+        # 0  Welcome “title”         (left-aligned)
+        # 1  Spacer (weight=1)       – pushes remaining widgets right
+        # 2  Mini Fear & Greed gauge
+        # 3  Clock
+        # 4  Market-status dot
+        # 5  Market-status label
+        # 6  Wi-Fi icon
+        header_frame.columnconfigure(1, weight=1)
+
+        # 0 ─ Welcome
         self.header_lbl = ttk.Label(header_frame, text="", style="Title.TLabel")
         self.header_lbl.grid(row=0, column=0, sticky="w")
-        
-        self.time_lbl = ttk.Label(header_frame, text="", style="Secondary.TLabel")
-        self.time_lbl.grid(row=0, column=2, sticky="e", padx=10)
 
-        # ── Live Market Status Indicator ───────────────────────────
-        # Use our current theme’s background color; ttk styles don’t expose 'background' as a cget
-        bg_color = self.controller.theme_settings()['bg']
-        self.market_canvas = tk.Canvas(
-            header_frame,
-            width=12, height=12,
-            highlightthickness=0,
-            bg=bg_color
+        # 2 ─ Mini Fear & Greed gauge
+        # Increased size for better visuals and to fit text
+        self.fng_canvas = tk.Canvas(header_frame,
+                                    width=80, height=55,
+                                    highlightthickness=0, bd=0)
+        self.fng_canvas.grid(row=0, column=2, sticky="e", padx=(0, 10))
+
+        # open CNN Fear & Greed page on right-click
+        cnn_url = "https://www.cnn.com/markets/fear-and-greed"
+        self.fng_canvas.bind(
+            "<Button-3>",                      # Windows / Linux right-click
+            lambda _e, url=cnn_url: webbrowser.open(url)
+        )
+        # macOS secondary click (Ctrl-click) – optional but nice
+        self.fng_canvas.bind(
+            "<Control-Button-1>",
+            lambda _e, url=cnn_url: webbrowser.open(url)
         )
 
-        self.market_canvas.grid(row=0, column=3, sticky="e", padx=(5,0))
-        self.market_circle = self.market_canvas.create_oval(2,2,10,10, fill="red", outline="")
-        self.market_lbl    = ttk.Label(header_frame, text="Closed", style="Status.TLabel")
-        self.market_lbl.grid(row=0, column=4, sticky="e", padx=(2,10))
+        self.fng_tooltip = Tooltip(self.fng_canvas, "Loading Fear & Greed…")
+        
+        # Make the canvas background match the theme
+        bg_color = self.controller.theme_settings()['bg']
+        self.fng_canvas.configure(bg=bg_color)
 
+        # 3 ─ Clock
+        self.time_lbl = ttk.Label(header_frame, text="", style="Secondary.TLabel")
+        self.time_lbl.grid(row=0, column=3, sticky="e", padx=(0, 10))
+
+        # 4–5 ─ Market-status indicator
+        bg = self.controller.theme_settings()['bg']
+        self.market_canvas = tk.Canvas(header_frame,
+                                    width=12, height=12,
+                                    highlightthickness=0, bg=bg)
+        self.market_canvas.grid(row=0, column=4, sticky="e", padx=(5, 0))
+        self.market_circle = self.market_canvas.create_oval(2, 2, 10, 10,
+                                                            fill="red", outline="")
+        self.market_lbl = ttk.Label(header_frame, text="Closed", style="Status.TLabel")
+        self.market_lbl.grid(row=0, column=5, sticky="e", padx=(2, 10))
+
+        # 6 ─ Wi-Fi icon
         self._build_wifi_icon(header_frame)
-        self.wifi_label.grid(row=0, column=5, sticky="e")
+        self.wifi_label.grid(row=0, column=6, sticky="e")
+
+        # start real-time clock
         self._start_clock()
+
 
         
     def _build_overview(self):
@@ -930,17 +1049,73 @@ class HomeDashboard(ttk.Frame):
         overview_frame.columnconfigure(0, weight=1)
         overview_frame.columnconfigure(1, weight=1)
 
-        # Indices Card
+        # Indices Card - now with a content frame
         indices_card = ttk.LabelFrame(overview_frame, text="Market Indices")
         indices_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        self.index_lbl = ttk.Label(indices_card, text="Loading...", padding=10, style="Stat.TLabel")
-        self.index_lbl.pack(expand=True, fill="both")
-        
-        # Watchlist Card
+        self.indices_content_frame = ttk.Frame(indices_card)
+        self.indices_content_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # ───── Watch-list Card – infinite marquee of full-size boxes ─────
         watchlist_card = ttk.LabelFrame(overview_frame, text="Watchlist")
         watchlist_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
-        self.watchlist_lbl = ttk.Label(watchlist_card, text="Loading...", padding=10, style="Stat.TLabel", wraplength=400, justify="left")
-        self.watchlist_lbl.pack(expand=True, fill="both")
+        watchlist_card.config(height=90)
+
+        # 1️⃣  Canvas with proper theme background
+        bg_color = self.controller.theme_settings()['bg']
+        self.wl_canvas = tk.Canvas(
+            watchlist_card, height=90, highlightthickness=0, bd=0, bg=bg_color
+        )
+        self.wl_canvas.pack(fill="both", expand=True)
+
+        # 2️⃣  Main strip
+        self.wl_strip = ttk.Frame(self.wl_canvas)
+        self.wl_window = self.wl_canvas.create_window(
+            (0, 0), window=self.wl_strip, anchor="nw"
+        )
+
+        # 3️⃣  Alias for _refresh()
+        self.watchlist_content_frame = self.wl_strip
+
+        # 4️⃣  Clone strip
+        self.wl_clone = ttk.Frame(self.wl_canvas)
+        self.wl_clone_window = self.wl_canvas.create_window(
+            (0, 0), window=self.wl_clone, anchor="nw"
+        )
+
+        # Bind the events to the class method (not nested function)
+        self.wl_strip.bind("<Configure>", self._sync_wl_strip)
+        self.wl_canvas.bind("<Configure>", self._sync_wl_strip)
+
+        # ── Top Movers (greatest ±% change among watch-list) ─────────
+        movers_card = ttk.LabelFrame(overview_frame, text="Top Movers")
+        movers_card.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        self.movers_content_frame = ttk.Frame(movers_card)
+        self.movers_content_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+
+
+    def _sync_wl_strip(self, event=None):
+        """
+        Keep the canvas' scroll-region and the two ticker rows in sync.
+        Called every time the inner strip changes size.
+        """
+        strip_w = self.wl_strip.winfo_reqwidth()
+        if not strip_w: 
+            return
+        xview = self.wl_canvas.xview()          # ← remember position
+        
+       
+
+        # 1️⃣  make BOTH windows exactly the same width
+        self.wl_canvas.itemconfigure(self.wl_window, width=strip_w)
+        self.wl_canvas.itemconfigure(self.wl_clone_window, width=strip_w)
+
+        # 2️⃣  Set scroll region to accommodate both strips side by side
+        self.wl_canvas.configure(scrollregion=(0, 0, strip_w * 2, 90))
+
+        # 3️⃣  Position clone immediately after original (no gap)
+        self.wl_canvas.coords(self.wl_clone_window, strip_w, 0)
+        self.wl_canvas.xview_moveto(xview[0])   # ← restore position
 
     def _build_main_panes(self):
         """Builds the main split-pane view for news and charts."""
@@ -1115,7 +1290,7 @@ class HomeDashboard(ttk.Frame):
         # Determine the background color reliably from the current theme
         bg = "#0f0f0f" if self.controller.current_theme == 'dark' else '#f0f0f0'
 
-        # FIX: Explicitly update the label's background color during theme changes.
+        # Explicitly update the label's background color during theme changes.
         if hasattr(self, "wifi_label"):
             self.wifi_label.configure(bg=bg)
 
@@ -1127,6 +1302,11 @@ class HomeDashboard(ttk.Frame):
         # Re-apply the current icon to the label
         if hasattr(self, "_last_wifi_status"):
             self._update_wifi_icon(self._last_wifi_status)
+
+        # Update the market canvas background to match the theme
+        if hasattr(self, "wl_canvas"):
+            canvas_bg = self.controller.theme_settings()['bg']
+            self.wl_canvas.configure(bg=canvas_bg)
 
 
     def _open_selected_article(self, event=None):
@@ -1140,28 +1320,77 @@ class HomeDashboard(ttk.Frame):
                 webbrowser.open(url)
 
     def _refresh(self):
-        # Header
+        # greeting
         self.header_lbl.config(text=f"Welcome, {self.controller.user_name}!")
-        
-        # Market Overview Cards
-        spy, vix = self.data_mgr.get_index_prices()
-        self.index_lbl.config(text=f"SPY {spy:,.2f}   |   VIX {vix:,.2f}" if spy is not None else "Indices: N/A")
 
-        # Watchlist Card
-        watchlist_tickers = [t.strip() for t in self.controller.settings.get("watchlist", "").split("|") if t.strip()]
-        price_parts = []
-        valid_tickers = []
-        for ticker in watchlist_tickers:
-            price = self.data_mgr.get_latest_price(ticker)
-            if price is not None:
-                price_parts.append(f"{ticker} {price:,.2f}")
-                valid_tickers.append(ticker)
-            # This version omits the disruptive messagebox on auto-refresh for a smoother UX
-        if len(valid_tickers) != len(watchlist_tickers):
-            self.controller.settings.set("watchlist", "|".join(valid_tickers))
-        self.watchlist_lbl.config(text=" | ".join(price_parts) if price_parts else "No valid tickers in watchlist.")
-        
-        # News Panel
+        # ─── Indices card ────────────────────────────────────────────────
+        for w in self.indices_content_frame.winfo_children():
+            w.destroy()
+        ttk.Label(self.indices_content_frame, text="Loading indices…").pack()
+
+        def fetch_indices():
+            tickers = ["^SPX", "^VIX"]
+            data = [self.data_mgr.get_ticker_details(t) for t in tickers]
+            data = [d for d in data if d]
+            try:
+                self.after(0, self._update_indices_ui, data)
+            except RuntimeError:
+                pass
+        threading.Thread(target=fetch_indices, daemon=True).start()
+
+        # ─── Fear & Greed ────────────────────────────────────────────────
+        def fetch_fng():
+            score = self.data_mgr.get_fear_greed()
+            try:
+                self.after(0, self._update_fng_ui, score)
+            except RuntimeError:
+                pass
+        threading.Thread(target=fetch_fng, daemon=True).start()
+
+
+        # ─── Watch-list card + Top Movers ────────────────────────────────
+        if not hasattr(self, "_wl_loader"):
+            self._wl_loader = ttk.Label(self.watchlist_content_frame,
+                                        text="Refreshing watchlist…")
+            self._wl_loader.pack(expand=True)
+
+        watchlist = [
+            t.strip()
+            for t in self.controller.settings.get("watchlist", "").split("|")
+            if t.strip()
+        ]
+
+        def fetch_watchlist_and_movers():
+            data = [self.data_mgr.get_ticker_details(t) for t in watchlist]
+            data = [d for d in data if d]
+
+            # watch-list UI
+            try:
+                self.after(0, self._update_watchlist_ui, data)
+            except RuntimeError:
+                return  # window closing
+
+            # top movers UI
+            movers = (
+                sorted(
+                    data,
+                    key=lambda d: abs(
+                        (d["regularMarketPrice"] - d["previousClose"])
+                        / d["previousClose"]
+                    ),
+                    reverse=True,
+                )[:3]
+                if data
+                else []
+            )
+            try:
+                self.after(0, self._update_movers_ui, movers)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=fetch_watchlist_and_movers, daemon=True).start()
+
+        # ─── News panel ─────────────────────────────────────────────────
         rows, overall = self.data_mgr.get_news_headlines(20)
         if overall is None:
             txt, color = "Overall sentiment: N/A", "gray"
@@ -1175,19 +1404,329 @@ class HomeDashboard(ttk.Frame):
 
         self.news_tv.delete(*self.news_tv.get_children())
         for title, score, url in rows:
-            tag = ""
-            if score is not None:
-                if score > 0.25: tag = "pos"
-                elif score < -0.25: tag = "neg"
-                else: tag = "neu"
-            self.news_tv.insert("", "end", values=(title, f"{score:+.2f}" if score is not None else "N/A", url), tags=(tag,))
+            if score is None:
+                tag, val = "", "N/A"
+            else:
+                if score > 0.25:
+                    tag = "pos"
+                elif score < -0.25:
+                    tag = "neg"
+                else:
+                    tag = "neu"
+                val = f"{score:+.2f}"
+            self.news_tv.insert("", "end", values=(title, val, url), tags=(tag,))
         self.news_tv.tag_configure("pos", foreground="green")
         self.news_tv.tag_configure("neg", foreground="red")
         self.news_tv.tag_configure("neu", foreground="orange")
+
         
+
+
     def _auto_refresh(self):
         self._refresh()
         self.after(30_000, self._auto_refresh)
+
+    def _create_ticker_box(self, parent, data, context_ticker=None):
+        """Creates and returns a styled frame for a single ticker."""
+        price = data.get('regularMarketPrice', 0)
+        prev_close = data.get('previousClose', 0)
+        display_ticker = data.get('symbol', 'N/A')
+        
+        # If a specific ticker for context menus is not provided, use the display one.
+        # This allows us to show "S&P 500" but have the right-click link to "^SPX".
+        bind_ticker = context_ticker if context_ticker is not None else display_ticker
+
+        change = price - prev_close
+        pct_change = (change / prev_close) * 100 if prev_close != 0 else 0
+
+        color = "green" if change >= 0 else "red"
+        sign = "+" if change >= 0 else ""
+
+        box = ttk.Frame(parent, borderwidth=1, relief="groove", padding=(8, 4))
+        box.pack(side="left", padx=4, pady=4, fill="x")
+
+        ticker_lbl = ttk.Label(box, text=display_ticker, font=("Segoe UI", 11, "bold"))
+        ticker_lbl.grid(row=0, column=0, sticky="w")
+
+        price_lbl = ttk.Label(box, text=f"{price:,.2f}", font=("Segoe UI", 11))
+        price_lbl.grid(row=0, column=1, sticky="e", padx=(15, 0))
+
+        change_text = f"{sign}{change:,.2f} ({sign}{pct_change:.2f}%)"
+        change_lbl = ttk.Label(box, text=change_text, foreground=color, font=("Segoe UI", 9))
+        change_lbl.grid(row=1, column=0, columnspan=2, sticky="w")
+
+        # Bind the right-click event using the correct ticker for the web link
+        for widget in [box, ticker_lbl, price_lbl, change_lbl]:
+            widget.bind("<Button-3>", lambda event, t=bind_ticker: self._show_ticker_context_menu(event, t))
+        
+        #Ensure the created box is returned
+        return box
+    
+    def _view_chart_for_ticker(self, ticker: str):
+        """
+        Switch the right-hand chart pane to *ticker* and update the header text.
+        Also save it as the new default so the choice persists.
+        """
+        # redraw chart
+        self.chart_pane.set_ticker(ticker)                    # uses CandlestickChartPane.set_ticker :contentReference[oaicite:3]{index=3}
+        # update the frame’s title bar
+        self.chart_box.config(text=f"{ticker} Chart")
+        # remember for next launch
+        try:
+            self.controller.settings.set("default_ticker", ticker)
+        except Exception:
+            pass   # settings persistence is best-effort
+
+        
+    def _show_ticker_context_menu(self, event, ticker):
+        """Right-click menu for a watch-list ticker."""
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(
+            label=f"View {ticker} on Google Finance",
+            command=lambda t=ticker: self._open_google_finance(t)
+        )
+        m.add_command(                                  # ← NEW
+            label="View chart",
+            command=lambda t=ticker: self._view_chart_for_ticker(t)
+        )
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _open_google_finance(self, ticker):
+        """Opens a Google search for the ticker's stock info for reliability."""
+        import webbrowser
+        # Using a search query is more robust than guessing the exchange (e.g., NASDAQ, NYSE)
+        webbrowser.open(f"https://www.google.com/search?q=stock%20price%20{ticker}")
+    
+    # ──────────────────────────────────────────────────────────────────
+    def _update_watchlist_ui(self, data):
+        """
+        Rebuild the scrolling marquee using the regular full-size
+        ticker boxes created by _create_ticker_box, then (re)start the
+        infinite scroll animation.
+        """
+        # Stop existing animation cleanly
+        self._stop_watchlist_marquee()
+
+        # Clear both the main strip and its clone
+        for frame in (self.wl_strip, self.wl_clone):
+            for w in frame.winfo_children():
+                w.destroy()
+
+        if not data:
+            ttk.Label(self.wl_strip, text="Watch-list empty…").pack(padx=6)
+            return
+
+        # Populate original + clone strips with IDENTICAL boxes
+        for d in data:
+            # original row
+            self._create_ticker_box(self.wl_strip, d)
+            # clone row for seamless wrap-around
+            self._create_ticker_box(self.wl_clone, d)
+
+        # Ensure canvas size / scroll-region are up-to-date
+        self.wl_strip.update_idletasks()
+        # Trigger canvas configure to sync scroll region
+        self.wl_canvas.event_generate("<Configure>")
+        
+        # Small delay to let UI settle before starting animation
+        self.after(50, self._start_watchlist_marquee)
+
+    def _update_indices_ui(self, all_data):
+        """Callback function to build the indices UI on the main thread."""
+        for widget in self.indices_content_frame.winfo_children():
+            widget.destroy()
+
+        if not all_data:
+            ttk.Label(self.indices_content_frame, text="Could not load market data.").pack()
+            return
+
+        name_map = {
+            '^SPX': 'S&P 500',
+            '^VIX': 'VIX'
+        }
+
+        for data in all_data:
+            original_ticker = data['symbol']
+            data['symbol'] = name_map.get(original_ticker, original_ticker)
+            
+            # Create the box, passing the original ticker for the right-click context menu
+            self._create_ticker_box(self.indices_content_frame, data, context_ticker=original_ticker)
+
+    def _update_movers_ui(self, movers):
+        """Populate Top Movers as one concise summary line."""
+        for w in self.movers_content_frame.winfo_children():
+            w.destroy()
+
+        if not movers:
+            ttk.Label(self.movers_content_frame,
+                      text="No data (empty watch-list?)").pack()
+            return
+
+        parts = []
+        for d in movers:
+            sym   = d["symbol"]
+            prc   = d["regularMarketPrice"]
+            prev  = d["previousClose"]
+            pct   = (prc - prev) / prev * 100 if prev else 0
+            sign  = "+" if pct >= 0 else ""
+            parts.append(f"{sym} {sign}{pct:.1f}%")
+
+        summary = "   •   ".join(parts)
+        ttk.Label(
+            self.movers_content_frame,
+            text=summary,
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w")
+
+    def _start_watchlist_marquee(self):
+        """
+        Robust continuous scrolling marquee with proper speed control and cleanup.
+        """
+        # Stop any existing animation cleanly
+        self._stop_watchlist_marquee()
+        
+        # Wait for UI to settle before starting
+        self.wl_strip.update_idletasks()
+        strip_width = self.wl_strip.winfo_reqwidth()
+        
+        if strip_width <= 0:
+            return
+        
+        # Initialize marquee state
+        self._wl_animating = True
+        self._marquee_position = 0.0  # Absolute pixel position
+        
+        # Get speed setting (pixels per frame)
+        speed_setting = float(self.controller.settings.get("marquee_speed", 1.5))
+        # Convert speed setting to actual pixels per frame
+        # Speed 1.0 = 1 pixel per frame, Speed 2.0 = 2 pixels per frame, etc.
+        self._pixels_per_frame = max(0.1, speed_setting)
+        
+        # Animation timing
+        self._frame_delay = 16  # ~60 FPS
+        
+        def _animate_step():
+            """Single animation step with robust error handling."""
+            if not self._wl_animating:
+                return
+                
+            try:
+                # Check if canvas still exists
+                if not self.wl_canvas.winfo_exists():
+                    self._wl_animating = False
+                    return
+                
+                # Update position
+                self._marquee_position += self._pixels_per_frame
+                
+                # Reset position when we've scrolled one full strip width
+                if self._marquee_position >= strip_width:
+                    self._marquee_position = 0.0
+                
+                # Convert to fractional position for xview_moveto
+                # Total scrollable area is strip_width * 2 (original + clone)
+                fractional_pos = self._marquee_position / (strip_width * 2)
+                
+                # Apply scroll position
+                self.wl_canvas.xview_moveto(fractional_pos)
+                
+                # Schedule next frame
+                if self._wl_animating:
+                    self._wl_after_id = self.wl_canvas.after(self._frame_delay, _animate_step)
+                    
+            except tk.TclError:
+                # Widget destroyed during animation
+                self._wl_animating = False
+            except Exception as e:
+                # Unexpected error - stop animation gracefully
+                print(f"Marquee animation error: {e}")
+                self._wl_animating = False
+        
+        # Start the animation
+        _animate_step()
+
+    def _stop_watchlist_marquee(self):
+        """
+        Cleanly stop the marquee animation.
+        """
+        self._wl_animating = False
+        
+        if hasattr(self, '_wl_after_id') and self._wl_after_id:
+            try:
+                self.wl_canvas.after_cancel(self._wl_after_id)
+            except:
+                pass
+            self._wl_after_id = None
+
+    def _update_marquee_speed(self):
+        """
+        Update marquee speed without restarting the entire animation.
+        Call this when speed settings change.
+        """
+        if hasattr(self, '_wl_animating') and self._wl_animating:
+            # Update speed on the fly
+            speed_setting = float(self.controller.settings.get("marquee_speed", 1.5))
+            self._pixels_per_frame = max(0.1, speed_setting)
+
+    def _update_fng_ui(self, score: int | None):
+        """
+        Update the mini Fear & Greed gauge on the header.
+        Draws a coloured arc, a centre value, and a needle.
+        Also refreshes the tooltip with a plain-language interpretation.
+        """
+        c = self.fng_canvas
+        c.delete("fng_gauge")                       # clear previous drawing
+
+        # ── Static layout constants ─────────────────────────────────────
+        cx, cy   = 35, 35          # centre
+        radius   = 28
+        arc_w    = 6
+
+        # background semicircle (grey)
+        bbox = (cx - radius, cy - radius, cx + radius, cy + radius)
+        c.create_arc(*bbox, start=0, extent=180,
+                    style="arc", width=arc_w,
+                    outline="#555555", tags="fng_gauge")
+
+        # ---------------- if data unavailable --------------------------
+        if score is None:
+            c.create_text(cx, cy - 5, text="N/A",
+                        font=("Segoe UI", 12, "bold"),
+                        fill="grey", tags="fng_gauge")
+            self.fng_tooltip.update("Fear & Greed index unavailable")
+            return
+
+        # ── Colour & sentiment text by range ───────────────────────────
+        if score < 25:
+            clr, mood, note = "#D32F2F", "Extreme Fear", "Stocks may be undervalued"
+        elif score < 50:
+            clr, mood, note = "#F57C00", "Fear", "Bearish undertone"
+        elif score < 75:
+            clr, mood, note = "#9ACD32", "Greed", "Bullish sentiment"
+        else:
+            clr, mood, note = "#00B200", "Extreme Greed", "Markets may be overheated"
+
+        # ── Dynamic coloured arc ---------------------------------------
+        # score 0 → 180°, score 100 → 0°
+        sweep_start = 180 - score * 1.8
+        c.create_arc(*bbox, start=sweep_start, extent=180 - sweep_start,
+                    style="arc", width=arc_w,
+                    outline=clr, tags="fng_gauge")
+
+        # ── Centre text -------------------------------------------------
+        c.create_text(cx, cy - 8, text=str(score),
+                    font=("Segoe UI", 14, "bold"),
+                    fill=clr, tags="fng_gauge")
+        c.create_text(cx, cy + 6, text="F&G Index",
+                    font=("Segoe UI", 7),
+                    fill="grey", tags="fng_gauge")
+
+        # ── Tooltip -----------------------------------------------------
+        self.fng_tooltip.update(f"{score} – {mood}\n{note}")
+
 
 
 # Import logic functions from the separate file
@@ -1462,6 +2001,7 @@ class OptionAnalyzerApp:
         add_btn = ttk.Button(watchlist_frame, text="＋", width=3)
         add_btn.pack(side="left", pady=(0, 5))
 
+
         def remove_chip(frame_to_remove, var_to_remove):
             idx = chips.index(var_to_remove)
             chips.pop(idx)
@@ -1490,22 +2030,56 @@ class OptionAnalyzerApp:
             w.place_configure(x=x)
 
         def on_drag_release(event):
+            """
+            Drop the dragged chip precisely between its neighbours.
+
+            Algorithm
+            ---------
+            1.  Turn the pointer’s absolute X-pixel into a coordinate
+                relative to `watchlist_frame`.
+            2.  Take the chip out of the list,
+                work out which neighbour’s centre it is left of,
+                and insert it there.
+            3.  Re-pack the chips and keep the “＋” button on the far right.
+            """
             w = drag_data["widget"]
-            if not w: return
-            
-            sorted_frames = sorted(chip_frames, key=lambda f: f.winfo_x())
+            if not w:
+                return
+
+            # Make sure geometry info is current
+            watchlist_frame.update_idletasks()
+
+            # ➊ Drop position relative to the chip container
+            drop_x = event.x_root - watchlist_frame.winfo_rootx()
+
+            # ➋ Build the list without the dragged chip
+            frames = [f for f in chip_frames if f is not w]
+
+            # Find where the chip’s *centre* should slot in
+            insert_at = len(frames)     # default → far right
+            for i, f in enumerate(frames):
+                centre = f.winfo_x() + f.winfo_width() / 2
+                if drop_x < centre:     # first centre to the right of pointer
+                    insert_at = i
+                    break
+
+            # Insert and commit the new order
+            frames.insert(insert_at, w)
+            chip_frames[:] = frames
+            chips[:] = [f.var for f in frames]
+
+            # ➌ Re-pack in order
             for f in chip_frames:
-                f.place_forget()
-            
-            chip_frames[:] = sorted_frames
-            chips[:] = [f.var for f in sorted_frames]
-            
-            for f in chip_frames:
+                f.place_forget()        # in case any are still “place”d
+                f.pack_forget()
                 f.pack(side="left", padx=(0, 6), pady=(0, 5))
-            
+
+            # Keep the add button glued to the far right
             add_btn.pack_forget()
             add_btn.pack(side="left", pady=(0, 5))
+
             drag_data["widget"] = None
+
 
         def add_watchlist_chip(ticker=""):
             var = tk.StringVar(value=ticker)
@@ -1555,6 +2129,19 @@ class OptionAnalyzerApp:
             .grid(row=0, column=1, padx=5)
         ttk.Button(button_frame, text="Save Settings", command=lambda: save_and_close(), style="Accent.TButton")\
             .grid(row=0, column=2, padx=5)
+        
+        # ──  Miscellaneous  ─────────────────────────────────────────────
+        misc = ttk.Labelframe(main_frame, text="Miscellaneous", padding=15)
+        misc.pack(fill="x", padx=8, pady=6)
+        misc.columnconfigure(1, weight=1)
+
+        ttk.Label(misc, text="Watch-list scroll speed:").grid(row=0, column=0, sticky="w")
+
+        speed_var = tk.DoubleVar(value=self.settings.get("marquee_speed", 1.5))
+        speed_scale = ttk.Scale(misc, from_=0.5, to=6, variable=speed_var,
+                                orient="horizontal")
+        speed_scale.grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Label(misc, text="px / frame").grid(row=0, column=2, sticky="w")
 
         # --- Save Logic ---
         def save_and_close():
@@ -1583,6 +2170,10 @@ class OptionAnalyzerApp:
                     valid_tickers.append(ticker)
             
             self.settings.set("watchlist", "|".join(valid_tickers) if valid_tickers else "SPY|^VIX")
+            self.settings.set("marquee_speed", float(speed_var.get()))
+            if hasattr(self, "dashboard"):
+                self.dashboard._wl_animating = False      # stop old loop
+                self.dashboard._start_watchlist_marquee() # restart with new speed
             self.dashboard._refresh()
             win.destroy()
 
@@ -2267,7 +2858,9 @@ class OptionAnalyzerApp:
         if model == "black_scholes" and bs_price is not None:
             simulation_settings.append(("Black-Scholes Price", f"${bs_price:.4f}"))
         elif model != "black_scholes" and fair_price is not None:
-            simulation_settings.append(("Model-Based Estimate", f"${fair_price:.4f}"))
+            simulation_settings.append(
+                ("Model-Based Estimate", f"${float(self.input_data['fair_price']):.4f}")
+            )
 
 
         if model == "jump_diffusion":
