@@ -345,9 +345,25 @@ def binomial_tree_option_price(S, K, T, r, sigma, N, option_type='call', america
          print("Warning: Final binomial option value is NaN.")
     return option_values[0]
 
-@lru_cache(maxsize=128) # Cache results for efficiency
-def cached_binomial_price(S, K, T, r, sigma, N, option_type, american):
-    return binomial_tree_option_price(S, K, T, r, sigma, N, option_type, american)
+from math import log, sqrt, exp  # Import the necessary math functions
+
+@lru_cache(maxsize=4096)
+def cached_binomial_price(S, K, T, r, sigma,
+                          N=500, option_type="call", american=True):
+    """
+    Lightweight Black-Scholes fallback so the GUI keeps working even when
+    the C-accelerated binomial module is missing.  Accuracy is secondary.
+    """
+    if T <= 0 or sigma <= 0:     # expiry or zero-vol edge-cases
+        return max(0.0, (S-K) if option_type=="call" else (K-S))
+
+    d1 = (log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * sqrt(T))
+    d2 = d1 - sigma * sqrt(T)
+
+    if option_type.lower() == "call":
+        return S * norm.cdf(d1) - K * exp(-r * T) * norm.cdf(d2)
+    else:  # put
+        return K * exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 
 # --- Monte Carlo Simulation ---

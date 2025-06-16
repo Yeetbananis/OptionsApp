@@ -2,12 +2,16 @@
 
 import math
 try:
-    from OptionPredictor.main.MonteCarloSimulation import cached_binomial_price
+    # local, sibling module import
+    from MonteCarloSimulation import cached_binomial_price
 except ImportError:
-    print("Warning: Could not import cached_binomial_price. Profit potential scoring will be limited.")
-    def cached_binomial_price(*args, **kwargs):
-        # print("Dummy binomial price called.")
-        return 0.0 # Return 0 or NaN to indicate failure
+        try:
+            # if using package structure
+            from .MonteCarloSimulation import cached_binomial_price
+        except ImportError:
+            print("Warning: Could not import cached_binomial_price. Profit potential scoring will be limited.")
+            def cached_binomial_price(*args, **kwargs):
+                return 0.0
 
 class StrategyRecommender:
     """

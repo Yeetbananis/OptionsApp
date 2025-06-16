@@ -23,7 +23,7 @@ MC_DEFAULT_RATE = 0.05      # Default simulation rate
 MC_DEFAULT_DAYS = 30        # Default simulation expiry
 
 class StrategyBuilderWindow(tk.Toplevel):
-    def __init__(self, parent, current_theme='light'):
+    def __init__(self, parent, current_theme='light', idea_data: dict | None = None): # MODIFIED LINE
         super().__init__(parent)
         self.parent = parent
         self.current_theme = current_theme
@@ -34,7 +34,7 @@ class StrategyBuilderWindow(tk.Toplevel):
         self.grab_set()
 
 
-
+ 
          # apply the central theme via the parent
         if hasattr(parent, 'apply_theme_to_window'):
             parent.apply_theme_to_window(self)
@@ -82,6 +82,8 @@ class StrategyBuilderWindow(tk.Toplevel):
         # --- Connect Events ---
         self.fig.canvas.mpl_connect("motion_notify_event", self._on_hover)
 
+        if idea_data:
+            self._prefill_from_idea(idea_data)
 
     def _setup_plot_area(self):
         """Initializes the Matplotlib figure and canvas area."""
@@ -126,7 +128,49 @@ class StrategyBuilderWindow(tk.Toplevel):
         except:
             pass
 
+    def _prefill_from_idea(self, idea_data: dict):
+        """
+        Takes data from an Idea object and populates the strategy builder's fields.
+        """
+        self._set_status("Loaded from Idea Suite.", "blue")
 
+        # Extract data from the idea dictionary
+        symbol = idea_data.get('symbol')
+        strategy_info = idea_data.get('suggested_strategy', {})
+        strategy_type = strategy_info.get('type', 'Custom').replace('_', ' ').title()
+
+        # ⚠️ We no longer pre-fill S₀ or DTE—user will enter those manually.
+
+        # Select the right template tab exactly as if the user clicked it
+        base = strategy_type
+        for p in ("Long ", "Short "):
+            if base.startswith(p):
+                base = base[len(p):]
+                break
+        if base.endswith(" Spread"):
+            base = base[:-len(" Spread")]
+
+        method_name = f"_apply_{base.lower().replace(' ', '_')}_template"
+        tgt = getattr(self, method_name, None)
+        if callable(tgt):
+            # invoke the template’s default strikes & premiums
+            tgt()
+            # then prompt the user to fill in the idea-specific fields
+            msg = (
+                f"Template “{strategy_type}” applied with default strikes/premiums.\n\n"
+                "Please now enter the idea’s specific:\n"
+                f" • Current Price (S₀): {idea_data.get('metrics', {}).get('spot_price', '…')}\n"
+                f" • Days to Expiration (DTE): {idea_data.get('metrics', {}).get('dte', '…')}\n\n"
+                "Then adjust strikes & premiums as needed."
+            )
+            messagebox.showinfo("Enter Idea Parameters", msg, parent=self)
+        else:
+            messagebox.showwarning(
+                "Template Not Found",
+                f"No builder-template for “{strategy_type}”.\n"
+                "Select one manually from the Templates tab.",
+                parent=self
+            )
 
 
 
@@ -1723,9 +1767,12 @@ class StrategyBuilderWindow(tk.Toplevel):
         except:
             S0 = 100.0
 
-        # Fixed X range
-        self.S_values = np.linspace(50, 160, PLOT_POINTS)
-
+         # Dynamic X range around current price (±PLOT_PRICE_RANGE_FACTOR)
+        range_factor = PLOT_PRICE_RANGE_FACTOR  # e.g. 0.3 for ±30%
+        low  = max(S0 * (1 - range_factor), 0.0)  # don’t go below zero
+        high = S0 * (1 + range_factor)
+        self.S_values = np.linspace(low, high, PLOT_POINTS)
+        self.ax.set_xlim(low, high)
         try:
             self.payoff_values, net_premium = self._calculate_strategy_payoff_range(self.S_values)
         except Exception as e:

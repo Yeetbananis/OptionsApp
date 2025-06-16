@@ -28,9 +28,11 @@ import threading
 from strategy_tester import load_icon, ICON_DIR
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="mplfinance")
+warnings.filterwarnings("ignore", message="Could not import cached_binomial_price")
 
 
-
+from idea_engine import IdeaEngine, Idea
+from idea_suite_view import IdeaSuiteView
 from llm_helper import LLMHelper
 from StockChartWindow import StockChartWindow
 try:
@@ -158,7 +160,22 @@ def configure_global_styles(theme: str):
 
 
 def calculate_binomial_greeks(S, K, T, r, sigma, option_type='call', N=500):
-    from MonteCarloSimulation import cached_binomial_price
+    # --- Safe import for cached_binomial_price -----------------------------------
+    try:
+        from MonteCarloSimulation import cached_binomial_price          
+    except Exception:                                                   
+        # minimal Black-Scholes fallback so the rest of the app still runs
+        from math import exp, log, sqrt
+        from scipy.stats import norm
+        def cached_binomial_price(S, K, T, r, sigma, *_, option_type="call", **__):
+            if T <= 0 or sigma <= 0:
+                return max(0.0, S-K) if option_type=="call" else max(0.0, K-S)
+            d1 = (log(S/K)+(r+0.5*sigma**2)*T)/(sigma*sqrt(T))
+            d2 = d1 - sigma*sqrt(T)
+            if option_type=="call":
+                return S*norm.cdf(d1)-K*exp(-r*T)*norm.cdf(d2)
+            return K*exp(-r*T)*norm.cdf(-d2)-S*norm.cdf(-d1)
+
     
     # Adjust N based on T to avoid tiny dt
     N = min(N, max(50, int(T * 365 * 10)))  # At least 50 steps, scale with T
@@ -1177,6 +1194,7 @@ class HomeDashboard(ttk.Frame):
         
         btn_map = {
             "📊 New Analysis": self.controller.open_input_window,
+            "💡 Idea Suite":          self.controller.launch_idea_suite, 
             "📰 Sentiment Analyzer": self.controller.launch_news_sentiment_analyzer,
             "📐 Strategy Builder": self.controller.launch_strategy_builder,
             "🧪 Strategy Tester": self.controller.launch_strategy_tester,
@@ -1781,6 +1799,7 @@ class OptionAnalyzerApp:
         self.root.title("Option Analyzer")
         self.root.geometry("900x800") # Give main window a bit more space
         self.llm = LLMHelper(model="deepseek-q4ks")
+        self.idea_engine = IdeaEngine()
 
         self.settings    = SettingsManager()      # persistent prefs
         self.data_mgr    = HomeDataManager()      # live data fetcher
@@ -2179,6 +2198,13 @@ class OptionAnalyzerApp:
 
         win.bind("<Return>", lambda event: save_and_close())
         win.bind("<Escape>", lambda event: win.destroy())
+
+    def save_settings(self):
+        """Persist any changes in self.settings to disk."""
+        try:
+            self.settings.save()
+        except Exception as e:
+            print(f"⚠️ Failed to save settings: {e}")
 
 
 
@@ -3089,16 +3115,54 @@ class OptionAnalyzerApp:
 
 
 
+    def launch_idea_suite(self):
+        """Open or refocus the Idea-Suite window."""
+        if getattr(self, "_idea_suite_win", None) and self._idea_suite_win.winfo_exists():
+            self._idea_suite_win.deiconify()
+            self._idea_suite_win.lift()
+            self._idea_suite_win.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("💡 Idea Suite")
+        win.geometry("1400x900")
+        self._idea_suite_win = win
+        self.child_windows.append(win)
+
+        # A Toplevel window cannot have tabs added to it directly.
+        # You must first create a Notebook widget inside the window.
+        notebook = ttk.Notebook(win)
+        notebook.pack(expand=True, fill="both", padx=5, pady=5)
+
+        # Now, pass the NOTEBOOK (not the window) to the IdeaSuiteView.
+        # The IdeaSuiteView will then correctly add itself as a tab to the notebook.
+        suite_view = IdeaSuiteView(notebook, app=self, engine=self.idea_engine)
+        
+        # Ensure the new window gets the correct theme
+        self.apply_theme_to_window(win)
 
 
 
-    def launch_strategy_builder(self):
-        # import here to avoid circular import
+
+    def launch_strategy_builder(self, idea_data: dict | None = None):
+        # If we already have a live builder window, just bring it forward (and re-prefill if needed)
+        if getattr(self, "_strat_builder_win", None) and self._strat_builder_win.winfo_exists():
+            self._strat_builder_win.deiconify()
+            self._strat_builder_win.lift()
+            self._strat_builder_win.focus_force()
+            if idea_data:
+                # inject new idea payload into the existing window
+                self._strat_builder_win._prefill_from_idea(idea_data)
+            return
+
+        # Otherwise create a fresh one
         from strategy_builder import StrategyBuilderWindow
-        builder = StrategyBuilderWindow(self.root, self.current_theme)
+        builder = StrategyBuilderWindow(self.root, self.current_theme, idea_data)
+        # remember it so we can reuse/destroy it next time
+        self._strat_builder_win = builder
         self.child_windows.append(builder)
         self.apply_theme_to_window(builder)
-    
+
     def _toggle_fullscreen(self):
         is_full = self.root.attributes('-fullscreen')
         self.root.attributes('-fullscreen', not is_full)
@@ -3106,6 +3170,11 @@ class OptionAnalyzerApp:
 
     def _close_window(self):
         try:
+             # stop Playwright first
+            try:
+                self._pw.stop()
+            except Exception:
+                pass
             self.root.destroy()
             # kill chatbot process if it is still alive
             if hasattr(self, "_chatbot_proc") and self._chatbot_proc.poll() is None:
@@ -3131,45 +3200,79 @@ class OptionAnalyzerApp:
 
 
 
-    def show_llm_explanation(self):
-        if not self.input_data:
-            messagebox.showwarning("No Data", "Run an analysis first.", parent=self.root)
+    def show_llm_explanation(self, idea: Idea | None = None):
+        """
+        Shows a detailed explanation of a strategy from an LLM.
+        Can be called with a specific Idea object or use the last analysis data.
+        """
+        if idea:
+            # Called from an IdeaCard
+            prompt_data = {
+                "ticker": idea.symbol,
+                "option_type": idea.suggested_strategy.get('type', 'strategy'),
+                "strike": idea.metrics.get('Strike', 'N/A'),
+                "S0": idea.metrics.get('last_price', 'N/A'),
+                "premium": "N/A", # Not available on all ideas
+                "T_days": idea.metrics.get('UpcomingEarnings', {}).get('days_until', 'N/A'),
+                "prob": "N/A",
+                "title": idea.title,
+                "description": idea.description
+            }
+            popup_title = f"📘 LLM on: {idea.symbol} - {idea.title}"
+        elif self.input_data:
+            # Called from the main analysis results
+            prompt_data = {
+                "ticker": self.input_data['ticker'],
+                "option_type": self.input_data['option_type'],
+                "strike": self.input_data['strike'],
+                "S0": self.input_data['S0'],
+                "premium": self.input_data.get('fair_price'),
+                "T_days": self.input_data['T_days'],
+                "prob": self.input_data.get('probability'),
+                "title": "Custom Analysis",
+                "description": f"A {self.input_data['option_type']} option with a strike of ${self.input_data['strike']}"
+            }
+            popup_title = "📘 Strategy Explanation (LLM)"
+        else:
+            messagebox.showwarning("No Data", "Run an analysis or select an idea first.", parent=self.root)
             return
 
-        self.set_status("Extracting word salad from my ass...")
+        self.set_status("Asking the LLM for an explanation...")
 
-        try:
-            explanation = self.llm.explain_option_strategy(
-                        ticker=self.input_data['ticker'],
-                        option_type=self.input_data['option_type'],
-                        strike=self.input_data['strike'],
-                        S0=self.input_data['S0'],
-                        premium=self.input_data['fair_price'],
-                        T_days=self.input_data['T_days'],
-                        prob=self.input_data['probability'],
-                        educational=self.input_data.get('educational_mode', False)
-            )
+        def llm_thread_worker():
+            try:
+                explanation = self.llm.explain_option_strategy(**prompt_data)
+                self.root.after(0, show_popup, explanation)
+            except Exception as e:
+                self.root.after(
+                    0,
+                    lambda err_msg=str(e): messagebox.showerror(
+                        "LLM Error",
+                        f"Failed to get explanation: {err_msg}",
+                        parent=self.root,
+                    ),
+                )
 
-        
+            finally:
+                self.root.after(0, self.set_status, "Ready.")
 
+        def show_popup(explanation):
             popup = tk.Toplevel(self.root)
-            popup.title("📘 Strategy Explanation (LLM)")
-            popup.geometry("700x500")
+            popup.title(popup_title)
+            popup.geometry("700x550")
             self.apply_theme_to_window(popup)
 
-            frame = ttk.Frame(popup, padding=20)
-            frame.pack(expand=True, fill=tk.BOTH)
-
-            text_box = tk.Text(frame, wrap=tk.WORD, height=25)
+            text_box = tk.Text(popup, wrap=tk.WORD, relief="flat", padx=15, pady=15, font=("Segoe UI", 10))
+            text_box.pack(expand=True, fill=tk.BOTH)
             text_box.insert(tk.END, explanation)
             text_box.config(state=tk.DISABLED)
-            text_box.pack(expand=True, fill=tk.BOTH)
 
-            ttk.Button(frame, text="Close", command=popup.destroy).pack(pady=10)
-        except Exception as e:
-            messagebox.showerror("LLM Error", f"Failed to get explanation: {e}", parent=self.root)
-        finally:
-            self.set_status("")
+            # Apply theme to the text widget specifically
+            bg = '#252526' if self.current_theme == 'dark' else '#ffffff'
+            fg = '#ffffff' if self.current_theme == 'dark' else '#000000'
+            text_box.config(background=bg, foreground=fg, insertbackground=fg)
+
+        threading.Thread(target=llm_thread_worker, daemon=True).start()
 
 
 # --- Main Execution ---
