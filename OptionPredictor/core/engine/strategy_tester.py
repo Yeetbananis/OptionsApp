@@ -4,6 +4,7 @@ import logging
 import time
 from pathlib import Path
 import datetime as _dt
+from typing import Any
 
 # ── Third-party libraries ─────────────────────────
 import tkinter as tk
@@ -1104,37 +1105,58 @@ class StrategyTesterWindow:
 
 
 
-    def _update_opt_progress(self, done, total, overrides):
-        # update progress bar
-        self.progress['value'] = done
+    def _update_opt_progress(self, done: int, total: int, overrides: dict[str, Any]):
+        # hop to GUI thread
+        self.win.after(0, lambda d=done, t=total, o=overrides:
+                    self._update_opt_gui(d, t, o))
+
+
+    def _update_opt_gui(self, done: int, total: int, overrides: dict[str, Any]):
+        # progress-bar
+        self.progress['maximum'] = total
+        self.progress['value']   = done
+
+        # status line: counter + ETA
         elapsed = (_dt.datetime.now() - self.opt_start_time).total_seconds()
         eta = int(elapsed / done * (total - done)) if done else None
-        eta_str = f" — ETA {eta}s" if eta is not None else ""
-
-
-
-        # update progress text
+        eta_str = f" — ETA {eta}s" if eta else ""
         self.opt_progress_lbl.config(text=f"{done}/{total}{eta_str}")
 
-        # update combo label
-        combo_text = (
-            f"Testing: DTE={overrides['dte_target']}, "
-            f"Alloc={overrides['allocation_pct']}%, "
-            f"ProfitTgt={overrides['profit_target_pct']}%, "
-            f"Stop×={overrides['stop_loss_mult']}"
-        )
-        self.opt_combo_lbl.config(text=combo_text)
+        # combo line: the parameters being tried
+        if overrides:
+            self.opt_combo_lbl.config(
+                text=(f"Testing: DTE={overrides['dte_target']}, "
+                    f"Alloc={overrides['allocation_pct']}%, "
+                    f"ProfitTgt={overrides['profit_target_pct']}%, "
+                    f"Stop×={overrides['stop_loss_mult']}")
+            )
 
+        # make sure it paints immediately
+        self.progress.update_idletasks()
 
     def _log_trade(self, trade):
         """
-        Instead of inserting + scrolling on every trade,
-        buffer it and schedule a single flush at idle time.
+        Called from the worker thread (BacktestEngine.trade_callback).
+        Buffers trades and schedules a GUI-thread flush via after_idle().
         """
-        self._pending_trades.append(trade)
+        # Flatten: _handle_trade expects a dict, but BacktestEngine may
+        # send a list of dicts when batch-mode is on.
+        if isinstance(trade, list):
+            self._pending_trades.extend(trade)
+        else:
+            self._pending_trades.append(trade)
+
         if not self._flush_scheduled:
             self._flush_scheduled = True
             self.win.after_idle(self._flush_trade_log)
+
+
+    def _flush_trade_log(self):
+        """Runs on the Tk main loop; safe to touch widgets."""
+        self._flush_scheduled = False
+        batch, self._pending_trades[:] = self._pending_trades[:], []
+        for t in batch:
+            self._handle_trade(t)          # original GUI code
 
 
     def _see_last(self):
@@ -1174,15 +1196,14 @@ class StrategyTesterWindow:
 
 
 
-    def _update_backtest_progress(self, done, total):
-        now = time.time()
-        # throttle to ~50 Hz, but always show the final tick
-        if now - self._last_progress_ts >= 0.02 or done == total:
-            self._last_progress_ts = now
-            self.progress['maximum'] = total
-            self.progress['value']   = done
-            # lightweight repaint
-            self.progress.update_idletasks()
+    def _update_backtest_progress(self, done: int, total: int):
+        # Worker thread → hop to GUI thread
+        self.win.after(0, lambda d=done, t=total: self._update_bt_gui(d, t))
+
+    def _update_bt_gui(self, done: int, total: int):
+        self.progress['maximum'] = total
+        self.progress['value']   = done
+        self.progress.update_idletasks()   # immediate repaint
 
 
 
@@ -1431,7 +1452,11 @@ class StrategyTesterWindow:
         # ────────────────────────────────────────────────────────────────────────
 
         # create engine with our new callback
-        self.engine = BacktestEngine(cfg, progress_callback=self._update_backtest_progress, trade_callback=self._handle_trade)
+        self.engine = BacktestEngine(
+            cfg,
+            progress_callback=self._update_backtest_progress,
+            trade_callback   =self._log_trade        # ← safe wrapper
+        )
 
 
         # run it
@@ -1451,21 +1476,6 @@ class StrategyTesterWindow:
                     "Backtest Error", f"An error occurred:\n{exc}", parent=self.win))
             finally:
                 self.win.after(0, self._finalize_backtest_ui)
-
-
-    def _flush_trade_log(self):
-        """
-        Called via after_idle() to drain the pending‐trades buffer
-        and insert them into the log in one go.
-        """
-        # Copy & clear buffer
-        batch = self._pending_trades
-        self._pending_trades = []
-        self._flush_scheduled = False
-
-        # Let _handle_trade do the insertion for us
-        # It accepts either a single dict or a list of dicts.
-        self._handle_trade(batch)
 
 
 
@@ -1584,6 +1594,13 @@ class StrategyTesterWindow:
 
         else:
             summary_lines.append("Backtest failed or produced no results.")
+
+        
+        # ─── filter out loader HTTP-error warnings ─────────────────────────
+        summary_lines = [
+            ln for ln in summary_lines
+            if "HTTP Error" not in ln           # ← hides “HTTP Error 401” etc.
+        ]
 
          # ─── dump performance summary into the text pane ───────────────────────
         self.summary_txt.insert("1.0", "\n".join(summary_lines))
