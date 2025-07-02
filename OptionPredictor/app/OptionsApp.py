@@ -159,6 +159,11 @@ def configure_global_styles(theme: str):
                )
     # -----------------------------------------------------------
 
+    style.configure(  # Invisible frame for hitbox
+        "Hitbox.TFrame",
+        background=style.lookup("TFrame", "background")  # invisible
+    )
+
 
 
 def calculate_binomial_greeks(S, K, T, r, sigma, option_type='call', N=500):
@@ -736,6 +741,32 @@ class OptionAnalyzerApp:
                                 orient="horizontal")
         speed_scale.grid(row=0, column=1, sticky="ew", padx=6)
         ttk.Label(misc, text="px / frame").grid(row=0, column=2, sticky="w")
+
+         # ── Boredom Bouncer toggle ────────────────────────────────────
+        # 1️⃣ state variable (saved setting provides default)
+        self.bounce_enabled_var = tk.BooleanVar() 
+        self.bounce_enabled_var.set(
+           self.settings.get('enable_bounce_overlay', False)
+       )
+
+       # 2️⃣ callback to persist the change and notify the dashboard
+        def _on_toggle_bouncer():
+            enabled = self.bounce_enabled_var.get()
+            self.settings.set('enable_bounce_overlay', enabled)
+
+            # If the dashboard is already built, update it live
+            if hasattr(self, "dashboard") and self.dashboard:
+                self.dashboard.toggle_bounce_overlay()
+
+        # 3️⃣ the checkbox itself
+        bounce_chk = ttk.Checkbutton(
+            misc,
+            text="Boredom Ball",
+            variable=self.bounce_enabled_var,
+            command=_on_toggle_bouncer
+        )
+        # Align under the speed row, full‐width
+        bounce_chk.grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
         # --- Save Logic ---
         def save_and_close():
