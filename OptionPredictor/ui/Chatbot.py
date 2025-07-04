@@ -182,32 +182,28 @@ FINNHUB_API_KEY = os.getenv(
 # ===============================================================
 # 2)  GUI  CLASS
 # ===============================================================
-class FinancialChatbotApp(ctk.CTk): # It's now the main window, so it's a CTk instance
+class FinancialChatbotApp(ctk.CTk):
+    """ A standalone chatbot application that runs in its own process. """
     def __init__(self, theme: str = "dark"):
         super().__init__()
         self.current_theme = theme
         self.clr = _palette(theme)
 
-        # Set the appearance mode for this application instance
+        # This now ONLY affects this standalone app instance
         ctk.set_appearance_mode("Dark" if self.current_theme == "dark" else "Light")
-        
-        # Configure the window's background color
         self.configure(bg=self.clr["bg"])
-
-        # --------------------------------------------------------------
 
         self.title("FinBot – Finance Chatbot")
         self.geometry("920x760")
 
-        # sentiment analyzer
+        # --- Class Attributes ---
         self.sentiment = SentimentIntensityAnalyzer()
 
-        # -------- layout -------------  (use palette)
+        # --- Main Layout ---
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self.chat_frame = ctk.CTkScrollableFrame(
-            self, fg_color="transparent", bg_color=self.clr["bg"])
+        self.chat_frame = ctk.CTkScrollableFrame(self, fg_color="transparent", bg_color=self.clr["bg"])
         self.chat_frame.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
 
         entry_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -227,49 +223,20 @@ class FinancialChatbotApp(ctk.CTk): # It's now the main window, so it's a CTk in
         submit_btn = ctk.CTkButton(entry_frame, text="Send", width=80, height=40, command=self._on_submit)
         submit_btn.grid(row=0, column=1, padx=(8,0))
 
-
-        # ttk treeview styling – use theme colours
-        style = ttk.Style(self) # Bind the style to this Toplevel window
+        # --- Configure Local Styles for internal ttk widgets ---
+        # This is safe because it only applies to this separate application instance.
+        style = ttk.Style(self)
         style.theme_use("default")
-        style.configure(
-            "Treeview",
-            background=self.clr["tree_bg"],
-            fieldbackground=self.clr["tree_bg"],
-            foreground=self.clr["tree_fg"],
-            rowheight=26,
-            borderwidth=0
-        )
-        style.configure(
-            "Treeview.Heading",
-            background=self.clr["bot_bg"],
-            foreground=self.clr["fg"],
-            relief="flat",
-            font=('Calibri', 10, 'bold')
-        )
-        style.map(
-            "Treeview",
-            background=[('selected', self.clr["tree_sel"])],
-            foreground=[('selected', self.clr["fg"])]
-        )
-        # ----------------------------------------------------------------
+        style.configure("Treeview", background=self.clr["tree_bg"], fieldbackground=self.clr["tree_bg"], foreground=self.clr["tree_fg"], rowheight=26, borderwidth=0)
+        style.configure("Treeview.Heading", background=self.clr["bot_bg"], foreground=self.clr["fg"], relief="flat", font=('Calibri', 10, 'bold'))
+        style.map("Treeview", background=[('selected', self.clr["tree_sel"])], foreground=[('selected', self.clr["fg"])])
+        style.layout("FinBot.Tree", style.layout("Treeview"))
+        style.layout("FinBot.Tree.Heading", style.layout("Treeview.Heading"))
+        style.configure("FinBot.Tree", background=self.clr["tree_bg"], fieldbackground=self.clr["tree_bg"], foreground=self.clr["tree_fg"])
+        style.configure("FinBot.Tree.Heading", background=self.clr["bot_bg"], foreground=self.clr["fg"])
+        style.map("FinBot.Tree", background=[('selected', self.clr["tree_sel"])], foreground=[('selected', self.clr["fg"])])
 
-        # ---------- clone the layout for FinBot.Tree ------------
-        style.layout("FinBot.Tree",          style.layout("Treeview"))
-        style.layout("FinBot.Tree.Heading",  style.layout("Treeview.Heading"))
-        style.configure("FinBot.Tree",       background=self.clr["tree_bg"],
-                                        fieldbackground=self.clr["tree_bg"],
-                                        foreground=self.clr["tree_fg"])
-        style.configure("FinBot.Tree.Heading",
-                                        background=self.clr["bot_bg"],
-                                        foreground=self.clr["fg"])
-        style.map("FinBot.Tree",
-                background=[('selected', self.clr["tree_sel"])],
-                foreground=[('selected', self.clr["fg"])])
-
-        self._bot("Welcome!  Type  help  to see commands.")
-
-
-
+        self._bot("Welcome! Type 'help' to see commands.")
     # ------------------------------------------------------------------
     def apply_custom_theme(self):
         """
@@ -815,8 +782,6 @@ class FinancialChatbotApp(ctk.CTk): # It's now the main window, so it's a CTk in
 # ===============================================================
 if __name__ == "__main__":
     import sys
-    # Default to 'dark' if no theme is provided via command line
-    theme_from_arg = sys.argv[1] if len(sys.argv) > 1 else "dark"
-    
-    app = FinancialChatbotApp(theme=theme_from_arg)
+    theme = sys.argv[1] if len(sys.argv) > 1 else "dark"
+    app = FinancialChatbotApp(theme=theme)
     app.mainloop()

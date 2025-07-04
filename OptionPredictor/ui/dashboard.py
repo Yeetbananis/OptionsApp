@@ -401,6 +401,7 @@ class HomeDashboard(ttk.Frame):
         # NYSE open hours in Eastern Time
         self._ny_open  = dt_time(hour=9,  minute=30)
         self._ny_close = dt_time(hour=16, minute=0)
+        self._last_known_wifi_status = "unknown"
 
         self._is_closing = False
 
@@ -465,7 +466,6 @@ class HomeDashboard(ttk.Frame):
 
  
 
-        self._refresh()          # Initial data load
         self._start_refresh_countdown()   # immediate first load + countdown
 
     # --- UI Construction ---
@@ -985,6 +985,7 @@ class HomeDashboard(ttk.Frame):
         try:
             while True:
                 data = self._indices_q.get_nowait()
+                # **FIX**: Pass the data to the UI update function
                 self._update_indices_ui(data)
         except queue.Empty:
             pass
@@ -997,9 +998,13 @@ class HomeDashboard(ttk.Frame):
             while True:
                 data = self._watchlist_q.get_nowait()
                 self._update_watchlist_ui(data)
-                if data:
+                
+                # **FIX**: Filter out None values before sorting to prevent crashes
+                valid_data = [d for d in data if d and d.get("regularMarketPrice") and d.get("previousClose")]
+                
+                if valid_data:
                     movers = sorted(
-                        data,
+                        valid_data,
                         key=lambda d: abs((d["regularMarketPrice"] - d["previousClose"]) / d["previousClose"]),
                         reverse=True)[:3]
                 else:
@@ -1010,13 +1015,20 @@ class HomeDashboard(ttk.Frame):
         if self.winfo_exists():
             self._watchlist_after_id = self.after(100, self._poll_watchlist_q)
 
-    def _update_wifi_icon(self, status_key):
-            if not hasattr(self, "wifi_label"): return
-            self._last_wifi_status = status_key
-            icon = self.wifi_icons.get(status_key)
-            if icon:
-                self.wifi_label.configure(image=icon)
-                self.wifi_label.image = icon
+    def _update_wifi_icon(self, new_status_key):
+        if not hasattr(self, "wifi_label"): return
+
+        # **FIX**: Check if the status has changed from disconnected to connected
+        if self._last_known_wifi_status == 'disconnected' and new_status_key != 'disconnected':
+            print("Internet connection restored. Triggering a full data refresh.")
+            self.controller.set_status("Internet connection restored. Refreshing data...", "green")
+            self._refresh()
+
+        self._last_known_wifi_status = new_status_key
+        icon = self.wifi_icons.get(new_status_key)
+        if icon:
+            self.wifi_label.configure(image=icon)
+            self.wifi_label.image = icon
 
     def apply_custom_theme(self):
         """
@@ -1113,62 +1125,45 @@ class HomeDashboard(ttk.Frame):
                 webbrowser.open(url)
 
     def _refresh(self):
+        """
+        Fetches all dashboard data and explicitly refreshes the chart pane,
+        ensuring components can handle fetch failures.
+        """
         if self._is_closing or not _widget_is_alive(self): return
 
-        for name in ("indices_content_frame", "movers_content_frame", "watchlist_content_frame", "news_tv"):
-            if not hasattr(self, name): continue
-            widget = getattr(self, name)
-            if not widget.winfo_manager(): continue
-            if callable(getattr(widget, "delete", None)):
-                widget.delete(*widget.get_children())
-            else:
-                for child in widget.winfo_children():
-                    child.destroy()
-
         self.header_lbl.config(text=f"Welcome, {self.controller.user_name}!")
+        
+        # Explicitly tell the chart to refresh its data
+        if hasattr(self, 'chart_pane') and self.chart_pane:
+            self.chart_pane.refresh_data()
 
-        if hasattr(self, "indices_content_frame") and self.indices_content_frame.winfo_manager():
-            ttk.Label(self.indices_content_frame, text="Loading indices…").pack()
-            def fetch_indices():
-                data = []
-                for tkr in ("^SPX", "^VIX"):
-                    try:
-                        d = self.data_mgr.get_ticker_details(tkr)
-                        if d: data.append(d)
-                    except Exception as e:
-                        logging.exception("Index fetch failed: %s", e)
-                self._indices_q.put(data)
-            threading.Thread(target=fetch_indices, daemon=True).start()
+        def run_with_timeout(target_func, timeout=10):
+            result = None
+            def worker():
+                nonlocal result
+                try: result = target_func()
+                except Exception as e: logging.warning(f"Data fetch failed for {target_func.__name__}: {e}")
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            thread.join(timeout)
+            if thread.is_alive(): logging.info(f"Data fetch for {target_func.__name__} timed out (likely offline). Skipping.")
+            return result
 
-        threading.Thread(
-            target=lambda: self.after(0, self._update_fng_ui, self.data_mgr.get_fear_greed()),
-            daemon=True
-        ).start()
+        def fetch_all():
+            # **FIX**: Each task now gracefully handles None on failure
+            fng_score = run_with_timeout(self.data_mgr.get_fear_greed)
+            if not self._is_closing: self.after(0, lambda: self._update_fng_ui(fng_score))
+            
+            indices_data = run_with_timeout(lambda: [self.data_mgr.get_ticker_details(t) for t in ("^SPX", "^VIX")])
+            if not self._is_closing: self._indices_q.put(indices_data or [])
 
-        if hasattr(self, "watchlist_content_frame") and self.watchlist_content_frame.winfo_manager():
-            if not hasattr(self, "_wl_loader"):
-                self._wl_loader = ttk.Label(self.watchlist_content_frame, text="Refreshing watchlist…")
-                self._wl_loader.pack(expand=True)
-            watchlist = [t.strip() for t in self.controller.settings.get("watchlist", "").split("|") if t.strip()]
-            def fetch_watchlist():
-                data = []
-                for t in watchlist:
-                    try:
-                        d = self.data_mgr.get_ticker_details(t)
-                        if d: data.append(d)
-                    except Exception as e:
-                        logging.exception("Watch-list fetch failed: %s", e)
-                self._watchlist_q.put(data)
-            threading.Thread(target=fetch_watchlist, daemon=True).start()
+            watchlist_data = run_with_timeout(lambda: [self.data_mgr.get_ticker_details(t) for t in self._get_watchlist_symbols()])
+            if not self._is_closing: self._watchlist_q.put(watchlist_data or [])
 
-        if hasattr(self, "news_tv") and self.news_tv.winfo_manager():
-            def fetch_news():
-                # This blocking call now happens in the background
-                data = self.data_mgr.get_news_headlines(20)
-                if not self._is_closing:
-                    self._news_q.put(data)
-            threading.Thread(target=fetch_news, daemon=True).start()
+            news_data = run_with_timeout(lambda: self.data_mgr.get_news_headlines(20))
+            if not self._is_closing: self._news_q.put(news_data or ([], None))
 
+        threading.Thread(target=fetch_all, daemon=True).start()
         self._last_update_ts = datetime.now()
 
     def _get_watchlist_symbols(self):
@@ -1353,13 +1348,15 @@ class HomeDashboard(ttk.Frame):
             for w in frame.winfo_children():
                 w.destroy()
 
-        if not data:
-            ttk.Label(self.wl_strip, text="Watch-list empty…").pack(padx=6)
+        # **FIX**: Check if data is not None and is a list before proceeding
+        if not isinstance(data, list):
+            ttk.Label(self.wl_strip, text="Watchlist data unavailable...").pack(padx=6)
             return
 
         for d in data:
-            self._create_ticker_box(self.wl_strip, d)
-            self._create_ticker_box(self.wl_clone, d)
+            if d is not None:
+                self._create_ticker_box(self.wl_strip, d)
+                self._create_ticker_box(self.wl_clone, d)
 
         if 'watchlist' not in self._initial_loads_signaled:
             self.controller.on_initial_load_complete('watchlist')
@@ -1376,13 +1373,16 @@ class HomeDashboard(ttk.Frame):
         if not all_data:
             ttk.Label(self.indices_content_frame, text="Could not load market data.").pack()
             return
+        
         name_map = {'^SPX': 'S&P 500', '^VIX': 'VIX'}
         for data in all_data:
+            # **FIX**: Add a check to skip None values from failed fetches
+            if data is None:
+                continue
             original_ticker = data['symbol']
             data['symbol'] = name_map.get(original_ticker, original_ticker)
             self._create_ticker_box(self.indices_content_frame, data, context_ticker=original_ticker)
 
-        # Signal that the initial load for this task is complete
         if 'indices' not in self._initial_loads_signaled:
             self.controller.on_initial_load_complete('indices')
             self._initial_loads_signaled.add('indices')
@@ -1445,29 +1445,35 @@ class HomeDashboard(ttk.Frame):
             self._pixels_per_frame = max(0.1, speed_setting)
 
     def _update_fng_ui(self, score: int | None):
+        """
+        Updates the Fear & Greed gauge and signals that the initial F&G data load is complete.
+        """
         if self._is_closing or not _widget_is_alive(self): return
+        
+        # --- This is the same drawing logic as before ---
         c = self.fng_canvas
         c.delete("fng_gauge")
-        cx, cy, radius, arc_w = 35, 35, 28, 6
+        cx, cy, radius, arc_w = 40, 40, 32, 7
         bbox = (cx - radius, cy - radius, cx + radius, cy + radius)
         c.create_arc(*bbox, start=0, extent=180, style="arc", width=arc_w, outline="#555555", tags="fng_gauge")
 
         if score is None:
-            c.create_text(cx, cy - 5, text="N/A", font=("Segoe UI", 12, "bold"), fill="grey", tags="fng_gauge")
+            c.create_text(cx, cy - 5, text="N/A", font=("Segoe UI", 14, "bold"), fill="grey", tags="fng_gauge")
             self.fng_tooltip.update("Fear & Greed index unavailable")
-            return
+        else:
+            if score < 25: clr, mood = "#D32F2F", "Extreme Fear"
+            elif score < 45: clr, mood = "#F57C00", "Fear"
+            elif score < 55: clr, mood = "grey", "Neutral"
+            elif score < 75: clr, mood = "#9ACD32", "Greed"
+            else: clr, mood = "#00B200", "Extreme Greed"
 
-        if score < 25: clr, mood, note = "#D32F2F", "Extreme Fear", "Stocks may be undervalued"
-        elif score < 50: clr, mood, note = "#F57C00", "Fear", "Bearish undertone"
-        elif score < 75: clr, mood, note = "#9ACD32", "Greed", "Bullish sentiment"
-        else: clr, mood, note = "#00B200", "Extreme Greed", "Markets may be overheated"
+            sweep_start = 180 - score * 1.8
+            c.create_arc(*bbox, start=sweep_start, extent=180 - sweep_start, style="arc", width=arc_w, outline=clr, tags="fng_gauge")
+            c.create_text(cx, cy - 10, text=str(score), font=("Segoe UI", 16, "bold"), fill=clr, tags="fng_gauge")
+            c.create_text(cx, cy + 10, text="F&G Index", font=("Segoe UI", 8), fill="grey", tags="fng_gauge")
+            self.fng_tooltip.update(f"{score} – {mood}")
 
-        sweep_start = 180 - score * 1.8
-        c.create_arc(*bbox, start=sweep_start, extent=180 - sweep_start, style="arc", width=arc_w, outline=clr, tags="fng_gauge")
-        c.create_text(cx, cy - 8, text=str(score), font=("Segoe UI", 14, "bold"), fill=clr, tags="fng_gauge")
-        c.create_text(cx, cy + 6, text="F&G Index", font=("Segoe UI", 7), fill="grey", tags="fng_gauge")
-        self.fng_tooltip.update(f"{score} – {mood}\n{note}")
-
+        # **FIX**: Signal that the initial load for this task is complete
         if 'fng' not in self._initial_loads_signaled:
             self.controller.on_initial_load_complete('fng')
             self._initial_loads_signaled.add('fng')

@@ -112,6 +112,11 @@ class CandlestickChartPane(ttk.Frame):
 
     # ── Core functionality ────────────────────────────────────
 
+    def refresh_data(self):
+        """Public method to allow external components to trigger a data reload."""
+        print(f"Refreshing chart data for {self.ticker}...")
+        self.draw(self._last_period)
+
     def _save_to_file(self):
         try:
             self._saved_file.write_text(json.dumps(self._saved_charts))

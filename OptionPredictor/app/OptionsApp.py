@@ -284,11 +284,11 @@ class SettingsManager:
 
     _DEFAULTS = {
         "user_name": "Trader",
-        "theme": "light",
+        "theme": "dark",
         "timezone": "America/Vancouver",
         "default_ticker": "SPY",
-        "watchlist": "SPY|^VIX",
-        "marquee_speed": 1.5,
+        "watchlist": "AAPL|MSFT|AMZN|NVDA|GOOGL|TSLA|META|BBAI",
+        "marquee_speed": 0.5,
         "refresh_interval": 30,
         "enable_bounce_overlay": False  
     }
@@ -365,7 +365,7 @@ class OptionAnalyzerApp:
         self.docking_window_instance = None
         self.strategy_testers = []
         self.analysis_persistence = AnalysisPersistence()
-        self.initial_load_tasks = ['indices', 'watchlist', 'news', 'fng'] # Tasks to wait for
+        self.initial_load_tasks = ['indices', 'watchlist', 'news', 'fng'] 
         self.loading_screen = None
         self.loading_complete = False
 
@@ -484,26 +484,47 @@ class OptionAnalyzerApp:
 
     def _loading_status_monitor(self):
         """
-        A separate loop that ONLY checks for data loading progress.
-        It runs once and schedules the finale when done.
+        Checks for data loading progress OR proceeds after a timeout
+        to ensure the app always loads, even when offline.
         """
-        if self.loading_complete: return # Already done
+        # Set a total timeout for the initial load (e.g., 12 seconds)
+        MAX_LOAD_TIME = 12000 # milliseconds
+        
+        start_time = getattr(self, "_loading_start_time", time.time())
+        if not hasattr(self, "_loading_start_time"):
+            self._loading_start_time = start_time
+        
+        elapsed_time = (time.time() - start_time) * 1000
 
-        if not self.initial_load_tasks:
-            # --- Loading is complete ---
-            self.loading_complete = True # Set flag to run this once
-            self.loading_screen.update_progress_bar(1.0)
-            self.loading_screen.trigger_pre_climax_dip()
+        # --- Check for completion or timeout ---
+        if not self.initial_load_tasks or elapsed_time > MAX_LOAD_TIME:
+            if not self.loading_complete:
+                self.loading_complete = True
+                
+                if self.loading_screen and self.loading_screen.winfo_exists():
+                    self.loading_screen.update_progress_bar(1.0)
+                    if elapsed_time > MAX_LOAD_TIME:
+                        print("Loading timed out, proceeding anyway.")
+                    self.loading_screen.trigger_pre_climax_dip()
 
-            # This line adds a delay to see the animation longer.
-            # To restore normal loading speed, change 15000 to a smaller number like 1000.
-            self.root.after(1000, self._trigger_final_sequence) #DELAY!!!
+                def final_sequence():
+                    if self.loading_screen and self.loading_screen.winfo_exists():
+                        self.loading_screen.animate_take_profit()
+                        self.root.after(1000, self.loading_screen.fade_out_and_close)
+                        self.root.after(1500, self.show_main_window)
+                
+                # Use a shorter delay here as the main delay is now the timeout
+                self.root.after(2000, final_sequence)
+            return # Stop this monitoring loop
         else:
             # --- Still loading ---
             total_tasks = 4.0
             progress = (total_tasks - len(self.initial_load_tasks)) / total_tasks
-            self.loading_screen.update_progress_bar(progress)
-            self.root.after(100, self._loading_status_monitor) # Check again soon
+            if self.loading_screen and self.loading_screen.winfo_exists():
+                self.loading_screen.update_progress_bar(progress)
+            
+            # Check again soon
+            self.root.after(100, self._loading_status_monitor)
 
     def _trigger_final_sequence(self):
         """Runs the final 'god candle' and fade-out sequence."""
@@ -895,42 +916,43 @@ class OptionAnalyzerApp:
     # ─────────────────────────────────────────────────────────────
     #  Chat-bot launcher
     # ─────────────────────────────────────────────────────────────
+    from pathlib import Path
+
     def launch_chatbot(self):
         """
-        Start Fin-Bot in its own Python process so we never create a
-        second Tk() instance inside the OptionsApp process.
-
-        The script lives in  <project_root>/ui/Chatbot.py
+        Dynamically launches Chatbot.exe if it exists under a folder named OptionsApp.
+        Falls back to ui/Chatbot.py for development environments.
         """
         try:
-            # …/OptionPredictor
-            project_root   = Path(__file__).resolve().parent.parent
-            chatbot_script = project_root / "ui" / "Chatbot.py"
+            search_root = Path(__file__).resolve().parents[2]  # Go high enough up
 
-            if not chatbot_script.exists():
+            chatbot_exe_path = None
+            for path in search_root.rglob("Chatbot.exe"):
+                if path.parent.name.lower() == "optionsapp":
+                    chatbot_exe_path = path
+                    break
+
+            fallback_py_path = Path(__file__).resolve().parent.parent / "ui" / "Chatbot.py"
+            python_exe = sys.executable
+
+            if chatbot_exe_path and chatbot_exe_path.exists():
+                cmd = [str(chatbot_exe_path), self.current_theme]
+            elif fallback_py_path.exists():
+                cmd = [python_exe, str(fallback_py_path), self.current_theme]
+            else:
                 messagebox.showerror(
-                    "Chat-bot missing",
-                    f"Could not find Chatbot.py at\n{chatbot_script}",
+                    "File Not Found",
+                    "Could not find Chatbot.exe under any OptionsApp folder,\n"
+                    "nor fallback Chatbot.py in project.",
                     parent=self.root
                 )
                 return
 
-            python_exe = self._get_python_executable()
-            theme_arg  = self.current_theme         # "light" or "dark"
-
-            # Launch non-blocking and remember the Popen handle
-            self._chatbot_proc = subprocess.Popen(
-                [python_exe, str(chatbot_script), theme_arg],
-                cwd=chatbot_script.parent
-            )
+            subprocess.Popen(cmd)
 
         except Exception as exc:
-            logging.exception("Failed to start chat-bot")
-            messagebox.showerror(
-                "Chat-bot error",
-                f"Unable to start the chat-bot process:\n{exc}",
-                parent=self.root
-            )
+            logging.exception("Failed to launch chatbot")
+            self.show_copyable_error("Chatbot Launch Error", f"Unable to start chatbot:\n{exc}")
 
                     
     def open_input_window(self):
