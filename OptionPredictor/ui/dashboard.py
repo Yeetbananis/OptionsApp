@@ -447,6 +447,7 @@ class HomeDashboard(ttk.Frame):
         self._wl_animating = False
         self._marquee_position = 0.0
         self._pixels_per_frame = 1.
+        self._initial_loads_signaled = set()
 
         # ── thread-safe hand-off queues ─────────────────────────────
         self._indices_q   = queue.Queue()
@@ -857,6 +858,10 @@ class HomeDashboard(ttk.Frame):
         self.news_tv.tag_configure("pos", foreground="green")
         self.news_tv.tag_configure("neg", foreground="red")
         self.news_tv.tag_configure("neu", foreground="orange")
+
+        if 'news' not in self._initial_loads_signaled:
+            self.controller.on_initial_load_complete('news')
+            self._initial_loads_signaled.add('news')
 
     # --- Core Logic & Data Refresh ---
 
@@ -1356,6 +1361,10 @@ class HomeDashboard(ttk.Frame):
             self._create_ticker_box(self.wl_strip, d)
             self._create_ticker_box(self.wl_clone, d)
 
+        if 'watchlist' not in self._initial_loads_signaled:
+            self.controller.on_initial_load_complete('watchlist')
+            self._initial_loads_signaled.add('watchlist')
+
         self.wl_strip.update_idletasks()
         self.wl_canvas.event_generate("<Configure>")
         self.after(50, self._start_watchlist_marquee)
@@ -1372,6 +1381,11 @@ class HomeDashboard(ttk.Frame):
             original_ticker = data['symbol']
             data['symbol'] = name_map.get(original_ticker, original_ticker)
             self._create_ticker_box(self.indices_content_frame, data, context_ticker=original_ticker)
+
+        # Signal that the initial load for this task is complete
+        if 'indices' not in self._initial_loads_signaled:
+            self.controller.on_initial_load_complete('indices')
+            self._initial_loads_signaled.add('indices')
 
     def _update_movers_ui(self, movers):
         if self._is_closing or not _widget_is_alive(self): return
@@ -1453,6 +1467,10 @@ class HomeDashboard(ttk.Frame):
         c.create_text(cx, cy - 8, text=str(score), font=("Segoe UI", 14, "bold"), fill=clr, tags="fng_gauge")
         c.create_text(cx, cy + 6, text="F&G Index", font=("Segoe UI", 7), fill="grey", tags="fng_gauge")
         self.fng_tooltip.update(f"{score} – {mood}\n{note}")
+
+        if 'fng' not in self._initial_loads_signaled:
+            self.controller.on_initial_load_complete('fng')
+            self._initial_loads_signaled.add('fng')
 
     # --- UPDATED METHOD ---
     def shutdown(self):

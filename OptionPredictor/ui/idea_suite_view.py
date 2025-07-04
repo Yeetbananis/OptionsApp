@@ -7,61 +7,67 @@ from tkinter import ttk, messagebox
 
 if TYPE_CHECKING:
     from app.OptionsApp import OptionAnalyzerApp
-    from core.engine.idea_engine import IdeaEngine
+    from core.engine.idea_suite_controller import IdeaSuiteController
 
 from ui.idea_card import IdeaCard
 from core.engine.idea_engine import CATEGORY_LABELS
 from core.models.idea_models import Idea
-from core.engine.idea_suite_controller import IdeaSuiteController
 from ui.ideatooltip import IdeaTooltip
 from core.engine.strategy_recommender import StrategyRecommender
 from app.llm_helper import LLMHelper
-from core.storage.saved_storage import load_saved_ids, save_ids
-from core.storage.saved_storage import load_saved_notes, save_notes 
+from core.storage.saved_storage import load_saved_ids, save_ids, load_saved_notes, save_notes
 
-DEFAULT_UNIVERSE = [  
-    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "GOOG", "TSLA",  
-    "META", "BRK-B", "UNH", "JNJ", "V", "JPM", "WMT",  
-    "PG", "BAC", "MA", "HD", "DIS", "PFE"  
-]  
-
+DEFAULT_UNIVERSE = [
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "GOOG", "TSLA",
+    "META", "BRK-B", "UNH", "JNJ", "V", "JPM", "WMT",
+    "PG", "BAC", "MA", "HD", "DIS", "PFE"
+]
 
 class IdeaSuiteView(ttk.Frame):
-    POLL_MS = 500
+    """
+    A robust view for displaying and interacting with trading ideas,
+    with a reliable initial data loading mechanism.
+    """
+    POLL_MS = 200
 
-    def __init__(self, notebook: ttk.Notebook, app: 'OptionAnalyzerApp', engine: 'IdeaEngine'):
-        super().__init__(notebook)
-        notebook.add(self, text="💡 Idea Suite")
+    def __init__(self, parent: ttk.Notebook, app: 'OptionAnalyzerApp'):
+        super().__init__(parent)
+        # The parent is now the notebook, and we add ourselves as a tab
+        parent.add(self, text="💡 Idea Suite")
 
         self.app = app
-        self.engine = engine
         self.is_dark = app.current_theme == 'dark'
-        self._queue: queue.Queue[List[Idea]] = queue.Queue()
         
-         # load saved universe; allow either list or comma-sep string for backward compatibility
-        raw = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
-        if isinstance(raw, str):
-            self.universe = [s.strip().upper() for s in raw.split(',') if s.strip()]
-        else:
-            self.universe = raw
-        self._controller = IdeaSuiteController(engine, self._queue)
+        # --- State Management ---
+        self.controller: IdeaSuiteController | None = None
+        self.queue: queue.Queue[List[Idea]] = queue.Queue()
         self._all_ideas: List[Idea] = []
-        self._saved_ids = set(load_saved_ids())   # ← persistent ids
-        # ─── load persisted notes & tags ──────────────────────────
+        self._saved_ids = set(load_saved_ids())
         self._saved_notes = load_saved_notes()
-
-        # expose save helper so IdeaCard can call it
+        self.universe = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
+        
+        # Expose save helpers to the main app so IdeaCard can call them
         self.app.idea_suite_save = self._persist_uid
         self.app.idea_suite_save_notes = self._persist_notes
-        # expose highlight-reel expand/collapse callback
         self.app.idea_suite_view_expand = self._highlight_expand
-
-
+        self.app.idea_suite_view_refresh = self._render_saved_tab
 
         self._category_tabs: Dict[str, ttk.Frame] = {}
-        self.app.idea_suite_view_refresh = lambda: self._render_saved_tab()
         self._build_ui()
-        self._start_refresh()
+        
+        # Start polling the queue for results from the background thread
+        self.after(100, self._poll_queue)
+
+    def set_controller(self, controller: "IdeaSuiteController"):
+        """Gives the view a reference to its controller to request refreshes."""
+        self.controller = controller
+
+    def refresh_ideas(self):
+        """Public method to trigger a data refresh for the view."""
+        if self.controller:
+            self._show_loading_overlay()
+            self.universe = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
+            self.controller.refresh(self.universe)
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
@@ -89,7 +95,6 @@ class IdeaSuiteView(ttk.Frame):
         self.saved_tab = ScrollableFrame(self.content_nb, self.is_dark)
         self.content_nb.add(self.saved_tab, text="⭐ Saved Ideas")
 
-        
         # --- Timeline at the bottom ---
         self.timeline = Timeline(self, self.is_dark)
         self.timeline.grid(row=3, column=0, sticky="ew", padx=6, pady=(10, 6))
@@ -98,42 +103,30 @@ class IdeaSuiteView(ttk.Frame):
         top_bar = ttk.Frame(self, padding=(8, 8, 8, 0))
         top_bar.grid(row=0, column=0, sticky="ew")
 
-        # ─── Filter controls ────────────────────────────────────────────
         filter_frame = ttk.Frame(top_bar)
         filter_frame.pack(side="left")
         ttk.Label(filter_frame, text="🔍 Filter by:").pack(side="left")
-        self.filter_category  = self._create_filter_combobox(filter_frame, "Category",   ["All"] + list(CATEGORY_LABELS.values()))
-        self.filter_risk      = self._create_filter_combobox(filter_frame, "Risk",       ["All", "Low", "Moderate", "High"])
+        self.filter_category  = self._create_filter_combobox(filter_frame, "Category",  ["All"] + list(CATEGORY_LABELS.values()))
+        self.filter_risk      = self._create_filter_combobox(filter_frame, "Risk",      ["All", "Low", "Moderate", "High"])
         self.filter_timeframe = self._create_filter_combobox(filter_frame, "Timeframe", ["All", "Day", "Swing", "Long-Term"])
 
-        # ── LLM loading indicator (hidden by default) ─────────────────
-        # placed between filters and the action buttons
-        self.llm_status_label = ttk.Label(top_bar,     text="", style="Status.TLabel")
+        self.llm_status_label = ttk.Label(top_bar, text="", style="Status.TLabel")
         self.llm_progress     = ttk.Progressbar(top_bar, mode="indeterminate", length=80)
-        # expose to the app so cards can show/hide them
         self.app.llm_status_label = self.llm_status_label
         self.app.llm_progress     = self.llm_progress
-        # initially hidden
-        self.llm_status_label.pack_forget()
-        self.llm_progress.pack_forget()
 
-        # ─── Action buttons & status ───────────────────────────────────
         self.action_frame = ttk.Frame(top_bar)
         self.action_frame.pack(side="right")
         top_bar.columnconfigure(1, weight=1)
 
-        # Last‐updated timestamp
         self.last_updated_label = ttk.Label(self.action_frame, text="Last updated: Never")
         self.last_updated_label.pack(side="left", padx=(0, 8))
 
-        # Refresh button
         self.refresh_button = ttk.Button(self.action_frame, text="🔄 Refresh Ideas", command=self._start_refresh)
         self.refresh_button.pack(side="left")
 
-        # Universe‐settings cog
         self.settings_button = ttk.Button(self.action_frame, text="⚙️", width=3, command=self._open_universe_settings)
         self.settings_button.pack(side="left", padx=(6,0))
-
 
     def _create_filter_combobox(self, parent, label, values):
         ttk.Label(parent, text=f"{label}:").pack(side="left", padx=(10, 2))
@@ -440,32 +433,40 @@ class IdeaSuiteView(ttk.Frame):
 
 
     def _start_refresh(self):
-        universe = self.universe
-        self.refresh_button.config(state="disabled")
-        self.last_updated_label.config(text="Updating...")
-        # Clear old ideas and update UI immediately
-        for w in self.highlight_fr.winfo_children(): w.destroy()
-        ttk.Label(self.highlight_fr, text="Refreshing ideas...").grid(row=0, column=0)
-        self._all_ideas = []
-        self._render_category_tabs([])
-
-        # pass the list directly
-        threading.Thread(target=self._controller.refresh, args=(universe,), daemon=True).start()
-        self.after(self.POLL_MS, self._poll_queue)
+            """Internal method called by the refresh button."""
+            self.refresh_button.config(state="disabled")
+            self.last_updated_label.config(text="Updating...")
+            self.refresh_ideas()
 
     def _poll_queue(self):
+        """Check for new ideas from the background thread."""
         try:
-            ideas = self._queue.get_nowait()
-             # mark saved ideas **before** they render
-            for i in ideas:
+            new_ideas = self.queue.get_nowait()
+            self._hide_loading_overlay() # Hide loading indicator upon receiving data
+            
+            for i in new_ideas:
                 i.is_saved = i.uid in self._saved_ids
-            self._all_ideas = ideas
-            self._apply_filters()
+                
+            self._all_ideas = new_ideas
+            self._apply_filters() # This will call _render
+            
             self.last_updated_label.config(text=f"Last updated: {time.strftime('%I:%M:%S %p')}")
             self.refresh_button.config(state="normal")
         except queue.Empty:
-            if self.refresh_button['state'] == 'disabled':
-                self.after(self.POLL_MS, self._poll_queue)
+            pass # No new data
+        finally:
+            self.after(self.POLL_MS, self._poll_queue)
+
+    def _show_loading_overlay(self):
+        """Displays a simple 'Loading...' message."""
+        self.loading_label = ttk.Label(self, text="🧠 Generating new ideas...", style="Title.TLabel", anchor="center")
+        self.loading_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.loading_label.lift()
+
+    def _hide_loading_overlay(self):
+        """Hides the loading message."""
+        if hasattr(self, "loading_label") and self.loading_label.winfo_exists():
+            self.loading_label.place_forget()
                 
 
     def _apply_filters(self, event=None):

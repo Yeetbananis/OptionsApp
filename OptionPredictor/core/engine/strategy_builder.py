@@ -1453,44 +1453,37 @@ class StrategyBuilderWindow(tk.Toplevel):
     def _calculate_metrics(self, S_values, payoff_values, net_premium):
         # Calculate initial max profit/loss from the payoff curve
         max_profit = np.max(payoff_values)
-        calculated_min_payoff = np.min(payoff_values)
-        max_loss = calculated_min_payoff # Default to the calculated minimum
+        max_loss = np.min(payoff_values)
 
-        # --- START FIX ---
-        # Check if the strategy consists ONLY of buying options
-        # Ensures self.legs is not empty before checking all()
-        is_only_buying_options = bool(self.legs) and all(leg.get('action') == 'Buy' for leg in self.legs)
-
-        if is_only_buying_options:
-            # For pure long option strategies, max loss IS the net premium paid (debit).
-            # net_premium is calculated as negative for debits, so this value is correct.
+        # **FIX**: Correctly define max loss for debit-only strategies
+        # A strategy of only long options has a max loss equal to the debit paid.
+        is_debit_only_strategy = bool(self.legs) and all(leg.get('action') == 'Buy' for leg in self.legs)
+        if is_debit_only_strategy:
+            # The net_premium for a debit is negative, which is the correct max_loss value.
             max_loss = net_premium
-        # --- END FIX ---
 
-        # Check for infinite profit/loss based on net short positions
-        # This check runs *after* the potential override above.
-        # If max_loss was set to net_premium, it can still be set to -inf here if short legs exist.
-        if self.legs: # Only check if legs exist
+        # Now, check for infinite risk which overrides any finite calculation
+        if self.legs:
             net_short_calls = sum(l['quantity'] for l in self.legs if l['action']=='Sell' and l['type']=='Call')
             net_long_calls = sum(l['quantity'] for l in self.legs if l['action']=='Buy' and l['type']=='Call')
             net_short_puts = sum(l['quantity'] for l in self.legs if l['action']=='Sell' and l['type']=='Put')
-            net_long_puts = sum(l['quantity'] for l in self.legs if l['action']=='Buy' and l['type']=='Put') # Needed for infinite profit check
+            net_long_puts = sum(l['quantity'] for l in self.legs if l['action']=='Buy' and l['type']=='Put')
 
-            # Check conditions for INFINITE loss (overrides finite calculations)
-            if net_short_calls > net_long_calls : max_loss = -np.inf # Naked short calls -> infinite loss potential
-            if net_short_puts > net_long_puts : max_loss = -np.inf # Naked short puts -> infinite loss potential
+            if net_short_calls > net_long_calls: max_loss = -np.inf
+            if net_short_puts > net_long_puts: max_loss = -np.inf
+            if net_long_calls > net_short_calls: max_profit = np.inf
 
-            # Check conditions for infinite profit (overrides finite calculations)
-            if net_long_calls > net_short_calls : max_profit = np.inf # Net long calls -> infinite profit potential
-            # Net long puts can also have large profit as S->0, but max is finite (K * Qty * 100 + net_premium)
-
-        # Store the final calculated metrics
+        # Store the final, corrected metrics
         self.strategy_results['net_premium'] = net_premium
         self.strategy_results['max_profit'] = max_profit
-        self.strategy_results['max_loss'] = max_loss # Store potentially adjusted max_loss
+        self.strategy_results['max_loss'] = max_loss
+        
+        # Find break-evens using the calculated payoff curve
+        self.strategy_results['break_evens'] = self._find_break_evens(S_values, payoff_values)
 
         self._update_results_display()
 
+        
     def _update_results_display(self):
         res = self.strategy_results
         prem_text = f"{res['net_premium']:+.2f}"
@@ -1936,26 +1929,66 @@ class StrategyBuilderWindow(tk.Toplevel):
                 self.canvas.draw_idle()
 
     def _apply_llm_strategy(self, strategy_data):
+        """Applies the strategy received from the LLM to the builder."""
         if not isinstance(strategy_data, dict) or 'legs' not in strategy_data:
             raise ValueError("Invalid strategy format from LLM.")
 
         self.legs.clear()
         for leg in strategy_data['legs']:
+            # **FIX**: Create a fully validated leg, now including the premium
+            # provided by the LLM, with fallbacks for safety.
             validated_leg = {
-                'action': leg['action'],
-                'type': leg['type'],
-                'strike': float(leg['strike']),
-                'premium': float(leg['premium']),
+                'action': leg.get('action'),
+                'type': leg.get('type'),
+                'strike': float(leg.get('strike', 0)),
+                'premium': float(leg.get('premium', 0.0)), # Use the premium from the LLM
                 'quantity': int(leg.get('quantity', 1))
             }
+            # Add all greeks as None initially
+            for greek in ['delta', 'gamma', 'theta', 'vega', 'rho']:
+                validated_leg[greek] = None
+            
             self.legs.append(validated_leg)
 
+        # Update the UI to show the new legs and recalculate the P&L plot
         self._update_legs_display()
         self._update_strategy_and_pnl_plot()
 
-        if 'dte' in strategy_data:
-            self.mc_sim_days.set(int(strategy_data['dte']))
+    def _show_llm_note_popup(self, title, note_text):
+        """Displays the LLM's note in a dedicated, scrollable window."""
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("550x350")
+        win.transient(self)
+        win.grab_set()
+        
+        if hasattr(self, 'app_controller'):
+            self.app_controller.apply_theme_to_window(win)
 
+        main_frame = ttk.Frame(win, padding=15)
+        main_frame.pack(expand=True, fill=tk.BOTH)
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+
+        text_frame = ttk.LabelFrame(main_frame, text="AI Rationale")
+        text_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        text_box = tk.Text(text_frame, wrap=tk.WORD, relief="flat", padx=10, pady=5, font=("Segoe UI", 10))
+        text_box.grid(row=0, column=0, sticky="nsew")
+        text_box.insert(tk.END, note_text)
+        text_box.config(state=tk.DISABLED)
+
+        vsb = ttk.Scrollbar(text_frame, orient="vertical", command=text_box.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        text_box.configure(yscrollcommand=vsb.set)
+        
+        if hasattr(self, 'app_controller'):
+            theme_settings = self.app_controller.theme_settings()
+            text_box.config(background=theme_settings['entry_bg'], foreground=theme_settings['fg'])
+
+        ttk.Button(main_frame, text="Close", command=win.destroy).grid(row=1, column=0, sticky="e")
 
     def _prompt_llm_for_strategy(self):
         def labeled_row_grid(container, row, label, widget):
@@ -1985,13 +2018,11 @@ class StrategyBuilderWindow(tk.Toplevel):
 
         labeled_row_grid(frame, 0, "Ticker:", ttk.Entry(frame, textvariable=vars["ticker"]))
         labeled_row_grid(frame, 1, "Current Price:", ttk.Entry(frame, textvariable=vars["price"]))
-        labeled_row_grid(frame, 2, "Market View:", ttk.Combobox(frame, textvariable=vars["direction"], values=["Bullish", "Bearish"], state="readonly"))
+        labeled_row_grid(frame, 2, "Market View:", ttk.Combobox(frame, textvariable=vars["direction"], values=["Bullish", "Bearish", "Neutral"], state="readonly"))
         labeled_row_grid(frame, 3, "Target Price:", ttk.Entry(frame, textvariable=vars["target"]))
         labeled_row_grid(frame, 4, "Days to Expiry:", ttk.Entry(frame, textvariable=vars["dte"]))
         labeled_row_grid(frame, 5, "Implied Volatility (%):", ttk.Entry(frame, textvariable=vars["iv"]))
         labeled_row_grid(frame, 6, "Risk Tolerance:", ttk.Combobox(frame, textvariable=vars["risk"], values=["Low", "Moderate", "High"], state="readonly"))
-
-        # Checkbutton row is slightly different
         ttk.Label(frame, text="Prefer Defined Risk:").grid(row=7, column=0, sticky='w', padx=10, pady=5)
         ttk.Checkbutton(frame, variable=vars["defined"]).grid(row=7, column=1, sticky='w', padx=10, pady=5)
 
@@ -1999,26 +2030,30 @@ class StrategyBuilderWindow(tk.Toplevel):
 
         def run_llm():
             try:
-                from app.llm_helper import LLMHelper
+                from app.llm_helper import LLMHelper  # Import here to avoid circular dependency
                 llm = LLMHelper()
                 self._set_status("Asking LLM for strategy...", "orange")
                 strategy = llm.recommend_strategy_structured(
                     ticker=vars["ticker"].get(),
-                    current_price=vars["price"].get(),
+                    spot=vars["price"].get(),
                     direction=vars["direction"].get(),
-                    target_price=vars["target"].get(),
+                    target=vars["target"].get(),
                     dte=vars["dte"].get(),
                     iv=vars["iv"].get(),
-                    risk_tolerance=vars["risk"].get(),
-                    prefer_defined_risk=vars["defined"].get()
+                    risk=vars["risk"].get(),
+                    preference="Growth"
                 )
                 self._apply_llm_strategy(strategy)
                 self._set_status("✅ LLM strategy applied.", "green")
-                if "note" in strategy:
-                    messagebox.showinfo("LLM Rationale", strategy["note"], parent=self)
+                
+                # **FIX**: Call the new, scrollable popup for the note
+                if "note" in strategy and strategy["note"]:
+                    self._show_llm_note_popup("LLM Rationale", strategy["note"])
+
                 window.destroy()
             except Exception as e:
-                messagebox.showerror("LLM Error", str(e), parent=self)
+                if hasattr(self, 'app_controller'):
+                    self.app_controller.show_copyable_error("LLM Error", str(e))
+                else:
+                    messagebox.showerror("LLM Error", str(e), parent=self)
                 self._set_status("❌ LLM strategy failed", "red")
-
-        

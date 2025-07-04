@@ -39,6 +39,7 @@ from data.home_data_manager       import HomeDataManager
 from ui.DockingPlotWindow         import DockingPlotWindow
 from app.AnalysisPersistence      import AnalysisPersistence
 from ui.LoadAnalysisWindow        import LoadAnalysisWindow
+from ui.LoadingScreen             import LoadingScreen
 
 # ====================
 # Local Module Imports
@@ -364,6 +365,9 @@ class OptionAnalyzerApp:
         self.docking_window_instance = None
         self.strategy_testers = []
         self.analysis_persistence = AnalysisPersistence()
+        self.initial_load_tasks = ['indices', 'watchlist', 'news', 'fng'] # Tasks to wait for
+        self.loading_screen = None
+        self.loading_complete = False
 
         # Animation state
         self._loading_job = None
@@ -375,11 +379,13 @@ class OptionAnalyzerApp:
         # This function should contain ALL style configurations for the app
         configure_global_styles(self.current_theme)
 
-        # 6. BUILD MAIN UI
+        # --- Main Layout ---
         self.main_frame = ttk.Frame(root)
         self.main_frame.pack(expand=True, fill=tk.BOTH)
-        self.dashboard = HomeDashboard(self.main_frame, self)
-        self.dashboard.pack(expand=True, fill=tk.BOTH)
+
+        # Instead of creating the dashboard directly, start the loading sequence.
+        # The loading sequence will create and reveal the dashboard when ready.
+        self.root.after(100, self.start_loading_sequence)
 
         # 7. STATUS BAR
         self.status_label = ttk.Label(self.root, text="Ready.", style="Status.TLabel", anchor="center")
@@ -449,6 +455,74 @@ class OptionAnalyzerApp:
             pass
 
 
+    def start_loading_sequence(self):
+        """Shows the loading screen and starts the two independent loops."""
+        self.loading_screen = LoadingScreen(self.root, self.user_name, theme=self.current_theme)
+        self.root.withdraw()
+        
+        # Create the dashboard in the background
+        self.dashboard = HomeDashboard(self.main_frame, self)
+        
+        # Start the two loops
+        self._candle_animation_loop()
+        self._loading_status_monitor()
+
+    def _candle_animation_loop(self):
+        """
+        A simple, robust loop that ONLY draws candles. It checks the finale
+        flag on the loading screen to know when to stop permanently.
+        """
+        if not self.loading_screen or not self.loading_screen.winfo_exists():
+            return
+        
+        # **FIX**: Check the "kill switch" flag before drawing a new candle.
+        if self.loading_screen.is_finale_triggered:
+            return # Stop the loop permanently.
+
+        self.loading_screen.add_new_candle()
+        self.root.after(300, self._candle_animation_loop)
+
+    def _loading_status_monitor(self):
+        """
+        A separate loop that ONLY checks for data loading progress.
+        It runs once and schedules the finale when done.
+        """
+        if self.loading_complete: return # Already done
+
+        if not self.initial_load_tasks:
+            # --- Loading is complete ---
+            self.loading_complete = True # Set flag to run this once
+            self.loading_screen.update_progress_bar(1.0)
+            self.loading_screen.trigger_pre_climax_dip()
+
+            # This line adds a delay to see the animation longer.
+            # To restore normal loading speed, change 15000 to a smaller number like 1000.
+            self.root.after(1000, self._trigger_final_sequence) #DELAY!!!
+        else:
+            # --- Still loading ---
+            total_tasks = 4.0
+            progress = (total_tasks - len(self.initial_load_tasks)) / total_tasks
+            self.loading_screen.update_progress_bar(progress)
+            self.root.after(100, self._loading_status_monitor) # Check again soon
+
+    def _trigger_final_sequence(self):
+        """Runs the final 'god candle' and fade-out sequence."""
+        if self.loading_screen and self.loading_screen.winfo_exists():
+            self.loading_screen.animate_take_profit()
+            # Hold on the final frame for 1 second before fading
+            self.root.after(1000, self.loading_screen.fade_out_and_close)
+            self.root.after(1500, self.show_main_window)
+
+
+    def on_initial_load_complete(self, task_name):
+        """Called by dashboard components when they finish their first data fetch."""
+        if task_name in self.initial_load_tasks:
+            self.initial_load_tasks.remove(task_name)
+            
+    def show_main_window(self):
+        """Makes the main application window visible and places the dashboard."""
+        self.dashboard.pack(expand=True, fill=tk.BOTH)
+        self.root.deiconify() # Reveal the main window
 
     def set_status(self, text, color=None):
         """Updates the status label. Uses default label foreground if color is None."""
@@ -1826,32 +1900,45 @@ class OptionAnalyzerApp:
         self.root.quit()
 
     def launch_idea_suite(self):
-        """Open or refocus the Idea-Suite window."""
+        """
+        Open or refocus the Idea-Suite window, now with a robust,
+        guaranteed refresh on first launch.
+        """
+        # If window exists, just bring it to the front
         if getattr(self, "_idea_suite_win", None) and self._idea_suite_win.winfo_exists():
             self._idea_suite_win.deiconify()
             self._idea_suite_win.lift()
             self._idea_suite_win.focus_force()
             return
 
+        # --- Create a new window and all its components ---
         win = tk.Toplevel(self.root)
         win.title("💡 Idea Suite")
         win.geometry("1400x900")
         self._idea_suite_win = win
         self.child_windows.append(win)
-
-        # A Toplevel window cannot have tabs added to it directly.
-        # You must first create a Notebook widget inside the window.
-        notebook = ttk.Notebook(win)
-        notebook.pack(expand=True, fill="both", padx=5, pady=5)
-
-        # Now, pass the NOTEBOOK (not the window) to the IdeaSuiteView.
-        # The IdeaSuiteView will then correctly add itself as a tab to the notebook.
-        suite_view = IdeaSuiteView(notebook, app=self, engine=self.idea_engine)
         
-        # Ensure the new window gets the correct theme
+        # Create a notebook widget to hold the view
+        notebook = ttk.Notebook(win)
+        notebook.pack(expand=True, fill="both")
+        
+        # Create the controller and view here, linking them properly
+        from core.engine.idea_suite_controller import IdeaSuiteController
+        
+        # 1. The view now creates its own queue to receive ideas
+        suite_view = IdeaSuiteView(notebook, app=self)
+        suite_view.pack(expand=True, fill="both")
+
+        # 2. The controller is given the view's queue to push data into
+        controller = IdeaSuiteController(self.idea_engine, suite_view.queue)
+        
+        # 3. The view is given a reference to the controller to request refreshes
+        suite_view.set_controller(controller)
+        
+        # 4. Kick off the initial, guaranteed refresh
+        suite_view.refresh_ideas()
+        
         self.apply_theme_to_window(win)
-
-
 
 
     def launch_strategy_builder(self, idea_data: dict | None = None):
@@ -1893,28 +1980,85 @@ class OptionAnalyzerApp:
         from core.models.Greeks import Greeks
         Greeks(self.root, self.input_data['greek_inputs'], self.input_data['S0'], self.input_data['T_days'], dark_mode=(self.current_theme == 'dark'))
 
+    def show_copyable_error(self, title: str, message: str):
+            """Displays a custom error dialog with a visible 'Copy to Clipboard' button."""
+            win = tk.Toplevel(self.root)
+            win.title(title)
+            win.geometry("600x400")
+            win.transient(self.root)
+            win.grab_set()
+            self.apply_theme_to_window(win)
+
+            main_frame = ttk.Frame(win, padding=15)
+            main_frame.pack(expand=True, fill=tk.BOTH)
+
+            # --- Button Frame (Packed to the bottom first) ---
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
+
+            def _copy_to_clipboard():
+                self.root.clipboard_clear()
+                self.root.clipboard_append(message)
+                copy_btn.config(text="✓ Copied!")
+                copy_btn.after(2000, lambda: copy_btn.config(text="Copy to Clipboard"))
+
+            # Pack buttons from the right side of the button_frame
+            close_btn = ttk.Button(button_frame, text="Close", command=win.destroy)
+            close_btn.pack(side=tk.RIGHT)
+            
+            copy_btn = ttk.Button(button_frame, text="Copy to Clipboard", command=_copy_to_clipboard)
+            copy_btn.pack(side=tk.RIGHT, padx=(0, 10))
+
+            # --- Text Frame (Fills all remaining space) ---
+            text_frame = ttk.LabelFrame(main_frame, text="Error Details")
+            text_frame.pack(expand=True, fill=tk.BOTH)
+            text_frame.rowconfigure(0, weight=1)
+            text_frame.columnconfigure(0, weight=1)
+
+            text_box = tk.Text(text_frame, wrap=tk.WORD, relief="flat", padx=10, pady=5)
+            text_box.grid(row=0, column=0, sticky="nsew")
+            text_box.insert(tk.END, message)
+            text_box.config(state=tk.DISABLED)
+
+            vsb = ttk.Scrollbar(text_frame, orient="vertical", command=text_box.yview)
+            vsb.grid(row=0, column=1, sticky="ns")
+            text_box.configure(yscrollcommand=vsb.set)
+            
+            # Apply theme to the text box
+            theme_settings = self.theme_settings()
+            text_box.config(background=theme_settings['entry_bg'], foreground=theme_settings['fg'])
+
 
 
 
     def show_llm_explanation(self, idea: Idea | None = None):
         """
-        Shows a detailed explanation of a strategy from an LLM.
-        Can be called with a specific Idea object or use the last analysis data.
+        Shows a detailed explanation of a strategy from an LLM, ensuring
+        only valid data is sent.
         """
+        prompt_data = {}
+        popup_title = "📘 Strategy Explanation (LLM)"
+
         if idea:
             # Called from an IdeaCard
+            # **FIX**: Safely get the premium from the idea's metrics,
+            # defaulting to None if it doesn't exist.
+            premium = idea.metrics.get('premium') if isinstance(idea.metrics, dict) else None
+
             prompt_data = {
                 "ticker": idea.symbol,
                 "option_type": idea.suggested_strategy.get('type', 'strategy'),
                 "strike": idea.metrics.get('Strike', 'N/A'),
                 "S0": idea.metrics.get('last_price', 'N/A'),
-                "premium": "N/A", # Not available on all ideas
+                "premium": premium,
                 "T_days": idea.metrics.get('UpcomingEarnings', {}).get('days_until', 'N/A'),
                 "prob": "N/A",
                 "title": idea.title,
-                "description": idea.description
+                "description": idea.description,
+                "metrics": idea.metrics
             }
             popup_title = f"📘 LLM on: {idea.symbol} - {idea.title}"
+            
         elif self.input_data:
             # Called from the main analysis results
             prompt_data = {
@@ -1928,7 +2072,6 @@ class OptionAnalyzerApp:
                 "title": "Custom Analysis",
                 "description": f"A {self.input_data['option_type']} option with a strike of ${self.input_data['strike']}"
             }
-            popup_title = "📘 Strategy Explanation (LLM)"
         else:
             messagebox.showwarning("No Data", "Run an analysis or select an idea first.", parent=self.root)
             return
@@ -1937,18 +2080,12 @@ class OptionAnalyzerApp:
 
         def llm_thread_worker():
             try:
+                # The prompt builder in llm_helper will now correctly handle cases
+                # where premium is None or not a valid number.
                 explanation = self.llm.explain_option_strategy(**prompt_data)
                 self.root.after(0, show_popup, explanation)
             except Exception as e:
-                self.root.after(
-                    0,
-                    lambda err_msg=str(e): messagebox.showerror(
-                        "LLM Error",
-                        f"Failed to get explanation: {err_msg}",
-                        parent=self.root,
-                    ),
-                )
-
+                self.root.after(0, lambda err_msg=str(e): messagebox.showerror("LLM Error", f"Failed to get explanation: {err_msg}", parent=self.root))
             finally:
                 self.root.after(0, self.set_status, "Ready.")
 
@@ -1962,25 +2099,28 @@ class OptionAnalyzerApp:
             text_box.pack(expand=True, fill=tk.BOTH)
             text_box.insert(tk.END, explanation)
             text_box.config(state=tk.DISABLED)
-
-            # Apply theme to the text widget specifically
-            bg = '#252526' if self.current_theme == 'dark' else '#ffffff'
-            fg = '#ffffff' if self.current_theme == 'dark' else '#000000'
-            text_box.config(background=bg, foreground=fg, insertbackground=fg)
+            
+            theme_settings = self.theme_settings()
+            text_box.config(background=theme_settings['entry_bg'], foreground=theme_settings['fg'], insertbackground=theme_settings['fg'])
 
         threading.Thread(target=llm_thread_worker, daemon=True).start()
 
-
+       
 # --- Main Execution ---
 if __name__ == "__main__":
     root = tk.Tk()
+    # Hide the main window immediately to prevent the flash
+    root.withdraw()
+    
     app = OptionAnalyzerApp(root)
-    # Optional: Set minimum window size
-    root.minsize(400, 350)
+    
     try:
         root.mainloop()
     except tk.TclError:
         print("GUI closed by user.")
+    except KeyboardInterrupt:
+        print("Application interrupted by user.")
+    finally:
         sys.exit()
 
 
