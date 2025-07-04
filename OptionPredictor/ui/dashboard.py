@@ -17,7 +17,7 @@ from ui.candlestick_pane import CandlestickChartPane
 from ui.bounceoverlay import BounceOverlay
 from core.engine.strategy_tester import load_icon, ICON_DIR
 
-REFRESH_INTERVAL = 30 # seconds between data refreshes
+
 _SENT_HISTORY_FILE = Path.home() / ".option_analyzer_sentiment.json"
 
 
@@ -261,20 +261,32 @@ class SideMenu(ttk.Frame):
         # --- Header with Title and Close Button ---
         header_frame = ttk.Frame(container)
         header_frame.pack(fill="x", pady=(0, 20), anchor="n")
-        header_frame.columnconfigure(0, weight=1)  # Make title expand
+        header_frame.columnconfigure(0, weight=1)
 
         title = ttk.Label(header_frame, text="Navigation", style="Title.TLabel")
         title.grid(row=0, column=0, sticky="w")
 
-        # The new close button
         style = "Toolbutton" if "Toolbutton" in ttk.Style().theme_names() else "TButton"
         close_btn = ttk.Button(header_frame, text="«", command=self.hide, style=style, width=3)
         close_btn.grid(row=0, column=1, sticky="e")
         Tooltip(close_btn, "Close Menu")
 
-        # --- Action Buttons ---
+        #  Frame to hold New and Load buttons side-by-side
+        analysis_actions_frame = ttk.Frame(container)
+        analysis_actions_frame.pack(fill="x", pady=4)
+        analysis_actions_frame.columnconfigure((0, 1), weight=1) # Make columns share space
+
+        new_btn = ttk.Button(analysis_actions_frame, text="✨ New Analysis", command=self.controller.open_input_window, style="Accent.TButton")
+        new_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        Tooltip(new_btn, "Run a new Monte Carlo simulation.")
+
+        load_btn = ttk.Button(analysis_actions_frame, text="📂 Load Analysis", command=self.controller._launch_load_window, style="Pill.TButton")
+        load_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        Tooltip(load_btn, "Load a previously saved analysis.")
+
+
+        # --- Other Action Buttons (New Analysis is no longer here) ---
         btn_map = {
-            "📊 New Analysis": self.controller.open_input_window,
             "💡 Idea Suite": self.controller.launch_idea_suite,
             "📰 Sentiment Analyzer": self.controller.launch_news_sentiment_analyzer,
             "📐 Strategy Builder": self.controller.launch_strategy_builder,
@@ -385,6 +397,7 @@ class HomeDashboard(ttk.Frame):
         super().__init__(parent, padding="15 15 15 15")
         self.controller = controller
         self.data_mgr = controller.data_mgr
+        self.refresh_interval = self.controller.settings.get("refresh_interval", 30)
         # NYSE open hours in Eastern Time
         self._ny_open  = dt_time(hour=9,  minute=30)
         self._ny_close = dt_time(hour=16, minute=0)
@@ -394,7 +407,7 @@ class HomeDashboard(ttk.Frame):
         # ─── auto-refresh bookkeeping ─────────────────────────────────────
         self._last_update_ts   = None     # datetime of last successful _refresh()
         self._countdown_after  = None     # after() id for 1-second countdown ticks
-        self._countdown_secs   = REFRESH_INTERVAL
+        self._countdown_secs   = self.refresh_interval
 
         # --- Layout Customization State ---
         self._in_customize_mode = False
@@ -404,6 +417,8 @@ class HomeDashboard(ttk.Frame):
         self._main_content_frame = None
         self.side_menu = None #  Will hold the side menu instance
 
+        # Create the overlay but do not show it yet.
+        # It will be placed on screen only when explicitly enabled.
         self.bounce_overlay = BounceOverlay(self)
 
         # Configure the main frame's grid layout
@@ -642,31 +657,36 @@ class HomeDashboard(ttk.Frame):
         return chart_box
 
     def _build_footer(self):
-        """Builds the bottom footer, which now holds refresh status and layout-edit buttons."""
+        """Builds the bottom footer with layout controls, action buttons, and refresh status."""
         footer_frame = ttk.Frame(self)
-        footer_frame.grid(row=4, column=0, sticky="ew")
-        # Add a spacer column to push the refresh label to the far right
-        footer_frame.columnconfigure(3, weight=1)
+        footer_frame.grid(row=4, column=0, sticky="ew", pady=(15, 0))
+        # Create a spacer column in the middle to push content to the sides
+        footer_frame.columnconfigure(1, weight=1)
 
-        # --- Layout Customization Buttons (hidden by default) ---
-        # These are shown when "Customize Layout" is clicked in the new side menu.
-        self.save_layout_btn = ttk.Button(footer_frame, text="✅ Save Layout", command=self._save_layout, style="Pill.TButton")
-        self.cancel_layout_btn = ttk.Button(footer_frame, text="❌ Cancel", command=self._cancel_layout, style="Pill.TButton")
-        self.reset_layout_btn = ttk.Button(
-            footer_frame, text="🔄 Reset Layout",
-            command=self._reset_to_default, style="Pill.TButton")
+        # --- Left side: Layout Customization Buttons (hidden by default) ---
+        layout_controls_frame = ttk.Frame(footer_frame)
+        layout_controls_frame.grid(row=0, column=0, sticky="w")
+        
+        self.save_layout_btn = ttk.Button(layout_controls_frame, text="✅ Save Layout", command=self._save_layout, style="Pill.TButton")
+        self.cancel_layout_btn = ttk.Button(layout_controls_frame, text="❌ Cancel", command=self._cancel_layout, style="Pill.TButton")
+        self.reset_layout_btn = ttk.Button(layout_controls_frame, text="🔄 Reset Layout", command=self._reset_to_default, style="Pill.TButton")
+        
+        self.save_layout_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.cancel_layout_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.reset_layout_btn.pack(side=tk.LEFT)
+        
+        # Hide the entire frame initially and save a reference to it
+        layout_controls_frame.grid_remove()
+        self.layout_controls_frame = layout_controls_frame
 
-        # Place them but immediately hide them. _toggle_customize_mode will manage visibility.
-        self.save_layout_btn.grid(row=0, column=0, sticky="w", padx=(0, 5))
-        self.cancel_layout_btn.grid(row=0, column=1, sticky="w", padx=(0, 5))
-        self.reset_layout_btn.grid(row=0, column=2, sticky="w", padx=(0, 5))
-        self.save_layout_btn.grid_remove()
-        self.cancel_layout_btn.grid_remove()
-        self.reset_layout_btn.grid_remove()
+        # --- Right side: Action Buttons and Refresh Label ---
+        actions_frame = ttk.Frame(footer_frame)
+        actions_frame.grid(row=0, column=2, sticky="e")
+        
+        self.refresh_lbl = ttk.Label(actions_frame, text="Updated: —   Next: —", font=("Segoe UI", 9))
+        self.refresh_lbl.pack(side=tk.RIGHT, padx=(10, 0))
 
-        # --- Refresh Label ---
-        self.refresh_lbl = ttk.Label(footer_frame, text="Updated: —   Next: —", font=("Segoe UI", 9))
-        self.refresh_lbl.grid(row=0, column=4, sticky="e")
+
 
     def _sync_wl_strip(self, event=None):
         """
@@ -713,16 +733,12 @@ class HomeDashboard(ttk.Frame):
         self._in_customize_mode = enable
 
         if enable:
-            # Show the layout editing buttons in the footer
-            self.save_layout_btn.grid()
-            self.cancel_layout_btn.grid()
-            self.reset_layout_btn.grid()
+            # Show the layout editing buttons frame
+            self.layout_controls_frame.grid()
             self.drag_mgr.enable_edit_mode(True)
         else:
-            # Hide the layout editing buttons
-            self.save_layout_btn.grid_remove()
-            self.cancel_layout_btn.grid_remove()
-            self.reset_layout_btn.grid_remove()
+            # Hide the layout editing buttons frame
+            self.layout_controls_frame.grid_remove()
             self.drag_mgr.enable_edit_mode(False)
 
     def _get_or_create_tile(self, name: str):
@@ -781,15 +797,18 @@ class HomeDashboard(ttk.Frame):
 
     def toggle_bounce_overlay(self):
         """
-        Checks the application settings and starts or stops the bounce 
-        overlay accordingly. This method can be called from outside to
-        update the bouncer's state when the setting changes.
+        Checks settings and correctly starts or stops the bounce overlay by
+        calling its own start/stop methods.
         """
         try:
+            # Get the current setting (which defaults to False)
             is_enabled = self.controller.settings.get('enable_bounce_overlay', False)
+
             if is_enabled:
+                # The start() method handles creating and showing the overlay
                 self.bounce_overlay.start()
             else:
+                # The stop() method handles destroying the overlay
                 self.bounce_overlay.stop()
         except Exception as e:
             logging.error(f"Failed to toggle bounce overlay: {e}")
@@ -900,7 +919,7 @@ class HomeDashboard(ttk.Frame):
     def _start_refresh_countdown(self):
         """Trigger an immediate data load, then start the second-by-second clock."""
         self._refresh()
-        self._countdown_secs = REFRESH_INTERVAL
+        self._countdown_secs = self.refresh_interval
         self._tick_refresh_countdown()
 
     def _tick_refresh_countdown(self):
@@ -913,12 +932,20 @@ class HomeDashboard(ttk.Frame):
 
         if self._countdown_secs == 0:
             self._refresh()
-            self._countdown_secs = REFRESH_INTERVAL
+            self._countdown_secs = self.refresh_interval
         else:
             self._countdown_secs -= 1
 
         self._countdown_after = self.after(1000, self._tick_refresh_countdown)
 
+    def update_refresh_interval(self, new_interval_seconds: int):
+        """
+        Called from the main app when the user saves a new refresh interval.
+        """
+        self.refresh_interval = new_interval_seconds
+        # To make the change feel responsive, if the user lowers the interval,
+        # we adjust the current countdown.
+        self._countdown_secs = min(self._countdown_secs, self.refresh_interval)
 
     def check_wifi(self):
         def worker():
@@ -1235,7 +1262,8 @@ class HomeDashboard(ttk.Frame):
             m.grab_release()
 
     def _open_google_finance(self, ticker):
-        webbrowser.open(f"https://www.google.com/search?q=stock%20price%20{ticker}")
+        # Schedule the webbrowser call to run safely on the main Tkinter event loop.
+        self.after(0, lambda: webbrowser.open(f"https://www.google.com/search?q=stock%20price%20{ticker}"))
 
     # ──────────────────────────────────────────────────────────────
     #   Fundamentals fetch  (15-minute memoisation)
@@ -1290,7 +1318,7 @@ class HomeDashboard(ttk.Frame):
             tip.update(
                 f"{ticker} — {f['name']}\n"
                 f"Price: {f['price']:,} {arrow} {change}\n"
-                f"Market Cap: {f['cap']/1_000_000_000:.1f} B\n"
+                f"Market Cap: {f['cap']/1e9:.1f} B\n" if f['cap'] else "Market Cap: N/A\n"
                 f"P/E Ratio:  {f['pe'] or '—'}\n"
                 f"Day Range:  {f['low']:,} – {f['high']:,}"
             )

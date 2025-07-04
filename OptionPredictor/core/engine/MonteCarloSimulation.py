@@ -642,6 +642,9 @@ def _setup_plot_embedding(parent_window, fig_size=(8, 6)):
 def plot_simulation_paths(parent_window, time_points, sample_paths, S0, H, option_type, sigma, probability,
                           n_simulations, num_paths_to_plot, title="Simulated Stock Paths", educational_mode=False, dark_mode=False):
 
+    time_points = np.array(time_points)
+    sample_paths = [np.array(p) for p in sample_paths if p is not None]
+
     if dark_mode:
         plt.style.use('dark_background')
     else:
@@ -673,7 +676,7 @@ def plot_simulation_paths(parent_window, time_points, sample_paths, S0, H, optio
     frames = len(days)
     num_paths_to_plot = min(num_paths_to_plot, len(sample_paths))
 
-    if num_paths_to_plot == 0 or frames == 0:
+    if sample_paths is None or len(sample_paths) == 0 or not hasattr(sample_paths[0], 'size') or sample_paths[0].size == 0:
         ax.text(0.5, 0.5, "No simulation data to plot.", ha='center', va='center')
         fig.tight_layout()
         canvas.draw()
@@ -686,6 +689,12 @@ def plot_simulation_paths(parent_window, time_points, sample_paths, S0, H, optio
     ax.set_xlim(days[0], days[-1])
 
     all_prices = [p for p in sample_paths[:num_paths_to_plot] if p is not None and len(p) == len(days)]
+    #  Ensure the filtered list of prices is not empty before concatenating
+    if not all_prices:
+        ax.text(0.5, 0.5, "No valid simulation paths to display.", ha='center', va='center')
+        canvas.draw()
+        return canvas
+        
     y_min = min(np.nanmin(np.concatenate(all_prices)), S0, H) * 0.95
     y_max = max(np.nanmax(np.concatenate(all_prices)), S0, H) * 1.05
     ax.set_ylim(y_min, y_max)
@@ -813,11 +822,14 @@ def plot_simulation_paths(parent_window, time_points, sample_paths, S0, H, optio
     canvas.draw()
 
 
+
 def plot_distribution(parent, simulated_prices_at_expiry, H, probability, option_type, S0, avg_trigger, std_trigger, dark_mode=False):
     import numpy as np
     import matplotlib.pyplot as plt
     import seaborn as sns
     import matplotlib.backends.backend_tkagg as tkagg
+
+    simulated_prices_at_expiry = np.array(simulated_prices_at_expiry)
     if dark_mode:
         plt.style.use('dark_background')
     else:
@@ -1000,7 +1012,12 @@ def plot_profit_heatmap(parent_window, prices, times, profit_m, percent_m, day_l
         fig, ax = plt.subplots(figsize=(10, 8))
 
         multiplier = contract_multiplier.get() * 100
-        data = profit_m * multiplier if view_state["view"] == "dollar" else percent_m
+        
+        # Ensure profit data is a numpy array before multiplication
+        safe_profit_m = np.array(profit_m)
+        safe_percent_m = np.array(percent_m)
+        
+        data = safe_profit_m * multiplier if view_state["view"] == "dollar" else safe_percent_m
         label = 'Profit ($)' if view_state["view"] == "dollar" else 'Profit (%)'
         fmt = ".2f" if view_state["view"] == "dollar" else ".1f"
 
@@ -1098,6 +1115,10 @@ def plot_profit_heatmap(parent_window, prices, times, profit_m, percent_m, day_l
 
 def plot_option_surface_3d(parent_window, P_grid, T_grid, V_grid, option_type, strike, title="3D Option Value Surface", educational_mode=False, dark_mode=False):
 
+    P_grid = np.array(P_grid)
+    T_grid = np.array(T_grid)
+    V_grid = np.array(V_grid)
+
     if dark_mode:
         plt.style.use('dark_background')
     else:
@@ -1152,6 +1173,11 @@ def plot_option_surface_3d(parent_window, P_grid, T_grid, V_grid, option_type, s
 
 def plot_volatility_surface_3d(plot_frame, P_grid, T_grid, IV_grid, title="3D Volatility Surface", dark_mode=False):
     """Plots the 3D Implied Volatility surface in the provided Tkinter frame."""
+
+    P_grid = np.array(P_grid)
+    T_grid = np.array(T_grid)
+    IV_grid = np.array(IV_grid)
+
     if dark_mode:
         plt.style.use('dark_background')
         fig_bg = '#1e1e1e'

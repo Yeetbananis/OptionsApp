@@ -36,6 +36,9 @@ import pandas as pd
 #External classes
 from ui.dashboard                 import HomeDashboard
 from data.home_data_manager       import HomeDataManager
+from ui.DockingPlotWindow         import DockingPlotWindow
+from app.AnalysisPersistence      import AnalysisPersistence
+from ui.LoadAnalysisWindow        import LoadAnalysisWindow
 
 # ====================
 # Local Module Imports
@@ -284,7 +287,9 @@ class SettingsManager:
         "timezone": "America/Vancouver",
         "default_ticker": "SPY",
         "watchlist": "SPY|^VIX",
-        "marquee_speed": 1.5
+        "marquee_speed": 1.5,
+        "refresh_interval": 30,
+        "enable_bounce_overlay": False  
     }
 
 
@@ -333,101 +338,55 @@ except ImportError:
 
 class OptionAnalyzerApp:
     def __init__(self, root):
-        # -------------------------------------------------
-        # 1️⃣  PERSISTENT SETTINGS (must come first!)
-        self.settings      = SettingsManager()         # NEW → now exists
+        # 1. PRIMARY SETUP (Settings must be first)
+        self.settings = SettingsManager()
         self.current_theme = self.settings.get("theme", "light")
-        # a BooleanVar so other code can read/update dark-mode setting
         self.is_dark_mode_var = tk.BooleanVar(value=(self.current_theme == "dark"))
-        # -------------------------------------------------
 
-        self.theme_callbacks = []  # Store callbacks for theme updates
-        self.strategy_tester_instance = None
+        # 2. ROOT WINDOW CONFIGURATION
         self.root = root
         self.root.title("Option Analyzer")
-        self.root.geometry("900x800")
-        self._loading_job = None          # id holder
+        self.root.geometry("1200x800") # Use a larger default size
+        self.root.minsize(900, 700)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # handy access later
-        self.data_mgr  = HomeDataManager()
-        self.user_name = self.settings.get("user_name", "Trader")
-
-        # Apply base ttk styles once at start-up
-        configure_global_styles(self.current_theme)
-
-
-
-        self.current_theme = self.settings.get("theme", "light") 
-        self.theme_callbacks = []  # Store callbacks for theme updates
-        self.strategy_tester_instance = None
-        self.root = root
-        self.root.title("Option Analyzer")
-        self.root.geometry("900x800") # Give main window a bit more space
+        # 3. CORE COMPONENTS INITIALIZATION
+        self.data_mgr = HomeDataManager()
         self.llm = LLMHelper(model="deepseek-q4ks")
         self.idea_engine = IdeaEngine()
+        self.user_name = self.settings.get("user_name", "Trader")
 
-        self.settings    = SettingsManager()      # persistent prefs
-        self.data_mgr    = HomeDataManager()      # live data fetcher
-        self.user_name   = self.settings.get("user_name", "Trader")
-        # --------------------------------
+        # 4. STATE AND WINDOW MANAGEMENT
+        self.input_data = {}
+        self.child_windows = []
+        self.theme_callbacks = []
+        self.strategy_tester_instance = None
+        self.docking_window_instance = None
+        self.strategy_testers = []
+        self.analysis_persistence = AnalysisPersistence()
 
+        # Animation state
+        self._loading_job = None
+        self.is_loading = False
+        self.animation_chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+        self.animation_step = 0
 
-        # keep track of all child windows for theme propagation
-        self.child_windows: list = []
+        # 5. APPLY GLOBAL STYLES (Crucial step)
+        # This function should contain ALL style configurations for the app
+        configure_global_styles(self.current_theme)
 
-
-        # --- Style Configuration ---
-        style = ttk.Style()
-        try:
-            # Attempt to use a modern theme
-            available_themes = style.theme_names()
-            if 'clam' in available_themes: style.theme_use('clam')
-            elif 'vista' in available_themes: style.theme_use('vista') # Good on Windows
-            elif 'aqua' in available_themes: style.theme_use('aqua') # Good on Mac
-            else: style.theme_use('default')
-        except tk.TclError:
-            print(" ttk themes not fully available, using default.")
-
-
-        style.configure("TButton", padding=6, relief="flat", font=('Helvetica', 10))
-        style.map("TButton", background=[('active', '#e0e0e0')]) # Subtle hover effect
-        style.configure("TLabel", padding=3, font=('Helvetica', 10))
-        style.configure("Title.TLabel", font=('Helvetica', 16, "bold")) # Specific style for title
-        style.configure("Status.TLabel", font=('Helvetica', 10)) # Specific style for status
-        style.configure("TEntry", padding=5, font=('Helvetica', 10))
-        style.configure("TFrame", background=style.lookup('TLabel', 'background')) # Match frame bg
-
-        
-
-        # --- Main Layout (Dashboard) ---
-        self.main_frame = ttk.Frame(root, padding="0 0 0 0", style="TFrame")
+        # 6. BUILD MAIN UI
+        self.main_frame = ttk.Frame(root)
         self.main_frame.pack(expand=True, fill=tk.BOTH)
-
         self.dashboard = HomeDashboard(self.main_frame, self)
         self.dashboard.pack(expand=True, fill=tk.BOTH)
 
-
-        # Status bar (must exist before animate_loading can update it)
+        # 7. STATUS BAR
         self.status_label = ttk.Label(self.root, text="Ready.", style="Status.TLabel", anchor="center")
-        self.status_label.pack(fill="x", pady=4)
+        self.status_label.pack(fill="x", pady=4, padx=5)
 
-
-        # animation state
-        self.is_loading     = False
-        self.animation_chars = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"]
-        self.animation_step = 0
-        # ─────────────────────────────────────────────────────
-
-        # --- other State Variables ---
-        self.input_data = {} # To store results from analysis
-        self.strategy_testers = [] # Keep track of StrategyTester windows
-
-
-
-        
-        # expose our theming helper on the root for children to call
+        # 8. EXPOSE HELPERS (Optional but good practice)
         self.root.apply_theme_to_window = self.apply_theme_to_window
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
 
     def theme_settings(self):
@@ -528,280 +487,260 @@ class OptionAnalyzerApp:
             self._loading_job = None
         self.is_loading = False
 
+    def _configure_styles(self):
+            """Defines all custom ttk styles for the application."""
+            style = ttk.Style(self.root)
+            
+            # This style is for the section headers in the settings window.
+            # Defining it here, once, prevents the "Layout not found" error.
+            default_bg = style.lookup('TFrame', 'background')
+            default_fg = style.lookup('TLabel', 'foreground')
+            style.configure("Settings.TLabelFrame", background=default_bg)
+            style.configure("Settings.TLabelFrame.Label", font=("Segoe UI Semibold", 10), background=default_bg, foreground=default_fg)
+            
+            # Define other custom styles used in the settings window
+            style.configure("Pill.TButton", borderwidth=0)
+            style.configure("Card.TFrame", relief='solid', borderwidth=1)
+            style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"))
 
-
-  # ---------------- SETTINGS (Refactored UI) ----------------
+ # ---------------- SETTINGS (Corrected & Cleaned) ----------------
     def open_settings_window(self):
         """
         Opens a settings window with a professional and organized layout.
-        Uses Labelframes to group related settings and provides clear spacing.
+        This version relies on globally pre-configured styles to prevent errors.
         """
         win = tk.Toplevel(self.root)
-        win.title("Settings")
-        win.geometry("750x650")  # Adjusted size for better spacing
-        win.transient(self.root) # Keep window on top of main app
-        win.grab_set() # Modal behavior
+        win.title("⚙️ Settings")
+        win.geometry("820x640")
+        win.transient(self.root)
+        win.grab_set()
         self.apply_theme_to_window(win)
 
-        # --- Main container frame ---
-        main_frame = ttk.Frame(win, padding=(20, 10))
-        main_frame.pack(expand=True, fill="both")
+        # --- Get theme colors ---
+        style = ttk.Style(win)
+        accent_color = "#0078d4"
+        default_bg = style.lookup('TFrame', 'background')
+        default_fg = style.lookup('TLabel', 'foreground')
 
-        # --- Section 1: User Preferences ---
-        prefs_frame = ttk.Labelframe(main_frame, text="User Preferences", padding=15)
-        prefs_frame.pack(fill="x", padx=10, pady=10)
+        # --- Main Layout ---
+        main_pane = ttk.PanedWindow(win, orient=tk.HORIZONTAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
+
+        # --- Left: Category List ---
+        category_list = tk.Listbox(main_pane, width=22, exportselection=False, relief=tk.FLAT, highlightthickness=0, font=("Segoe UI", 11))
+        category_list.pack(fill=tk.Y, side=tk.LEFT)
+        main_pane.add(category_list, weight=1)
+        category_list.configure(background=default_bg, foreground=default_fg, selectbackground=accent_color, selectforeground="white")
+
+        settings_area = ttk.Frame(main_pane, padding=(15, 5))
+        main_pane.add(settings_area, weight=4)
+
+        # --- Variables ---
+        name_var = tk.StringVar(value=self.user_name)
+        theme_var = tk.StringVar(value=self.current_theme)
+        tz_var = tk.StringVar(value=self.settings.get("timezone"))
+        ticker_var = tk.StringVar(value=self.settings.get("default_ticker"))
+        interval_var = tk.IntVar(value=self.settings.get("refresh_interval"))
+        speed_var = tk.DoubleVar(value=self.settings.get("marquee_speed", 1.5))
+        bounce_enabled_var = tk.BooleanVar(value=self.settings.get('enable_bounce_overlay', False))
+        
+        frames = {}
+        def show_frame(name):
+            for f_widget in frames.values(): f_widget.pack_forget()
+            frames[name].pack(fill=tk.BOTH, expand=True)
+            for i, item in enumerate(category_list.get(0, tk.END)):
+                if name in item:
+                    category_list.selection_clear(0, tk.END)
+                    category_list.selection_set(i)
+                    category_list.activate(i)
+                    break
+        category_list.bind('<<ListboxSelect>>', lambda e: show_frame(category_list.get(category_list.curselection())))
+
+        # ======================================================================
+        #  PANEL 1: GENERAL SETTINGS
+        # ======================================================================
+        general_frame = ttk.Frame(settings_area)
+        frames["👤 General"] = general_frame
+        # **FIX**: Removed the problematic 'style' argument
+        prefs_frame = ttk.LabelFrame(general_frame, text="User Preferences", padding=15)
+        prefs_frame.pack(fill="x", padx=5, pady=5)
         prefs_frame.columnconfigure(1, weight=1)
 
-        # Display Name
-        ttk.Label(prefs_frame, text="Display Name:").grid(row=0, column=0, sticky="w", pady=6, padx=5)
-        name_var = tk.StringVar(value=self.user_name)
-        ttk.Entry(prefs_frame, textvariable=name_var).grid(row=0, column=1, sticky="ew", pady=6)
+        ttk.Label(prefs_frame, text="Display Name:").grid(row=0, column=0, sticky="w", pady=8, padx=5)
+        ttk.Entry(prefs_frame, textvariable=name_var).grid(row=0, column=1, sticky="ew", pady=8)
+        ttk.Label(prefs_frame, text="Theme:").grid(row=1, column=0, sticky="w", pady=8, padx=5)
+        theme_buttons = ttk.Frame(prefs_frame)
+        theme_buttons.grid(row=1, column=1, sticky="w")
+        ttk.Radiobutton(theme_buttons, text="Light", variable=theme_var, value="light").pack(side="left", padx=(0, 10))
+        ttk.Radiobutton(theme_buttons, text="Dark", variable=theme_var, value="dark").pack(side="left")
+        ttk.Label(prefs_frame, text="Timezone:").grid(row=2, column=0, sticky="w", pady=8, padx=5)
+        tz_list = ["America/Vancouver", "America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney"]
+        ttk.Combobox(prefs_frame, textvariable=tz_var, values=tz_list, state="readonly").grid(row=2, column=1, sticky="ew", pady=8)
 
-        # Theme
-        ttk.Label(prefs_frame, text="Theme:").grid(row=1, column=0, sticky="w", pady=6, padx=5)
-        theme_var = tk.StringVar(value=self.current_theme)
-        theme_buttons_frame = ttk.Frame(prefs_frame)
-        theme_buttons_frame.grid(row=1, column=1, sticky="w")
-        ttk.Radiobutton(theme_buttons_frame, text="Light", variable=theme_var, value="light").pack(side="left", padx=(0, 10))
-        ttk.Radiobutton(theme_buttons_frame, text="Dark", variable=theme_var, value="dark").pack(side="left")
-
-        # --- Section 2: Application Defaults ---
-        defaults_frame = ttk.Labelframe(main_frame, text="Application Defaults", padding=15)
-        defaults_frame.pack(fill="x", padx=10, pady=5)
+        # ======================================================================
+        #  PANEL 2: DASHBOARD SETTINGS
+        # ======================================================================
+        dashboard_frame = ttk.Frame(settings_area)
+        frames["📊 Dashboard"] = dashboard_frame
+        # **FIX**: Removed the problematic 'style' argument
+        defaults_frame = ttk.LabelFrame(dashboard_frame, text="Dashboard & Animation", padding=15)
+        defaults_frame.pack(fill="x", padx=5, pady=5)
         defaults_frame.columnconfigure(1, weight=1)
-
-        # Timezone
-        ttk.Label(defaults_frame, text="Timezone:").grid(row=0, column=0, sticky="w", pady=6, padx=5)
-        tz_list = [
-            "America/Vancouver", "America/New_York", "Europe/London", "Asia/Tokyo",
-            "Australia/Sydney", "Europe/Paris", "Europe/Berlin", "Asia/Kolkata",
-            "Asia/Shanghai", "America/Sao_Paulo"
-        ]
-        tz_var = tk.StringVar(value=self.settings.get("timezone"))
-        ttk.Combobox(defaults_frame, textvariable=tz_var, values=tz_list, state="readonly").grid(row=0, column=1, sticky="ew", pady=6)
-
-        # Default Chart Ticker
-        ttk.Label(defaults_frame, text="Default Chart Ticker:").grid(row=1, column=0, sticky="w", pady=6, padx=5)
-        ticker_var = tk.StringVar(value=self.settings.get("default_ticker"))
-        ttk.Entry(defaults_frame, textvariable=ticker_var).grid(row=1, column=1, sticky="ew", pady=6)
-
-        # --- Section 3: Watchlist Editor ---
-        watchlist_outer_frame = ttk.Labelframe(main_frame, text="Watchlist Tickers", padding=15)
-        watchlist_outer_frame.pack(fill="x", expand=True, padx=10, pady=10)
         
-        # This frame holds the chips and allows them to wrap if needed
-        watchlist_frame = ttk.Frame(watchlist_outer_frame)
-        watchlist_frame.pack(fill="x", pady=5)
+        def create_slider(parent, text, var, from_, to, format_str, row):
+            ttk.Label(parent, text=text).grid(row=row, column=0, sticky="w", pady=8, padx=5)
+            slider_frame = ttk.Frame(parent)
+            slider_frame.grid(row=row, column=1, sticky="ew", pady=8)
+            slider_frame.columnconfigure(0, weight=1)
+            val_label = ttk.Label(slider_frame, text=format_str.format(var.get()), width=4)
+            val_label.grid(row=0, column=1, sticky="w", padx=(10, 0))
+            ttk.Scale(slider_frame, from_=from_, to=to, orient="horizontal", variable=var, command=lambda v: val_label.config(text=format_str.format(float(v)))).grid(row=0, column=0, sticky="ew")
 
-        chips = []
-        chip_frames = []
-        drag_data = {"widget": None, "start_x": 0}
+        ttk.Label(defaults_frame, text="Default Chart Ticker:").grid(row=0, column=0, sticky="w", pady=8, padx=5)
+        ttk.Entry(defaults_frame, textvariable=ticker_var).grid(row=0, column=1, sticky="ew", pady=8)
+        create_slider(defaults_frame, "Data Refresh (sec):", interval_var, 5, 300, "{:.0f}", 1)
+        create_slider(defaults_frame, "Marquee Speed:", speed_var, 0.5, 8.0, "{:.1f}", 2)
+        def _on_toggle_bouncer(): self.settings.set('enable_bounce_overlay', bounce_enabled_var.get()); self.dashboard.toggle_bounce_overlay()
+        ttk.Checkbutton(defaults_frame, text="Enable 'Boredom Ball' Overlay", variable=bounce_enabled_var, command=_on_toggle_bouncer).grid(row=3, column=0, columnspan=2, sticky="w", pady=(15, 5), padx=5)
 
-        add_btn = ttk.Button(watchlist_frame, text="＋", width=3)
-        add_btn.pack(side="left", pady=(0, 5))
+        # ======================================================================
+        #  PANEL 3: WATCHLIST EDITOR
+        # ======================================================================
+        watchlist_panel = ttk.Frame(settings_area)
+        frames["⭐ Watchlist"] = watchlist_panel
+        # **FIX**: Removed the problematic 'style' argument
+        watchlist_outer_frame = ttk.LabelFrame(watchlist_panel, text="Drag Tickers to Reorder", padding=15)
+        watchlist_outer_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        canvas = tk.Canvas(watchlist_outer_frame, highlightthickness=0, bg=default_bg)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(watchlist_outer_frame, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        watchlist_frame = ttk.Frame(canvas, padding=(0, 0, 15, 0))
+        canvas.create_window((0, 0), window=watchlist_frame, anchor="nw")
+        watchlist_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        watchlist_frame.columnconfigure(0, weight=1)
 
-        def remove_chip(frame_to_remove, var_to_remove):
-            idx = chips.index(var_to_remove)
-            chips.pop(idx)
-            chip_frames.pop(idx)
-            frame_to_remove.destroy()
+        chips, chip_frames = [], []
+        drag_data = {"ghost": None, "placeholder": None, "widget": None}
 
-        def on_drag_start(event):
-            widget = event.widget
-            # Travel up to find the parent chip frame if a child was clicked
-            while widget and not isinstance(widget, ttk.Frame) and widget.master != watchlist_frame:
-                widget = widget.master
+        def on_drag_start(event, widget):
+            widget.focus_force()
+            ghost = tk.Toplevel(win)
+            ghost.overrideredirect(True)
+            ghost.attributes('-alpha', 0.85)
+            # Use a default style that is guaranteed to exist
+            ghost_label = ttk.Label(ghost, text=f"  {chips[chip_frames.index(widget)].get()}  ", style="TButton") 
+            ghost_label.pack()
+            ghost.geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
             
-            if widget in chip_frames:
-                drag_data["widget"] = widget
-                drag_data["start_x"] = event.x_root - widget.winfo_rootx()
-                x, y = widget.winfo_x(), widget.winfo_y()
-                widget.pack_forget()
-                widget.place(in_=watchlist_frame, x=x, y=y)
-                widget.lift()
+            placeholder = ttk.Frame(watchlist_frame, height=widget.winfo_height(), style="Card.TFrame")
+            
+            drag_data.update({"ghost": ghost, "placeholder": placeholder, "widget": widget})
+            widget.grid_forget()
+            placeholder.grid(row=chip_frames.index(widget), column=0, sticky="ew", pady=3)
 
-        def on_drag_motion(event):
-            w = drag_data["widget"]
-            if not w: return
-            x = event.x_root - watchlist_frame.winfo_rootx() - drag_data["start_x"]
-            x = max(0, min(x, watchlist_frame.winfo_width() - w.winfo_width()))
-            w.place_configure(x=x)
+        def on_drag_motion(event, widget):
+            if not drag_data["ghost"]: return
+            drag_data["ghost"].geometry(f"+{event.x_root + 15}+{event.y_root + 10}")
 
-        def on_drag_release(event):
-            """
-            Drop the dragged chip precisely between its neighbours.
+            y_target = watchlist_frame.winfo_pointery() - watchlist_frame.winfo_rooty()
+            current_placeholder_row = drag_data["placeholder"].grid_info().get("row", 0)
+            
+            best_index = current_placeholder_row
+            min_dist = float('inf')
 
-            Algorithm
-            ---------
-            1.  Turn the pointer’s absolute X-pixel into a coordinate
-                relative to `watchlist_frame`.
-            2.  Take the chip out of the list,
-                work out which neighbour’s centre it is left of,
-                and insert it there.
-            3.  Re-pack the chips and keep the “＋” button on the far right.
-            """
-            w = drag_data["widget"]
-            if not w:
-                return
+            for i, child in enumerate(chip_frames):
+                if child is drag_data["widget"]: continue
+                dist = abs(child.winfo_y() + child.winfo_height() / 2 - y_target)
+                if dist < min_dist:
+                    min_dist = dist
+                    insertion_point = child.winfo_y() + child.winfo_height() / 2
+                    best_index = i if y_target < insertion_point else i + 1
 
-            # Make sure geometry info is current
-            watchlist_frame.update_idletasks()
+            if best_index != current_placeholder_row:
+                drag_data["placeholder"].grid(row=best_index)
 
-            # ➊ Drop position relative to the chip container
-            drop_x = event.x_root - watchlist_frame.winfo_rootx()
+        def on_drag_release(event, widget):
+            if not drag_data["ghost"]: return
+            drag_data["ghost"].destroy()
+            
+            new_index = drag_data["placeholder"].grid_info()["row"]
+            drag_data["placeholder"].destroy()
+            
+            original_index = chip_frames.index(widget)
+            chip_frames.pop(original_index)
+            chip_frames.insert(new_index, widget)
+            original_chip_var = chips.pop(original_index)
+            chips.insert(new_index, original_chip_var)
+            
+            for i, f in enumerate(chip_frames): f.grid(row=i, column=0, sticky="ew", pady=3)
+            drag_data.update({"ghost": None, "placeholder": None, "widget": None})
 
-            # ➋ Build the list without the dragged chip
-            frames = [f for f in chip_frames if f is not w]
-
-            # Find where the chip’s *centre* should slot in
-            insert_at = len(frames)     # default → far right
-            for i, f in enumerate(frames):
-                centre = f.winfo_x() + f.winfo_width() / 2
-                if drop_x < centre:     # first centre to the right of pointer
-                    insert_at = i
-                    break
-
-            # Insert and commit the new order
-            frames.insert(insert_at, w)
-            chip_frames[:] = frames
-            chips[:] = [f.var for f in frames]
-
-            # ➌ Re-pack in order
-            for f in chip_frames:
-                f.place_forget()        # in case any are still “place”d
-                f.pack_forget()
-                f.pack(side="left", padx=(0, 6), pady=(0, 5))
-
-            # Keep the add button glued to the far right
-            add_btn.pack_forget()
-            add_btn.pack(side="left", pady=(0, 5))
-
-            drag_data["widget"] = None
-
+        def remove_chip(frame):
+            idx = chip_frames.index(frame)
+            chips.pop(idx); chip_frames.pop(idx)
+            frame.destroy()
+            for i, f in enumerate(chip_frames): f.grid(row=i, column=0, sticky="ew", pady=3)
 
         def add_watchlist_chip(ticker=""):
             var = tk.StringVar(value=ticker)
+            frame = ttk.Frame(watchlist_frame, style="Card.TFrame")
+            frame.grid(row=len(chip_frames), column=0, sticky="ew", pady=3)
             
-            # Style the chip frame
-            style_name = 'Chip.TFrame'
-            ttk.Style().configure(style_name, relief='solid', borderwidth=1, background=win.cget('bg'))
-            frame_chip = ttk.Frame(watchlist_frame, style=style_name)
-            frame_chip.var = var
-
-            ent = ttk.Entry(frame_chip, textvariable=var, width=8)
-            ent.pack(side="left", fill='x', expand=True, padx=(6, 4), pady=5)
+            handle = ttk.Label(frame, text="⠿", cursor="hand2", font=("Segoe UI", 12))
+            handle.pack(side="left", padx=(8, 12), pady=8)
+            ttk.Entry(frame, textvariable=var).pack(side="left", fill='x', expand=True, pady=8)
+            ttk.Button(frame, text="✕", width=2, style='Toolbutton', command=lambda f=frame: remove_chip(f)).pack(side="left", padx=(8, 8), pady=8)
             
-            # Use a more subtle remove button
-            btn_remove = ttk.Button(frame_chip, text="✕", width=2, style='Toolbutton',
-                                    command=lambda f=frame_chip, v=var: remove_chip(f, v))
-            btn_remove.pack(side="left", padx=(0, 6), pady=5)
-
-            for w in (frame_chip, ent, btn_remove):
-                w.bind("<ButtonPress-1>", on_drag_start)
-                w.bind("<B1-Motion>", on_drag_motion)
-                w.bind("<ButtonRelease-1>", on_drag_release)
-
-            chip_frames.append(frame_chip)
-            chips.append(var)
+            handle.bind("<ButtonPress-1>", lambda e, w=frame: on_drag_start(e, w))
+            handle.bind("<B1-Motion>", lambda e, w=frame: on_drag_motion(e, w))
+            handle.bind("<ButtonRelease-1>", lambda e, w=frame: on_drag_release(e, w))
             
-            add_btn.pack_forget()
-            frame_chip.pack(side="left", padx=(0, 6), pady=(0, 5))
-            add_btn.pack(side="left", pady=(0, 5))
-            return var
+            chip_frames.append(frame); chips.append(var)
+
+        for t in filter(None, (x.strip() for x in self.settings.get("watchlist", "").split("|"))): add_watchlist_chip(t)
+        ttk.Button(watchlist_panel, text="＋ Add Ticker", style="Pill.TButton", command=lambda: add_watchlist_chip()).pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10, 5))
+
+        # --- Final Assembly ---
+        for name in frames.keys(): category_list.insert(tk.END, name)
+        show_frame("👤 General")
+
+        # --- Bottom Action Buttons ---
+        button_frame = ttk.Frame(win)
+        button_frame.pack(side=tk.BOTTOM, fill='x', padx=15, pady=(5, 15))
+        button_frame.columnconfigure(0, weight=1)
+        ttk.Button(button_frame, text="⟳ Reset App", command=self.reset_app).grid(row=0, column=1, padx=5)
         
-        # Configure the add button command after add_watchlist_chip is defined
-        add_btn.config(command=lambda: add_watchlist_chip())
-
-        initial_watchlist = self.settings.get("watchlist", "").split("|")
-        for t in filter(None, (x.strip() for x in initial_watchlist)):
-            add_watchlist_chip(t)
-
-        # --- Separator and Action Buttons ---
-        ttk.Separator(main_frame).pack(fill='x', padx=10, pady=15)
-
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill='x', padx=10, pady=(5, 10))
-        button_frame.columnconfigure(0, weight=1) # Spacer
-
-        ttk.Button(button_frame, text="⟳ Reset App", command=self.reset_app)\
-            .grid(row=0, column=1, padx=5)
-        ttk.Button(button_frame, text="Save Settings", command=lambda: save_and_close(), style="Accent.TButton")\
-            .grid(row=0, column=2, padx=5)
-        
-        # ──  Miscellaneous  ─────────────────────────────────────────────
-        misc = ttk.Labelframe(main_frame, text="Miscellaneous", padding=15)
-        misc.pack(fill="x", padx=8, pady=6)
-        misc.columnconfigure(1, weight=1)
-
-        ttk.Label(misc, text="Watch-list scroll speed:").grid(row=0, column=0, sticky="w")
-
-        speed_var = tk.DoubleVar(value=self.settings.get("marquee_speed", 1.5))
-        speed_scale = ttk.Scale(misc, from_=0.5, to=6, variable=speed_var,
-                                orient="horizontal")
-        speed_scale.grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Label(misc, text="px / frame").grid(row=0, column=2, sticky="w")
-
-         # ── Boredom Bouncer toggle ────────────────────────────────────
-        # 1️⃣ state variable (saved setting provides default)
-        self.bounce_enabled_var = tk.BooleanVar() 
-        self.bounce_enabled_var.set(
-           self.settings.get('enable_bounce_overlay', False)
-       )
-
-       # 2️⃣ callback to persist the change and notify the dashboard
-        def _on_toggle_bouncer():
-            enabled = self.bounce_enabled_var.get()
-            self.settings.set('enable_bounce_overlay', enabled)
-
-            # If the dashboard is already built, update it live
-            if hasattr(self, "dashboard") and self.dashboard:
-                self.dashboard.toggle_bounce_overlay()
-
-        # 3️⃣ the checkbox itself
-        bounce_chk = ttk.Checkbutton(
-            misc,
-            text="Boredom Ball",
-            variable=self.bounce_enabled_var,
-            command=_on_toggle_bouncer
-        )
-        # Align under the speed row, full‐width
-        bounce_chk.grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
-
-        # --- Save Logic ---
         def save_and_close():
-            self.user_name = name_var.get().strip() or "Trader"
-            self.settings.set("user_name", self.user_name)
-
-            if theme_var.get() != self.current_theme:
-                self.is_dark_mode_var.set(theme_var.get() == "dark")
-                self.toggle_theme()
+            self.settings.set("user_name", name_var.get().strip() or "Trader")
+            new_theme = theme_var.get()
             
+            # Persist all other settings
             self.settings.set("timezone", tz_var.get())
             self.settings.set("default_ticker", ticker_var.get().strip().upper() or "SPY")
-
-            valid_tickers = []
-            for var in chips:
-                ticker = var.get().strip().upper()
-                if not ticker:
-                    continue
-                if self.data_mgr.get_latest_price(ticker) is None:
-                    messagebox.showerror(
-                        "Invalid Ticker",
-                        f"The ticker '{ticker}' is invalid or could not be found and will not be saved.",
-                        parent=win
-                    )
-                else:
-                    valid_tickers.append(ticker)
-            
-            self.settings.set("watchlist", "|".join(valid_tickers) if valid_tickers else "SPY|^VIX")
             self.settings.set("marquee_speed", float(speed_var.get()))
-            if hasattr(self, "dashboard"):
-                self.dashboard._wl_animating = False      # stop old loop
-                self.dashboard._start_watchlist_marquee() # restart with new speed
-            self.dashboard._refresh()
+            self.settings.set("refresh_interval", interval_var.get())
+            
+            valid_tickers = [var.get().strip().upper() for var in chips if var.get().strip()]
+            self.settings.set("watchlist", "|".join(valid_tickers) if valid_tickers else "SPY|^VIX")
+            
+            #  Destroy the settings window *before* applying the theme change
             win.destroy()
+            
+            # Now, apply theme change if needed, which will redraw the main app
+            if new_theme != self.current_theme:
+                self.is_dark_mode_var.set(new_theme == "dark")
+                self.toggle_theme()
+            
+            # Refresh dashboard with potentially new settings
+            if hasattr(self, "dashboard"):
+                self.dashboard.update_refresh_interval(interval_var.get())
+                self.dashboard._update_marquee_speed()
+                self.dashboard._refresh()
 
+        ttk.Button(button_frame, text="Save & Close", command=save_and_close, style="Accent.TButton").grid(row=0, column=2, padx=5)
         win.bind("<Return>", lambda event: save_and_close())
         win.bind("<Escape>", lambda event: win.destroy())
 
@@ -1365,49 +1304,194 @@ class OptionAnalyzerApp:
         tk.messagebox.showerror("Analysis Error",
                                 f"Failed to complete analysis:\n{error}\n\n(Check console for detailed traceback)",
                                 parent=self.root)
-    # ******** END FIX ********
+
+    def launch_docking_station(self):
+        """Creates or focuses the single instance of the docking window."""
+        if self.docking_window_instance and self.docking_window_instance.winfo_exists():
+            self.docking_window_instance.lift()
+        else:
+            self.docking_window_instance = DockingPlotWindow(self.root, self)
+        return self.docking_window_instance
+
+    def plot_in_dock(self, pane_side: str, plot_type: str):
+        """A helper method to send a plot command to the docking window."""
+        if not self.input_data:
+            messagebox.showwarning("No Data", "Please run an analysis first.", parent=self.root)
+            return
+
+        dock_window = self.launch_docking_station()
+        if dock_window:
+            dock_window.plot_in_pane(pane_side, plot_type, self.input_data)
 
     def launch_analysis_results_window(self):
         """
-        Pop up a Toplevel to house all the analysis-result buttons
-        (summary, paths, heatmap, etc.), just like strat-tester does.
+        Shows a clean window with options to view, save, or load analyses.
         """
-        # 1. Create window
         win = tk.Toplevel(self.root)
         win.title("Analysis Results")
-        win.geometry("600x400")
         win.transient(self.root)
+        win.geometry("450x600") # Increased height for new buttons
+        win.minsize(450, 500)
         self.apply_theme_to_window(win)
 
-        # 2. Container frame
-        frm = ttk.Frame(win, padding=20)
-        frm.pack(expand=True, fill=tk.BOTH)
+        main_frame = ttk.Frame(win, padding=15)
+        main_frame.pack(expand=True, fill=tk.BOTH)
+        main_frame.rowconfigure(3, weight=1) # Allow plot frame to expand
+        main_frame.columnconfigure(0, weight=1)
 
-        # 3. Button configs (same as create_results_buttons)
-        buttons = [
-            ("Show Summary Info",        self.show_summary_popup),
-            ("Show Simulation Paths",    self.show_simulation_plot),
-            ("Show Trigger Distribution",self.show_distribution_plot),
-            ("Show Profit Heatmap ($)",  self.show_heatmap_plot),
-            ("Show 3D Vol Surface",      self.show_3d_volatility_plot),
-            ("📉 Analyze Greeks",        self.show_greek_analysis),
-            ("📈 View Stock Chart",      self.show_stock_chart_window),
-            ("Explain Position",         self.show_llm_explanation)
-        ]
+        # --- (Plotting button creation logic remains the same) ---
+        def create_plot_row(parent, text, plot_key):
+            row = ttk.Frame(parent)
+            row.pack(fill=tk.X, padx=5, pady=4)
+            ttk.Label(row, text=text).pack(side=tk.LEFT, expand=True, anchor='w')
+            ttk.Button(row, text="Dock", style="Pill.TButton", command=lambda: self.dock_plot(plot_key)).pack(side=tk.RIGHT, padx=(0,5))
+            ttk.Button(row, text="New Window", style="Pill.TButton", command=lambda: self._launch_standalone_plot(plot_key)).pack(side=tk.RIGHT, padx=5)
 
-        # 4. Grid them in two columns
-        for idx, (label, cmd) in enumerate(buttons):
-            btn = ttk.Button(frm, text=label, command=cmd)
-            btn.grid(row=idx // 2, column=idx % 2, padx=10, pady=8, sticky="ew")
+        # --- Sections ---
+        info_frame = ttk.LabelFrame(main_frame, text="Summary & Chart", padding=10)
+        info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(info_frame, text="Show Summary Info", command=self.show_summary_popup).pack(fill=tk.X, padx=5, pady=5)
+        ttk.Button(info_frame, text="📈 View Stock Chart", command=self.show_stock_chart_window).pack(fill=tk.X, padx=5, pady=5)
+        
+        plot_frame = ttk.LabelFrame(main_frame, text="Generate Plots", padding=10)
+        plot_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        create_plot_row(plot_frame, "Simulation Paths", 'simulation_paths')
+        create_plot_row(plot_frame, "Trigger Distribution", 'distribution')
+        create_plot_row(plot_frame, "Profit Heatmap", 'heatmap')
+        create_plot_row(plot_frame, "3D Volatility Surface", 'vol_surface')
+        
+        advanced_frame = ttk.LabelFrame(main_frame, text="Advanced Analysis", padding=10)
+        advanced_frame.grid(row=2, column=0, sticky="ew", pady=10)
+        ttk.Button(advanced_frame, text="📉 Analyze Greeks", command=self.show_greek_analysis).pack(fill=tk.X, padx=5, pady=5)
+        ttk.Button(advanced_frame, text="Explain Position (LLM)", command=self.show_llm_explanation).pack(fill=tk.X, padx=5, pady=5)
 
-        # 5. Close button
-        close = ttk.Button(frm, text="✖ Close Results", command=win.destroy)
-        close.grid(row=(len(buttons)+1)//2, column=0, columnspan=2, pady=(15,0))
+        # --- NEW: Action Buttons at the Bottom ---
+        action_frame = ttk.Frame(main_frame, padding=(0, 15, 0, 0))
+        action_frame.grid(row=4, column=0, sticky="ew")
+        action_frame.columnconfigure(0, weight=1) # Spacer
 
-        # 6. Make columns stretch
-        frm.columnconfigure(0, weight=1)
-        frm.columnconfigure(1, weight=1)
+        ttk.Button(action_frame, text="Load Analysis", command=self._launch_load_window).grid(row=0, column=1, padx=5)
+        ttk.Button(action_frame, text="Save Analysis", style="Accent.TButton", command=self._prompt_save_analysis).grid(row=0, column=2, padx=5)
+        ttk.Button(action_frame, text="Close", command=win.destroy).grid(row=0, column=3, padx=5)
 
+    def _launch_standalone_plot(self, plot_type: str):
+        """Launches a plot in its own dedicated, single-pane window."""
+        if not self.input_data:
+            messagebox.showwarning("No Data", "Please run an analysis first.", parent=self.root)
+            return
+
+        try:
+            win = tk.Toplevel(self.root)
+            win.geometry("800x600")
+            self.apply_theme_to_window(win)
+            plot_frame = ttk.Frame(win, padding=10)
+            plot_frame.pack(expand=True, fill=tk.BOTH)
+
+            is_dark_mode = self.current_theme == 'dark'
+            plot_map = {
+                'simulation_paths': (plot_simulation_paths, "Simulation Paths"),
+                'distribution': (plot_distribution, "Trigger Price Distribution"),
+                'heatmap': (plot_profit_heatmap, "Profit/Loss Heatmap"),
+                'vol_surface': (plot_volatility_surface_3d, "3D Implied Volatility Surface")
+            }
+
+            if plot_type not in plot_map:
+                raise ValueError(f"Unknown plot type: {plot_type}")
+
+            plot_function, title = plot_map[plot_type]
+            win.title(title)
+            
+            args, kwargs = [], {}
+            if plot_type == 'simulation_paths':
+                args = [self.input_data['sim_days'], self.input_data['sample_paths'], self.input_data['S0'], self.input_data['H'], self.input_data['option_type'], self.input_data['sigma'], self.input_data['probability'], len(self.input_data['sample_paths']), self.input_data['paths_to_display']]
+                kwargs = {'dark_mode': is_dark_mode, 'title': f"{self.input_data['ticker']} {title}"}
+            elif plot_type == 'distribution':
+                args = [self.input_data['trigger_prices'], self.input_data['H'], self.input_data['probability'], self.input_data['option_type'], self.input_data['S0'], self.input_data['correct_avg_trigger'], self.input_data['correct_std_trigger']]
+                kwargs = {'dark_mode': is_dark_mode}
+            elif plot_type == 'heatmap':
+                prices, times, profit_m, percent_m, day_lbls, price_lbls, premium = self.input_data['heatmap_data']
+                args = [prices, times, profit_m, percent_m, day_lbls, price_lbls, premium, self.input_data['option_type'], self.input_data['strike']]
+                # **FIX**: The 'probability' keyword argument has been removed from this line.
+                kwargs = {'title': "Profit/Loss Heatmap", 'dark_mode': is_dark_mode}
+            elif plot_type == 'vol_surface':
+                p_grid, t_grid, iv_grid = self.input_data['vol_surface_data']
+                args = [p_grid, t_grid, iv_grid]
+                kwargs = {'title': title, 'dark_mode': is_dark_mode}
+
+            plot_function(plot_frame, *args, **kwargs)
+
+        except Exception as e:
+            messagebox.showerror("Plot Error", f"Failed to generate plot:\n{e}", parent=self.root)
+            traceback.print_exc()
+
+    def dock_plot(self, plot_type: str):
+        """A helper method to send a plot to the next available dock pane."""
+        if not self.input_data:
+            messagebox.showwarning("No Data", "Please run an analysis first.", parent=self.root)
+            return
+
+        dock_window = self.launch_docking_station()
+        if dock_window:
+            dock_window.add_plot(plot_type, self.input_data)
+
+    def _prompt_save_analysis(self):
+        """Opens a dialog to get a name and notes for saving the analysis."""
+        if not self.input_data:
+            messagebox.showerror("No Data", "There is no analysis data to save.", parent=self.root)
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Save Analysis")
+        win.geometry("450x300")
+        win.transient(self.root)
+        win.grab_set()
+        self.apply_theme_to_window(win)
+
+        frame = ttk.Frame(win, padding=15)
+        frame.pack(expand=True, fill=tk.BOTH)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(3, weight=1)
+
+        ttk.Label(frame, text="Analysis Name:", anchor='w').grid(row=0, column=0, sticky='ew', pady=(0, 2))
+        name_var = tk.StringVar()
+        ttk.Entry(frame, textvariable=name_var).grid(row=1, column=0, sticky='ew')
+        
+        # Prefill name suggestion
+        ticker = self.input_data.get('ticker', 'TICKER')
+        otype = self.input_data.get('option_type', 'option').capitalize()
+        strike = self.input_data.get('strike', 'K')
+        name_var.set(f"{ticker} ${strike} {otype}")
+
+        ttk.Label(frame, text="Notes:", anchor='w').grid(row=2, column=0, sticky='ew', pady=(10, 2))
+        notes_text = tk.Text(frame, height=5, wrap='word', relief='solid', borderwidth=1)
+        notes_text.grid(row=3, column=0, sticky='nsew')
+        
+        btn_frame = ttk.Frame(frame, padding=(0, 15, 0, 0))
+        btn_frame.grid(row=4, column=0, sticky="e")
+
+        def on_save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("Name Required", "Please provide a name for the analysis.", parent=win)
+                return
+            notes = notes_text.get("1.0", tk.END).strip()
+            self.analysis_persistence.save_analysis(name, notes, self.input_data)
+            messagebox.showinfo("Success", f"Analysis '{name}' saved successfully.", parent=self.root)
+            win.destroy()
+
+        ttk.Button(btn_frame, text="Save", style="Accent.TButton", command=on_save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
+        
+    def _launch_load_window(self):
+        """Launches the window to load saved analyses."""
+        LoadAnalysisWindow(self.root, self, self.analysis_persistence, self._on_analysis_loaded)
+        
+    def _on_analysis_loaded(self, loaded_data):
+        """Callback function for when an analysis is loaded."""
+        self.input_data = loaded_data
+        self.set_status(f"Loaded analysis for {self.input_data.get('ticker')}.", "green")
+        # Relaunch the results window with the newly loaded data
+        self.launch_analysis_results_window()
 
     def display_results_summary_console(self):
          """Prints a simple text summary to the console (optional)."""
