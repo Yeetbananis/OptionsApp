@@ -9,7 +9,6 @@ import pandas as pd
 from app.config import StrategyConfig
 from core.models.filters import FilterConfig
 import core.engine.backtester as BT
-from tools.earningscalendar import fetch_earnings_calendar
 
 # configure module-level logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

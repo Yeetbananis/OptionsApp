@@ -15,6 +15,7 @@ from tkinter import ttk
 
 from ui.candlestick_pane import CandlestickChartPane
 from ui.bounceoverlay import BounceOverlay
+from ui.events_calendar import EventsCalendar
 from core.engine.strategy_tester import load_icon, ICON_DIR
 
 
@@ -462,9 +463,7 @@ class HomeDashboard(ttk.Frame):
         self.after(100, self._poll_watchlist_q)
         self.after(100, self._poll_news_q)
 
-
-
- 
+        self.update_earnings_events()
 
         self._start_refresh_countdown()   # immediate first load + countdown
 
@@ -531,7 +530,6 @@ class HomeDashboard(ttk.Frame):
         self.market_lbl.grid(row=0, column=6, sticky="e", padx=(2, 10))
 
         # 7 ─ Events Calendar button
-        from ui.events_calendar import EventsCalendar
         self.events_btn = ttk.Button(header_frame, text="🗓  Events", command=lambda: EventsCalendar(self), style="Pill.TButton")
         self.events_btn.grid(row=0, column=7, sticky="e", padx=(0, 10))
 
@@ -1165,6 +1163,7 @@ class HomeDashboard(ttk.Frame):
 
         threading.Thread(target=fetch_all, daemon=True).start()
         self._last_update_ts = datetime.now()
+        self.update_earnings_events()
 
     def _get_watchlist_symbols(self):
         raw = self.controller.settings.get("watchlist", "")
@@ -1478,7 +1477,33 @@ class HomeDashboard(ttk.Frame):
             self.controller.on_initial_load_complete('fng')
             self._initial_loads_signaled.add('fng')
 
-    # --- UPDATED METHOD ---
+    #  Method to update earnings events in the calendar
+    def update_earnings_events(self):
+        """
+        Provides earnings data to the EventsCalendar instance when it's opened.
+        This method is called by OptionsApp whenever earnings data is updated.
+        """
+        # Retrieve earnings data from settings, which is managed by OptionsApp
+        earnings_data_dict = self.controller.settings.get("earnings_data", {})
+
+        earnings_events = []
+        for symbol, data in earnings_data_dict.items():
+            if data and data.get("next_earnings_date"):
+                # Use a unique tag for earnings events
+                earnings_events.append(
+                    (data["next_earnings_date"], f"Earnings: {symbol}", "earnings_watchlist", "—",
+                     f"https://finance.yahoo.com/calendar/earnings?symbol={symbol}",
+                     f"EPS Est: {data.get('estimated_eps', 'N/A'):.2f}, Actual: {data.get('reported_eps', 'N/A'):.2f} (Surprise: {data.get('surprise_percentage', 'N/A'):+.1f}%)" if data.get('reported_eps') is not None else "")
+                )
+
+        # When opening the calendar, it will get the latest events
+        # We don't directly manipulate the calendar here, but ensure the data is ready for it.
+        # Signal that earnings data has been processed for initial load
+        if 'earnings' not in self._initial_loads_signaled:
+            self.controller.on_initial_load_complete('earnings')
+            self._initial_loads_signaled.add('earnings')
+
+
     def shutdown(self):
         """
         Stops all repeating tasks and cleans up resources before the window closes.

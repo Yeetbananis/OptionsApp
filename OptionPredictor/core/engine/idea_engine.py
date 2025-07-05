@@ -31,17 +31,42 @@ class EarningsVolPlayDetector(DetectorBase):
     category = "🗓 Earnings"
     def run(self, symbol: str, m: dict) -> Idea | None:
         earnings = m.get("UpcomingEarnings")
-        if not earnings or earnings.get("days_until", 99) > 7: return None
-        
+        # Ensure earnings data is valid and not an error dictionary
+        if not earnings or earnings.get("error") or earnings.get("days_until") is None: 
+            return None
+
         days = earnings['days_until']
+
+        # Only proceed if earnings date is in the near future (e.g., within 60 days)
+        # and is actually in the future (days_until >= 0)
+        if not (0 <= days <= 60): 
+            return None
+
         title = f"Earnings in {days} {'day' if days == 1 else 'days'}"
-        desc = f"Expected move is {earnings['expected_move_pct']:.1f}%. Consider a volatility play."
-        event_timestamp = int(time.mktime(dt.datetime.strptime(earnings['date'], "%Y-%m-%d").timetuple()))
-        
+
+        # Handle expected_move_pct potentially being None
+        expected_move_str = "n/a"
+        if earnings.get('expected_move_pct') is not None: # This check is key!
+            expected_move_str = f"{earnings['expected_move_pct']:.1f}%"
+
+        desc = f"Expected move is {expected_move_str}. Consider a volatility play."
+
+        # Ensure earnings['date'] exists and is a string for strptime
+        if not isinstance(earnings.get('date'), str):
+            print(f"Warning: Invalid earnings date format for {symbol}: {earnings.get('date')}")
+            return None
+
+        try:
+            event_timestamp = int(time.mktime(dt.datetime.strptime(earnings['date'], "%Y-%m-%d").timetuple()))
+        except ValueError:
+            # Fallback if date parsing fails
+            # Using 7 days as a default if calculation fails or days_until is problematic
+            event_timestamp = int(time.time()) + 7 * 24 * 3600 
+
         return Idea(symbol, title, desc, self.category,
                     80 - days + random.random(), {"type": "Long Straddle", "risk": "High"},
                     m, risk="High", event_ts=event_timestamp, sparkline_data=m.get('price_sparkline'))
-
+    
 class UnusualOptionsActivityDetector(DetectorBase):
     category = "🌊 Options Flow"
     def run(self, symbol: str, m: dict) -> Idea | None:
@@ -59,15 +84,73 @@ class UnusualOptionsActivityDetector(DetectorBase):
 class MomentumDetector(DetectorBase):
     category = "🚀 Momentum"
     def run(self, symbol: str, m: dict) -> Idea | None:
-        momentum = m.get("MomentumSignal")
-        price_above_sma = m.get("price_above_sma50", False)
-        if not momentum or not price_above_sma: return None
+        # For debugging: Print the metrics dictionary received by the detector
+        # (Comment out or remove in production for less console spam)
+        # print(f"[{symbol}] Momentum Detector received metrics: {m.keys()}")
+        # print(f"[{symbol}] Detector values: GC={m.get('GoldenCross', 'N/A')}, DC={m.get('DeathCross', 'N/A')}, Squeeze={m.get('BollingerBandSqueeze', 'N/A')}, RSI_OB={m.get('RSI_Overbought', 'N/A')}, RSI_OS={m.get('RSI_Oversold', 'N/A')}, SMA50={m.get('price_above_sma50', 'N/A')}")
         
-        title = f"Price Breakout Over {momentum['consecutive_days']}-Day High"
-        desc = f"Stock crossed its {momentum['price_sma_crossed']}D SMA with strong momentum."
+        # Get the new data directly from metrics
+        golden_cross = m.get("GoldenCross", False)
+        death_cross = m.get("DeathCross", False)
+        bollinger_squeeze = m.get("BollingerBandSqueeze", False)
+        rsi_overbought = m.get("RSI_Overbought", False)
+        rsi_oversold = m.get("RSI_Oversold", False)
+        price_above_sma50 = m.get("price_above_sma50", False)
         
-        return Idea(symbol, title, desc, self.category, momentum['consecutive_days'] * 10,
-                    {"type": "Bull Call Spread", "risk": "Moderate"}, m, risk="Moderate", sparkline_data=m.get('price_sparkline'))
+        # Determine the strongest signal and generate idea
+        title = ""
+        desc = ""
+        score_value = 0
+        risk_level = "Moderate"
+        suggested_type = "" # Will be set by specific signal
+
+        # --- Prioritize the strongest/unique signals first ---
+        if golden_cross:
+            title = f"Golden Cross: {symbol} Bullish Long-Term Crossover"
+            desc = "The 50-day SMA has crossed above the 200-day SMA, indicating strong long-term bullish momentum. This is a classic buy signal."
+            score_value = 95 # Very high score for this strong signal
+            suggested_type = "Long Stock / Long Call"
+            risk_level = "Low" 
+        elif death_cross:
+            title = f"Death Cross: {symbol} Bearish Long-Term Crossover"
+            desc = "The 50-day SMA has crossed below the 200-day SMA, indicating strong long-term bearish momentum. A classic sell signal."
+            score_value = 90 # High score for this strong signal
+            suggested_type = "Short Stock / Long Put"
+            risk_level = "Low" 
+        elif bollinger_squeeze:
+            title = f"Volatility Squeeze: {symbol} Imminent Big Move Expected"
+            desc = "Bollinger Bands are within Keltner Channels, signaling a period of extreme low volatility often preceding a significant price breakout. Direction unknown."
+            score_value = 85 # High score for a unique pattern signal
+            suggested_type = "Long Straddle / Long Strangle" # Volatility expansion play
+            risk_level = "High" 
+        elif rsi_overbought:
+            title = f"RSI Overbought: {symbol} Due for Pullback"
+            desc = "The Relative Strength Index is above 70, suggesting the stock is overbought and a pullback or consolidation is likely."
+            score_value = 75 # Strong signal for potential reversal
+            suggested_type = "Bear Call Spread / Short Stock" 
+            risk_level = "High" 
+        elif rsi_oversold:
+            title = f"RSI Oversold: {symbol} Potential Bounce Coming"
+            desc = "The Relative Strength Index is below 30, suggesting the stock is oversold and a bounce or reversal upwards is likely."
+            score_value = 75 # Strong signal for potential reversal
+            suggested_type = "Bull Put Spread / Long Stock"
+            risk_level = "High" 
+        # --- Lower priority for simple SMA signal ---
+        elif price_above_sma50:
+            title = f"Uptrend: {symbol} Consistently Above 50-Day SMA"
+            desc = "Stock price is maintaining above its 50-day Simple Moving Average, indicating a sustained intermediate-term uptrend."
+            score_value = 40 # Reduced score as it's a less 'unique' or 'actionable' signal
+            suggested_type = "Long Call / Bull Call Spread"
+            risk_level = "Moderate"
+        else:
+            return None # No significant momentum signal detected
+
+        # Add a small random component to the score for variety
+        final_score = score_value + random.uniform(0, 5)
+
+        return Idea(symbol, title, desc, self.category, final_score,
+                    {"type": suggested_type, "risk": risk_level},
+                    m, risk=risk_level, sparkline_data=m.get('price_sparkline'))
 
 class ThetaFarmDetector(DetectorBase):
     category = "🧑‍🌾 Theta Farms"
@@ -107,48 +190,72 @@ class MacroNarrativeDetector(DetectorBase):
     def run(self, symbol: str, m: dict) -> List[Idea] | None:
         events = m.get("MacroEvents", [])
         if not events: return None
-        
+
         ideas = []
         for event in events:
-            # Generate a macro-based idea for broad market ETFs
-            if event['event_name'] == "CPI Report" and symbol in ["SPY", "QQQ", "IWM"]:
-                title = "CPI Report Catalyst"
-                desc = "Potential market-wide volatility around the upcoming inflation report."
-                try:
-                    event_ts = int(time.mktime(dt.datetime.strptime(event['date'], "%Y-%m-%d").timetuple()))
-                except (ValueError, KeyError):
-                    event_ts = int(time.time()) + 86400  # Default to tomorrow
-                    
-                ideas.append(Idea(
-                    symbol, title, desc, self.category, 75,
-                    {"type": "Long Straddle", "risk": "High"}, 
-                    m, risk="High", event_ts=event_ts,
-                    sparkline_data=m.get('price_sparkline', [])
-                ))
-            elif event['event_name'] == "FOMC Meeting" and symbol in ["SPY", "QQQ", "IWM"]:
-                title = "FOMC Volatility Play"
-                desc = "Federal Reserve meeting may cause market-wide volatility."
-                try:
-                    event_ts = int(time.mktime(dt.datetime.strptime(event['date'], "%Y-%m-%d").timetuple()))
-                except (ValueError, KeyError):
-                    event_ts = int(time.time()) + 172800  # Default to day after tomorrow
-                    
-                ideas.append(Idea(
-                    symbol, title, desc, self.category, 70,
-                    {"type": "Iron Condor", "risk": "Moderate"}, 
-                    m, risk="Moderate", event_ts=event_ts,
-                    sparkline_data=m.get('price_sparkline', [])
-                ))
+            # Always target broad market ETFs for macro events
+            if symbol not in ["SPY", "QQQ", "IWM", "DIA"]: # Added DIA for Dow
+                continue
+
+            event_name = event.get('event_name', '').lower()
+            event_date = event.get('date')
+            event_ts = None
+            try:
+                if event_date:
+                    event_ts = int(time.mktime(dt.datetime.strptime(event_date, "%Y-%m-%d").timetuple()))
+            except ValueError:
+                event_ts = int(time.time()) + 86400 # Default to tomorrow if date parse fails
+
+            # Common high-impact events from Investing.com
+            if "cpi" in event_name or "consumer price index" in event_name:
+                title = f"CPI Report: {symbol} Volatility Expected"
+                desc = f"Upcoming inflation data ({event.get('date')}). Actual: {event.get('actual')}, Forecast: {event.get('forecast')}. Potential market-wide volatility."
+                score = 80 # Higher score for CPI
+                suggested_strat = "Long Straddle"
+                risk_level = "High"
+            elif "fomc" in event_name or "federal funds rate" in event_name or "interest rate" in event_name:
+                title = f"FOMC Decision: {symbol} Interest Rate Impact"
+                desc = f"Federal Reserve's upcoming rate decision ({event.get('date')}). Actual: {event.get('actual')}, Forecast: {event.get('forecast')}. Major market implications."
+                score = 85 # Even higher score for FOMC
+                suggested_strat = "Iron Condor" if event.get('actual') == event.get('forecast') else "Long Straddle" # Condor if no surprise, Straddle if surprise
+                risk_level = "Moderate" if suggested_strat == "Iron Condor" else "High"
+            elif "non-farm payrolls" in event_name or "unemployment rate" in event_name:
+                title = f"NFP Report: {symbol} Jobs Data Impact"
+                desc = f"Key employment data release ({event.get('date')}). Actual: {event.get('actual')}, Forecast: {event.get('forecast')}. Strong market mover."
+                score = 75
+                suggested_strat = "Long Strangle"
+                risk_level = "High"
+            elif "gdp" in event_name or "gross domestic product" in event_name:
+                title = f"GDP Release: {symbol} Economic Growth Outlook"
+                desc = f"Latest GDP figures ({event.get('date')}). Actual: {event.get('actual')}, Forecast: {event.get('forecast')}. Indicates economic health."
+                score = 65
+                suggested_strat = "Long Call / Long Put" # Directional depending on data
+                risk_level = "Moderate"
+            elif "retail sales" in event_name:
+                title = f"Retail Sales: {symbol} Consumer Spending Insight"
+                desc = f"Consumer spending data release ({event.get('date')}). Actual: {event.get('actual')}, Forecast: {event.get('forecast')}. Proxy for consumer demand."
+                score = 60
+                suggested_strat = "Long Call / Long Put"
+                risk_level = "Moderate"
+            else:
+                continue # Skip other events not explicitly handled
+
+            ideas.append(Idea(
+                symbol, title, desc, self.category, score,
+                {"type": suggested_strat, "risk": risk_level}, 
+                m, risk=risk_level, event_ts=event_ts,
+                sparkline_data=m.get('price_sparkline', [])
+            ))
         return ideas if ideas else None
 
 # --- C. Crowd-powered detectors ---
 class RedditSpikeDetector(DetectorBase):
     category = "💬 Social"
     def run(self, symbol: str, m: dict) -> Idea | None:
-        mentions = int(m.get("RedditMentions_24h", 0))
-        if mentions < 50: return None  # Lowered threshold since we're using mock data
-        
-        score = math.log(mentions + 1) * 10  # Added +1 to avoid log(0)
+        mentions = int(m.get("RedditMentions_24h", 0)) # This will now get real scrape count
+        if mentions < 50: return None # Threshold might need adjustment with real data
+
+        score = math.log(mentions + 1) * 10
         return Idea(symbol, f"Reddit Spike ({mentions} mentions)", "Mentions surged on r/wallstreetbets.",
                     self.category, score, {"type": "Bull Call Spread", "risk": "High"},
                     m, risk="High", sparkline_data=m.get('price_sparkline'))

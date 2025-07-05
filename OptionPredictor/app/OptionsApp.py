@@ -10,6 +10,8 @@ import traceback  # For detailed error logging
 import json
 import warnings
 import logging
+import queue
+import datetime as dt
 from pathlib import Path
 
 # -----------------------------------------------------------------
@@ -36,6 +38,7 @@ import pandas as pd
 #External classes
 from ui.dashboard                 import HomeDashboard
 from data.home_data_manager       import HomeDataManager
+from data.earnings_data_manager   import EarningsDataManager
 from ui.DockingPlotWindow         import DockingPlotWindow
 from app.AnalysisPersistence      import AnalysisPersistence
 from ui.LoadAnalysisWindow        import LoadAnalysisWindow
@@ -290,7 +293,8 @@ class SettingsManager:
         "watchlist": "AAPL|MSFT|AMZN|NVDA|GOOGL|TSLA|META|BBAI",
         "marquee_speed": 0.5,
         "refresh_interval": 30,
-        "enable_bounce_overlay": False  
+        "enable_bounce_overlay": False,
+         "earnings_data": {}
     }
 
 
@@ -298,9 +302,18 @@ class SettingsManager:
         self.data = self._DEFAULTS.copy()
         if self._FILE.exists():
             try:
-                self.data.update(json.loads(self._FILE.read_text()))
+                # Load existing settings
+                loaded_data = json.loads(self._FILE.read_text())
+                # Only update specific known keys to avoid stale/corrupt data affecting new defaults
+                for key, default_val in self._DEFAULTS.items():
+                    if key in loaded_data:
+                        self.data[key] = loaded_data[key]
+                # Special handling for earnings_data: ensure it's a dict
+                if not isinstance(self.data.get("earnings_data"), dict):
+                    self.data["earnings_data"] = {}
             except Exception:
-                pass  # Corrupt settings ➜ fallback to defaults
+                logging.warning("Corrupt settings file, falling back to defaults.")
+                self.data = self._DEFAULTS.copy() # Fallback to defaults on corruption
 
     def save(self):
         try:
@@ -353,6 +366,7 @@ class OptionAnalyzerApp:
 
         # 3. CORE COMPONENTS INITIALIZATION
         self.data_mgr = HomeDataManager()
+        self.earnings_data_mgr = EarningsDataManager() # NEW: Initialize EarningsDataManager
         self.llm = LLMHelper(model="deepseek-q4ks")
         self.idea_engine = IdeaEngine()
         self.user_name = self.settings.get("user_name", "Trader")
@@ -365,9 +379,15 @@ class OptionAnalyzerApp:
         self.docking_window_instance = None
         self.strategy_testers = []
         self.analysis_persistence = AnalysisPersistence()
-        self.initial_load_tasks = ['indices', 'watchlist', 'news', 'fng'] 
+        self.initial_load_tasks = ['indices', 'watchlist', 'news', 'fng', 'earnings'] # NEW: Add 'earnings'
         self.loading_screen = None
         self.loading_complete = False
+
+        # Earnings fetching queue and state
+        self._earnings_fetch_queue = queue.Queue()
+        self._earnings_fetch_thread = None
+        self._fetching_earnings = False
+        self._pending_earnings_symbols = set() # NEW: Track symbols to fetch
 
         # Animation state
         self._loading_job = None
@@ -386,6 +406,9 @@ class OptionAnalyzerApp:
         # Instead of creating the dashboard directly, start the loading sequence.
         # The loading sequence will create and reveal the dashboard when ready.
         self.root.after(100, self.start_loading_sequence)
+
+        # NEW: Start polling the earnings queue
+        self.root.after(200, self._poll_earnings_queue)
 
         # 7. STATUS BAR
         self.status_label = ttk.Label(self.root, text="Ready.", style="Status.TLabel", anchor="center")
@@ -775,9 +798,13 @@ class OptionAnalyzerApp:
 
         def remove_chip(frame):
             idx = chip_frames.index(frame)
+            removed_ticker = chips[idx].get().strip().upper() # Get ticker before popping
             chips.pop(idx); chip_frames.pop(idx)
             frame.destroy()
             for i, f in enumerate(chip_frames): f.grid(row=i, column=0, sticky="ew", pady=3)
+            #Trigger earnings update on ticker removal
+            self.settings.data["earnings_data"].pop(removed_ticker, None) # Remove from stored data
+            self.dashboard.update_earnings_events() # Update dashboard's calendar
 
         def add_watchlist_chip(ticker=""):
             var = tk.StringVar(value=ticker)
@@ -786,14 +813,28 @@ class OptionAnalyzerApp:
             
             handle = ttk.Label(frame, text="⠿", cursor="hand2", font=("Segoe UI", 12))
             handle.pack(side="left", padx=(8, 12), pady=8)
-            ttk.Entry(frame, textvariable=var).pack(side="left", fill='x', expand=True, pady=8)
+            entry = ttk.Entry(frame, textvariable=var) # Keep a reference to the entry
+            entry.pack(side="left", fill='x', expand=True, pady=8)
             ttk.Button(frame, text="✕", width=2, style='Toolbutton', command=lambda f=frame: remove_chip(f)).pack(side="left", padx=(8, 8), pady=8)
-            
-            handle.bind("<ButtonPress-1>", lambda e, w=frame: on_drag_start(e, w))
-            handle.bind("<B1-Motion>", lambda e, w=frame: on_drag_motion(e, w))
-            handle.bind("<ButtonRelease-1>", lambda e, w=frame: on_drag_release(e, w))
-            
+
+            #  Bind to entry change to trigger earnings fetch
+            def on_ticker_entry_change(*args):
+                updated_ticker = var.get().strip().upper()
+                if updated_ticker:
+                    self._add_to_pending_earnings_fetch(updated_ticker)
+            var.trace_add("write", on_ticker_entry_change)
+
+
             chip_frames.append(frame); chips.append(var)
+            # If a new empty chip is added, immediately mark for fetch if text is entered later
+            if not ticker:
+                self._add_to_pending_earnings_fetch(var.get().strip().upper())
+                
+                handle.bind("<ButtonPress-1>", lambda e, w=frame: on_drag_start(e, w))
+                handle.bind("<B1-Motion>", lambda e, w=frame: on_drag_motion(e, w))
+                handle.bind("<ButtonRelease-1>", lambda e, w=frame: on_drag_release(e, w))
+                
+                chip_frames.append(frame); chips.append(var)
 
         for t in filter(None, (x.strip() for x in self.settings.get("watchlist", "").split("|"))): add_watchlist_chip(t)
         ttk.Button(watchlist_panel, text="＋ Add Ticker", style="Pill.TButton", command=lambda: add_watchlist_chip()).pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10, 5))
@@ -818,12 +859,24 @@ class OptionAnalyzerApp:
             self.settings.set("marquee_speed", float(speed_var.get()))
             self.settings.set("refresh_interval", interval_var.get())
             
+            old_watchlist = set(filter(None, (x.strip().upper() for x in self.settings.get("watchlist", "").split("|"))))
             valid_tickers = [var.get().strip().upper() for var in chips if var.get().strip()]
+            new_watchlist = set(valid_tickers)
             self.settings.set("watchlist", "|".join(valid_tickers) if valid_tickers else "SPY|^VIX")
-            
+
+            # Identify added/removed tickers to update earnings data
+            added_tickers = new_watchlist - old_watchlist
+            removed_tickers = old_watchlist - new_watchlist
+
+            for ticker in removed_tickers:
+                self.settings.data["earnings_data"].pop(ticker, None) # Remove from stored data
+
+            for ticker in added_tickers:
+                self._add_to_pending_earnings_fetch(ticker) # Schedule fetch for new tickers
+
             #  Destroy the settings window *before* applying the theme change
             win.destroy()
-            
+                
             # Now, apply theme change if needed, which will redraw the main app
             if new_theme != self.current_theme:
                 self.is_dark_mode_var.set(new_theme == "dark")
@@ -834,6 +887,7 @@ class OptionAnalyzerApp:
                 self.dashboard.update_refresh_interval(interval_var.get())
                 self.dashboard._update_marquee_speed()
                 self.dashboard._refresh()
+                self.dashboard.update_earnings_events() # Force update earnings calendar
 
         ttk.Button(button_frame, text="Save & Close", command=save_and_close, style="Accent.TButton").grid(row=0, column=2, padx=5)
         win.bind("<Return>", lambda event: save_and_close())
@@ -845,6 +899,86 @@ class OptionAnalyzerApp:
             self.settings.save()
         except Exception as e:
             print(f"⚠️ Failed to save settings: {e}")
+
+    # NEW: Earnings fetching methods
+    def _add_to_pending_earnings_fetch(self, symbol: str):
+        """Adds a symbol to the queue for earnings data fetching."""
+        symbol = symbol.upper()
+        if symbol and symbol not in self.settings.get("earnings_data", {}) and symbol not in self._pending_earnings_symbols:
+            self._pending_earnings_symbols.add(symbol)
+            self._earnings_fetch_queue.put(symbol)
+            self._start_earnings_fetch_thread_if_needed()
+
+    def _start_earnings_fetch_thread_if_needed(self):
+        """Starts the background thread for fetching earnings if it's not already running."""
+        if not self._fetching_earnings:
+            self._fetching_earnings = True
+            self._earnings_fetch_thread = threading.Thread(target=self._earnings_fetch_worker, daemon=True)
+            self._earnings_fetch_thread.start()
+            logging.info("Started earnings fetch worker thread.")
+
+    def _earnings_fetch_worker(self):
+        """Worker function for fetching earnings data in a background thread."""
+        while self._fetching_earnings:
+            try:
+                symbol = self._earnings_fetch_queue.get(timeout=1) # Wait for symbols for 1 second
+                if symbol is None: # Sentinel value to stop thread
+                    break
+
+                # Check if we already have it from a previous launch and it's not too old
+                stored_earnings = self.settings.get("earnings_data", {}).get(symbol)
+                if stored_earnings:
+                    next_date_str = stored_earnings.get("next_earnings_date")
+                    if next_date_str:
+                        next_date = dt.datetime.strptime(next_date_str, "%Y-%m-%d").date()
+                        # If the stored date is in the future, and not older than, say, 30 days old from current date, consider it fresh
+                        if next_date >= dt.date.today() and (dt.date.today() - next_date).days < 30:
+                            logging.info(f"Using cached earnings data for {symbol} (next date {next_date_str}).")
+                            self.root.after(0, self.dashboard.update_earnings_events) # Trigger UI update
+                            self._pending_earnings_symbols.discard(symbol)
+                            continue # Skip fetching if data is fresh
+
+                logging.info(f"Fetching earnings for {symbol}...")
+                data = self.earnings_data_mgr.get_earnings_data(symbol)
+                if data:
+                    current_earnings_data = self.settings.get("earnings_data", {})
+                    current_earnings_data[symbol] = data
+                    self.settings.set("earnings_data", current_earnings_data)
+                    logging.info(f"Successfully fetched earnings for {symbol}. Next: {data.get('next_earnings_date')}")
+                else:
+                    logging.warning(f"Failed to fetch earnings for {symbol}.")
+                    # Optionally store a placeholder for failed fetches to avoid constant retries
+                    current_earnings_data = self.settings.get("earnings_data", {})
+                    current_earnings_data[symbol] = {"next_earnings_date": None}
+                    self.settings.set("earnings_data", current_earnings_data)
+
+                self._pending_earnings_symbols.discard(symbol)
+                self.root.after(0, self.dashboard.update_earnings_events) # Trigger UI update after each fetch
+                self.root.after(0, lambda: self.on_initial_load_complete('earnings'))
+
+            except queue.Empty:
+                if not self._pending_earnings_symbols: # No more symbols to fetch
+                    self._fetching_earnings = False
+                    logging.info("Earnings fetch worker finished.")
+                    break
+            except Exception as e:
+                logging.error(f"Error in earnings fetch worker: {e}")
+                traceback.print_exc()
+                self._pending_earnings_symbols.discard(symbol) # Ensure symbol is removed even on error
+                self.root.after(0, self.dashboard.update_earnings_events) # Try to update UI even on error
+
+    def _poll_earnings_queue(self):
+        """Polls the earnings queue for any pending fetch requests."""
+        if not self.root.winfo_exists():
+            return
+
+        # Trigger initial fetch for all watchlist items on app start
+        if not self._fetching_earnings and not self._pending_earnings_symbols:
+            watchlist_symbols = filter(None, (x.strip().upper() for x in self.settings.get("watchlist", "").split("|")))
+            for sym in watchlist_symbols:
+                self._add_to_pending_earnings_fetch(sym)
+
+        self.root.after(1000, self._poll_earnings_queue) # Continue polling
 
 
 
@@ -1907,11 +2041,18 @@ class OptionAnalyzerApp:
             return  # Shutdown already in progress
         self._is_closing = True
 
-        # 1. Signal all components to stop their work.
-        #    This is the most important step.
+       # 1. Signal all components to stop their work.
         if hasattr(self, "dashboard"):
             self.dashboard.shutdown()
         self._cancel_loading_animation()
+
+        #  Stop the earnings fetch worker thread gracefully
+        if self._fetching_earnings:
+            self._earnings_fetch_queue.put(None) # Send sentinel to stop worker
+            # Give it a moment to finish, but don't block main thread indefinitely
+            self._earnings_fetch_thread.join(timeout=2)
+            if self._earnings_fetch_thread.is_alive():
+                logging.warning("Earnings fetch thread did not terminate gracefully.")
 
         # 2. Terminate any external processes.
         if hasattr(self, "_chatbot_proc") and self._chatbot_proc.poll() is None:

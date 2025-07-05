@@ -162,9 +162,10 @@ class NewsSentimentAnalyzerWindow:
         self.earnings_date_label = ttk.Label(self.earnings_date_frame, text="Earnings Date: N/A", font=("Helvetica", 10, "bold"), foreground="blue")
         self.earnings_date_label.pack(side="left")
 
-        self.earnings_article_link = ttk.Label(self.earnings_date_frame, text="", foreground="blue", cursor="hand2")
-        self.earnings_article_link.pack(side="left", padx=5)
-        self.earnings_article_link.bind("<Button-1>", lambda e: self.open_earnings_article())
+        #  Double Check Earnings Date link
+        self.double_check_link = ttk.Label(self.earnings_date_frame, text="", foreground="blue", cursor="hand2")
+        self.double_check_link.pack(side="left", padx=5)
+        self.double_check_link.bind("<Button-1>", self.open_double_check_link)
 
 
         ttk.Label(top_frame, text="Ticker:").pack(side="left")
@@ -237,35 +238,31 @@ class NewsSentimentAnalyzerWindow:
             messagebox.showwarning("Input Error", "Please enter a stock ticker.")
             return
 
-        # 🌟 Show loading label
+        # Show loading label
         self.event_loading_label.config(text="Fetching events, please wait...")
         self.win.update_idletasks()
 
         earnings_date = self.event_tracker.get_confirmed_earnings_date(ticker)
-        print(f"[DEBUG] Final earnings date for {ticker}: {earnings_date}")
+        print(f"[DEBUG] Finnhub-based earnings date for {ticker}: {earnings_date}")
 
         events = self.event_tracker.fetch_upcoming_events(ticker, earnings_date=earnings_date)
         self.event_tree.delete(*self.event_tree.get_children())
 
         self.earnings_date_label.config(text="Earnings Date: N/A")
-        self.earnings_article_link.config(text="", cursor="arrow")
-        self.earnings_article_url = None
 
         if earnings_date:
             earnings_dt = dt.datetime.strptime(earnings_date, "%Y-%m-%d")
             earnings_date_pretty = earnings_dt.strftime("%B %d, %Y")
-            if self.event_tracker.last_earnings_source == "nasdaq":
-                label_text = f"Earnings Date: {earnings_date_pretty} (confirmed)"
-                label_color = "green"
-            else:
-                label_text = f"Earnings Date: {earnings_date_pretty} (estimate/double check)"
-                label_color = "blue"
+            label_text = f"Earnings Date: {earnings_date_pretty} (from Finnhub)"
+            label_color = "blue"
             self.earnings_date_label.config(text=label_text, foreground=label_color)
-            for event in events:
-                if event["date_raw"] == earnings_date and event["articles"]:
-                    self.earnings_article_url = event["articles"][0]["url"]
-                    self.earnings_article_link.config(text="(View Article)", foreground="blue", cursor="hand2")
-                    break
+
+            # NEW: Set the double-check link to Yahoo Finance Earnings Calendar
+            self.double_check_link.config(text="(Double Check on Yahoo Finance)", foreground="blue", cursor="hand2")
+            self.double_check_url = f"https://finance.yahoo.com/calendar/earnings?symbol={ticker}"
+        else:
+            self.double_check_link.config(text="", cursor="arrow")
+            self.double_check_url = None # Clear URL if no earnings date
 
         for event in events:
             date_display = event["date_formatted"]
@@ -278,19 +275,13 @@ class NewsSentimentAnalyzerWindow:
                     values=("", f"{article['headline']}{label}", article["sentiment"], article["url"])
                 )
 
-        # 🌟 Clear loading label when done
+        # Clear loading label when done
         self.event_loading_label.config(text="")
-
-        # 🌟 Delay to re-lift after Selenium closes
-        self.win.after(1, self._force_focus_back)
-
+        # No need for _force_focus_back if Selenium isn't used for this part.
+        # It's only necessary if a separate browser window was opened.
 
 
-    def _force_focus_back(self):
-        self.win.lift()
-        self.win.focus_force()
-        self.event_tree.focus_set()
-        self.event_tree.event_generate("<Button-1>", x=1, y=1)
+
 
 
 
@@ -303,6 +294,11 @@ class NewsSentimentAnalyzerWindow:
     def open_earnings_article(self):
         if self.earnings_article_url:
             webbrowser.open(self.earnings_article_url)
+
+    def open_double_check_link(self, event=None):
+        """Opens the Yahoo Finance earnings calendar link for the current ticker."""
+        if self.double_check_url:
+            webbrowser.open(self.double_check_url)
 
 
     def open_event_article(self, event):

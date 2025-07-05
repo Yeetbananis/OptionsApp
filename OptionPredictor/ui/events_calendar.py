@@ -16,6 +16,7 @@ COLORS = {
     "retail_real": "#27ae60",
     "gdp_real":    "#6c3483",
     "fomc_real":   "#8e44ad",
+    "earnings_watchlist": "#1abc9c", 
 }
 TAG_ID = {k: f"{k}Tag" for k in COLORS}
 
@@ -197,13 +198,18 @@ for row in PREGENERATED_EVENTS:
 class EventsCalendar(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
+        self.parent = parent # Store reference to parent (HomeDashboard)
         self.title("2025 Macro-Events Calendar")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
 
+        # Get earnings data from the controller's settings
+        self.earnings_data = self.parent.controller.settings.get("earnings_data", {})
+        self._all_events = [] # To store combined pregenerated and earnings events
+
         self._build_ui()
-        self._paint_events()
+        self._load_and_paint_events() # Call combined loading and painting
 
     # ---------- UI -----------------------------------------------------
     def _build_ui(self):
@@ -229,10 +235,46 @@ class EventsCalendar(tk.Toplevel):
 
 
     # ---------- paint calendar ----------------------------------------
+    # NEW: Combined loading and painting method
+    def _load_and_paint_events(self):
+        """Combines pregenerated and watchlist earnings events and paints them."""
+        self._all_events = list(PREGENERATED_EVENTS) # Start with macro events
+
+        # Add earnings events from the fetched data
+        for symbol, data in self.earnings_data.items():
+            if data and data.get("next_earnings_date"):
+                earnings_date_str = data["next_earnings_date"]
+                # Create a simple description for the calendar view
+                label = f"Earnings: {symbol}"
+                # The note can contain more details
+                note_parts = []
+                if data.get("estimated_eps") is not None:
+                    note_parts.append(f"EPS Est: {data['estimated_eps']:.2f}")
+                if data.get("reported_eps") is not None:
+                    note_parts.append(f"Actual: {data['reported_eps']:.2f}")
+                if data.get("surprise_percentage") is not None:
+                    note_parts.append(f"Surprise: {data['surprise_percentage']:+.1f}%")
+                if data.get("last_quarter_total_revenue") is not None:
+                    note_parts.append(f"Revenue: {data['last_quarter_total_revenue']/1e6:.0f}M")
+
+                note = ", ".join(note_parts) if note_parts else ""
+
+                # Construct a Google Finance URL for earnings calendar of the ticker
+                url = f"https://finance.yahoo.com/calendar/earnings?symbol={symbol}"
+
+                self._all_events.append((earnings_date_str, label, "earnings_watchlist", "—", url, note))
+
+        self._paint_events() # Now call the painting method
+
+    # ---------- paint calendar ----------------------------------------
     def _paint_events(self):
-        for d_str, label, tag, *_ in PREGENERATED_EVENTS:
+        # Clear existing events before re-painting
+        self.cal.calevent_remove('all') # Clear all events from the calendar
+
+        for d_str, label, tag, *_ in self._all_events: # Use _all_events now
             d = dt.datetime.strptime(d_str, "%Y-%m-%d").date()
             self.cal.calevent_create(d, label, TAG_ID[tag])
+
         for tag, color in COLORS.items():
             self.cal.tag_config(TAG_ID[tag], background=color, foreground="white")
 
@@ -244,7 +286,8 @@ class EventsCalendar(tk.Toplevel):
         except ValueError:
             return
 
-        rows = EVENTS_BY_DATE.get(selected, [])
+        # Filter events for the selected date from _all_events
+        rows = [event for event in self._all_events if dt.datetime.strptime(event[0], "%Y-%m-%d").date() == selected]
 
         self.details.configure(state="normal")
         self.details.delete("1.0", "end")
@@ -264,7 +307,7 @@ class EventsCalendar(tk.Toplevel):
             self.details.insert("end", "\n")
 
             if note:
-                self.details.insert("end", f"   Note: {note}\n")
+                self.details.insert("end", f"   Previous Earnings Breakdown: {note}\n")
             self.details.insert("end", "\n")
 
         # styling & mouse bindings (safe to call every time)

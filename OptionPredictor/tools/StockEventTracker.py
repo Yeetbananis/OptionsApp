@@ -5,13 +5,6 @@ import feedparser
 import re
 import dateparser
 import urllib.parse
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options #need to use javascript to scrape bc html doesnt return data
-from selenium.webdriver.support.ui import WebDriverWait 
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 
 class StockEventTracker:
     def __init__(self, alpha_api_key, finnhub_api_key):
@@ -113,90 +106,63 @@ class StockEventTracker:
                         })
         return events_by_date
     
-    def scrape_nasdaq_earnings_date_selenium(self, ticker):
-        options = Options()
-        # Remove headless but make it small and off-screen
-        options.add_argument("--window-size=300,300")
-        options.add_argument("--window-position=2000,2000")  # Off-screen for most displays
-
-        # Additional no-sandbox etc.
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        driver.get(f"https://www.nasdaq.com/market-activity/stocks/{ticker}/earnings")
-
-        try:
-            wait = WebDriverWait(driver, 3)
-            date_span = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'span.announcement-date')))
-            nasdaq_date_str = date_span.text.strip()
-            print(f"[DEBUG] Selenium Nasdaq earnings date text: '{nasdaq_date_str}'")
-            if nasdaq_date_str:
-                nasdaq_date = dt.datetime.strptime(nasdaq_date_str, "%b %d, %Y").strftime("%Y-%m-%d")
-                print(f"[DEBUG] Nasdaq earnings date for {ticker}: {nasdaq_date}")
-                return nasdaq_date
-            else:
-                print("[WARN] Selenium Nasdaq earnings date span found but empty.")
-        except Exception as e:
-            print(f"[ERROR] Selenium scraping error: {e}")
-        finally:
-            driver.quit()
-        return None
-
-
+   
 
 
 
 
     def get_confirmed_earnings_date(self, ticker):
         """
-        Fetches the next confirmed earnings date for the given ticker using Finnhub API,
-        and compares it with the date scraped from Nasdaq's website.
+        Fetches the next confirmed earnings date for the given ticker using Finnhub API.
+        We prioritize Finnhub as it's typically reliable for upcoming earnings.
         """
         finnhub_api_key = self.finnhub_api_key
         today = dt.datetime.now()
+        # Fetch up to 6 months in the future to capture upcoming earnings
         six_months_later = today + dt.timedelta(days=180)
         from_date_str = today.strftime("%Y-%m-%d")
         to_date_str = six_months_later.strftime("%Y-%m-%d")
 
-        # Finnhub API request
         finnhub_date = None
         try:
             url = (f"https://finnhub.io/api/v1/calendar/earnings?"
                 f"from={from_date_str}&to={to_date_str}&symbol={ticker}&token={finnhub_api_key}")
             response = requests.get(url)
+            response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
             data = response.json()
+            
+            # Finnhub returns a list of upcoming earnings, usually sorted by date.
+            # We want the *next* one.
             if data.get("earningsCalendar"):
-                earnings_entry = data["earningsCalendar"][0]
-                finnhub_date = earnings_entry.get("date")
-                print(f"[DEBUG] Finnhub earnings date for {ticker}: {finnhub_date}")
-        except Exception as e:
-            print(f"[ERROR] Finnhub API error: {e}")
+                # Filter for dates strictly in the future relative to today
+                future_earnings = [
+                    entry for entry in data["earningsCalendar"]
+                    if dt.datetime.strptime(entry.get("date"), "%Y-%m-%d").date() >= today.date()
+                ]
+                # Sort them to ensure we pick the earliest
+                future_earnings.sort(key=lambda x: x.get("date"))
 
-        # Nasdaq scraping
-        nasdaq_date = self.scrape_nasdaq_earnings_date_selenium(ticker)
-
-        # Comparison logic
-        final_date = None
-        if nasdaq_date:
-            if finnhub_date == nasdaq_date:
-                final_date = finnhub_date
-                self.last_earnings_source = "nasdaq"
-                print(f"[INFO] Earnings date confirmed by both sources: {final_date}")
+                if future_earnings:
+                    earnings_entry = future_earnings[0]
+                    finnhub_date = earnings_entry.get("date")
+                    self.last_earnings_source = "finnhub"
+                    print(f"[INFO] Finnhub earnings date for {ticker}: {finnhub_date}")
+                    return finnhub_date
+                else:
+                    print(f"[WARN] No future earnings found for {ticker} via Finnhub within 6 months.")
             else:
-                final_date = nasdaq_date
-                self.last_earnings_source = "nasdaq"
-                print(f"[INFO] Nasdaq earnings date used (differs from Finnhub): {final_date}")
-        elif finnhub_date:
-            final_date = finnhub_date
-            self.last_earnings_source = "finnhub"
-            print(f"[INFO] Earnings date from Finnhub used: {final_date}")
-        else:
-            print(f"[WARN] No earnings date found for {ticker} from either source.")
+                print(f"[WARN] Finnhub API returned no earnings calendar for {ticker}.")
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR] Finnhub API request failed for {ticker}: {e}")
+        except ValueError as e: # JSON decoding error
+            print(f"[ERROR] Finnhub API response for {ticker} not valid JSON: {e}")
+        except Exception as e:
+            print(f"[ERROR] Unexpected error fetching Finnhub earnings for {ticker}: {e}")
 
-        return final_date
-
+        # If Finnhub fails to provide a date, return None
+        return None
+    
+    
     def is_likely_estimate(date_str):
         today = dt.datetime.now().date()
         parsed_date = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
