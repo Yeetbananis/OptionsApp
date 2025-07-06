@@ -142,3 +142,13 @@ class BounceOverlay:
 
     def _on_release(self, ev):
         self._ball_grabbed = False
+    
+    def hide(self):
+        """Temporarily hides the overlay window."""
+        if self._overlay and self._overlay.winfo_exists():
+            self._overlay.withdraw()
+
+    def show(self):
+        """Shows a hidden overlay window."""
+        if self._overlay and self._overlay.winfo_exists():
+            self._overlay.deiconify()

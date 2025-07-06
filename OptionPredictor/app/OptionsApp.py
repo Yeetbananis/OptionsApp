@@ -503,7 +503,7 @@ class OptionAnalyzerApp:
             return # Stop the loop permanently.
 
         self.loading_screen.add_new_candle()
-        self.root.after(300, self._candle_animation_loop)
+        self.root.after(1, self._candle_animation_loop)
 
     def _loading_status_monitor(self):
         """
@@ -1999,6 +1999,15 @@ class OptionAnalyzerApp:
 
 
     def toggle_theme(self):
+        bounce_overlay = getattr(self.dashboard, 'bounce_overlay', None)
+        # Check the bouncer's state BEFORE the theme change to know if we need to stop it.
+        was_bouncing = bounce_overlay and getattr(bounce_overlay, '_bouncing', False)
+
+        # --- Stop the overlay if it was running to prevent visual glitches ---
+        if was_bouncing:
+            bounce_overlay.stop()
+
+        # --- APPLY ALL THEME CHANGES (Existing Logic) ---
         new_theme = 'dark' if self.is_dark_mode_var.get() else 'light'
         self.current_theme = new_theme
 
@@ -2008,19 +2017,15 @@ class OptionAnalyzerApp:
         configure_global_styles(new_theme)
         self.apply_theme_to_window(self.root)
 
-        # Update any open Strategy Tester windows
-        for tester in self.strategy_testers[:]: # Use slice copy for safe iteration
+        for tester in self.strategy_testers[:]:
             if tester.win.winfo_exists():
                 tester.update_theme(self.current_theme)
             else:
-                # Clean up if window was closed unexpectedly
                 self.remove_strategy_tester(tester)
-        # ---------------------
 
-        self.dashboard.chart_pane.set_theme(self.current_theme) # Update dashboard chart theme
+        if hasattr(self, 'dashboard'):
+            self.dashboard.update_theme()
 
-
-        # rebuild child_windows list with only still-open windows
         live_children = []
         for win in self.child_windows:
             try:
@@ -2028,11 +2033,18 @@ class OptionAnalyzerApp:
                     self.apply_theme_to_window(win)
                     live_children.append(win)
             except:
-                # if anything goes wrong, just drop this window
                 continue
         self.child_windows = live_children
-        self.settings.set("theme", self.current_theme)   # persist
+        self.settings.set("theme", self.current_theme)
 
+        # --- Restart the overlay ONLY if the setting is enabled ---
+        # This reads the setting that was just saved from the settings window.
+        should_be_bouncing = self.settings.get('enable_bounce_overlay', False)
+
+        if should_be_bouncing:
+            bounce_overlay.start()
+
+            
     def _on_close(self) -> None:
         """
         Handles the window close event (the 'X' button).

@@ -919,6 +919,15 @@ class HomeDashboard(ttk.Frame):
         self.market_canvas.itemconfig(self.market_circle, fill=color)
         self.market_lbl.config(text=f"{status}{msg}", foreground=color)
 
+    def update_theme(self):
+        """Updates all theme-sensitive components within the dashboard."""
+        # Update the main chart pane's theme
+        if hasattr(self, 'chart_pane'):
+            self.chart_pane.set_theme(self.controller.current_theme)
+
+        # Also apply custom theme changes like icon tints
+        self.apply_custom_theme()
+
     def _start_refresh_countdown(self):
         """Trigger an immediate data load, then start the second-by-second clock."""
         self._refresh()

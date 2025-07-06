@@ -169,11 +169,14 @@ class CandlestickChartPane(ttk.Frame):
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
-    def set_theme(self, theme: str):
-        if theme in ("light","dark") and theme != self.theme:
-            self.theme = theme
-            self.draw(self._last_period)
-
+    def set_theme(self, theme):
+        """
+        Sets the new theme and triggers a full redraw of the chart.
+        The drawing logic in the 'draw' method will apply the correct colors.
+        """
+        self.theme = theme
+        self.refresh_data()
+        
     def _fetch_data_from_yf(self, period):
         try:
             df = yf.download(self.ticker, period=period, interval="1d",

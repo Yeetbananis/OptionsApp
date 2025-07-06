@@ -54,18 +54,6 @@ def _safe_last(series: pd.Series, dtype=float) -> Any:
     except (ValueError, TypeError):
         return dtype()
 
-# --- MOCK PROVIDERS FOR NEW FEATURES ---
-class MockUnusualOptionsProvider(DataProvider):
-    """Simulates fetching unusual options activity like sweeps."""
-    def fetch(self, symbol: str, **kwargs) -> Dict[str, Any]:
-        if random.random() > 0.7:  # 30% chance of having a signal
-            return {
-                "premium": random.randint(100_000, 2_000_000),
-                "sentiment": random.choice(["bullish", "bearish"]),
-                "aggressor": random.choice(["sweep", "block"]),
-                "oi_change_pct": round(random.uniform(15, 80), 1)
-            }
-        return {}
 
 class MomentumProvider(DataProvider):
     """
@@ -93,16 +81,26 @@ class MomentumProvider(DataProvider):
                 return {}
 
             momentum_signals = {}
-            
-            # --- Ensure enough data for indicators ---
-            # BBands/KC defaults to length=20. RSI to 14. SMA200 requires 200.
-            min_required_data = 200 
-            if len(df) < min_required_data: 
-                print(f"[{symbol}] Not enough data ({len(df)} days) for full indicator calculation (min {min_required_data}). Some signals may be skipped.")
-            
-            # --- Calculate SMAs for Golden/Death Cross ---
-            df['SMA50'] = ta.sma(df['Close'], length=50)
-            df['SMA200'] = ta.sma(df['Close'], length=200)
+
+            # --- Calculate SMAs (SMA50 moved here for robustness) ---
+            # Ensure enough data for SMA50 (min 50 days)
+            if len(df) >= 50:
+                df['SMA50'] = ta.sma(df['Close'], length=50)
+            else:
+                df['SMA50'] = np.nan # Assign NaN if not enough data
+
+            # Calculate SMA200 only if enough data (min 200 days)
+            if len(df) >= 200:
+                df['SMA200'] = ta.sma(df['Close'], length=200)
+            else:
+                df['SMA200'] = np.nan # Assign NaN if not enough data
+
+
+            # --- Ensure enough data for other indicators ---
+            # BBands/KC defaults to length=20. RSI to 14.
+            min_required_data_for_full_indicators = 200 # For SMA200, otherwise 20 for BB/KC
+            if len(df) < min_required_data_for_full_indicators: 
+                print(f"[{symbol}] Not enough data ({len(df)} days) for all indicators (min {min_required_data_for_full_indicators}). Some may be skipped.")
 
             # --- Calculate Bollinger Bands and Keltner Channels ---
             # Call ta functions directly and join the results to df
@@ -356,11 +354,6 @@ class YahooPriceProvider(DataProvider):
                 df[col] = df[col].astype(float)
 
 
-        # Add 50-day SMA for momentum detectors (ensure enough data points)
-        if len(df) >= 50:
-            df["SMA50"] = df["Close"].rolling(50).mean()
-        else:
-            df["SMA50"] = np.nan # Assign NaN if not enough data to calculate
 
         return df
 
@@ -550,16 +543,169 @@ class YfinanceEarningsProvider(DataProvider):
             import traceback
             traceback.print_exc() # Print full traceback for debugging
             return None
+        
+class FundamentalDataProvider(DataProvider):
+    """
+    Fetches fundamental data (P/E, growth, market cap, etc.)
+    and calculates historical P/E and other valuation metrics for comparison.
+    Also fetches recent earnings results for post-earnings analysis.
+    """
+    def __init__(self, price_provider: DataProvider = None) -> None:
+        self.price_provider = price_provider or YahooPriceProvider()
 
-class PushshiftRedditProvider(DataProvider):
-    """Simulates fetching unusual options activity like sweeps."""
-    def fetch(self, symbol: str, **kwargs) -> Dict[str, int]:
-        # Mock data since Pushshift API is often unreliable
-        if random.random() > 0.8:  # 20% chance of mentions
-            return {"mentions": random.randint(50, 500)}
-        return {"mentions": 0}
+    @lru_cache(maxsize=128) # Cache results for each symbol
+    def fetch(self, symbol: str, **kwargs) -> Dict[str, Any]:
+        fundamentals = {}
+        try:
+            ticker_obj = yf.Ticker(symbol)
+            info = ticker_obj.info
 
+            # Get current price early, as it's needed for earnings price change
+            current_price = info.get('currentPrice') or info.get('regularMarketPrice')
 
+            # Basic current valuation/size metrics (existing)
+            fundamentals["current_pe"] = info.get("trailingPE")
+            fundamentals["forward_pe"] = info.get("forwardPE")
+            fundamentals["peg_ratio"] = info.get("pegRatio")
+            fundamentals["market_cap"] = info.get("marketCap")
+            fundamentals["dividend_yield"] = info.get("dividendYield")
+            fundamentals["beta"] = info.get("beta")
+            fundamentals["short_percent_of_float"] = info.get("shortPercentOfFloat") # Short interest data
+            fundamentals["priceToBook"] = info.get("priceToBook") 
+            fundamentals["enterpriseValue"] = info.get("enterpriseValue")
+            fundamentals["grossMargins"] = info.get("grossMargins")
+            fundamentals["profitMargins"] = info.get("profitMargins")
+            fundamentals["revenueGrowth"] = info.get("revenueGrowth") # Quarterly revenue growth
+            fundamentals["earningsGrowth"] = info.get("earningsGrowth") # Quarterly earnings growth
+            
+            # NEW: Quality Metrics
+            fundamentals["returnOnEquity"] = info.get("returnOnEquity")
+            fundamentals["debtToEquity"] = info.get("debtToEquity")
+
+            # NEW: Analyst Price Targets (existing)
+            fundamentals["analyst_target_mean_price"] = info.get("targetMeanPrice")
+            fundamentals["analyst_target_high_price"] = info.get("targetHighPrice")
+            fundamentals["analyst_target_low_price"] = info.get("targetLowPrice")
+            fundamentals["analyst_target_median_price"] = info.get("targetMedianPrice")
+
+            # Historical P/E Calculation (existing logic)
+            quarterly_financials_df = ticker_obj.quarterly_financials
+            
+            if (quarterly_financials_df is not None and not quarterly_financials_df.empty and
+                'Basic EPS' in quarterly_financials_df.index):
+
+                eps_df_transposed = quarterly_financials_df.T
+                eps_series = pd.to_numeric(eps_df_transposed['Basic EPS'], errors='coerce').dropna()
+                
+                eps_series = eps_series.sort_index()
+
+                if len(eps_series) >= 4:
+                    ttm_eps_series = eps_series.rolling(window=4, min_periods=4).sum()
+                    
+                    price_df = self.price_provider.fetch(symbol, period="5y", interval="1mo") 
+                    
+                    if not price_df.empty and 'Close' in price_df.columns:
+                        price_df['Close'] = pd.to_numeric(price_df['Close'], errors='coerce')
+                        
+                        min_date = max(price_df.index.min(), ttm_eps_series.index.min())
+                        max_date = min(price_df.index.max(), ttm_eps_series.index.max()) 
+                        
+                        if min_date < max_date:
+                            full_date_range = pd.date_range(start=min_date, end=max_date, freq='D')
+                            
+                            ttm_eps_daily = ttm_eps_series.reindex(full_date_range).ffill()
+                            
+                            aligned_prices = price_df['Close'].reindex(full_date_range).bfill()
+
+                            historical_pe = aligned_prices / ttm_eps_daily
+                            
+                            historical_pe = historical_pe[
+                                historical_pe.notna() & 
+                                (historical_pe != np.inf) & 
+                                (historical_pe != -np.inf) & 
+                                (ttm_eps_daily != 0)
+                            ]
+                            
+                            historical_pe = historical_pe[(historical_pe > 0) & (historical_pe < 1000)] 
+
+                            if not historical_pe.empty:
+                                fundamentals["historical_pe_avg"] = historical_pe.mean()
+                                fundamentals["historical_pe_median"] = historical_pe.median()
+                                fundamentals["historical_pe_min"] = historical_pe.min()
+                                fundamentals["historical_pe_max"] = historical_pe.max()
+                                fundamentals["historical_pe_std"] = historical_pe.std()
+            
+            # NEW: Recent Earnings Report Details (for Post-Earnings Drift)
+            # Fetching from ticker.earnings_dates as an alternative to deprecated ticker.quarterly_earnings
+            # for Reported/Estimated EPS and Surprise (%).
+            try:
+                earnings_dates_df = ticker_obj.earnings_dates
+                if earnings_dates_df is not None and not earnings_dates_df.empty:
+                   
+                    # Filter for past earnings dates (latest report has passed)
+                    # Convert both sides to timezone-naive datetime.date for comparison to avoid timezone issues.
+                    current_naive_date = dt.date.today()
+                    past_earnings_dates_df = earnings_dates_df[earnings_dates_df.index.date < current_naive_date]
+                    if not past_earnings_dates_df.empty:
+                        # Sort by date descending to get the most recent report
+                        latest_report_row = past_earnings_dates_df.sort_index(ascending=False).iloc[0]
+                        
+                        report_date = latest_report_row.name.strftime("%Y-%m-%d")
+                        reported_eps = latest_report_row.get("Reported EPS")
+                        estimated_eps = latest_report_row.get("Estimated EPS")
+                        surprise_pct = latest_report_row.get("Surprise(%)")
+
+                        # If Surprise(%) is missing but we have reported and estimated, calculate it
+                        if (surprise_pct is None and reported_eps is not None and estimated_eps is not None and
+                            isinstance(reported_eps, (int, float)) and isinstance(estimated_eps, (int, float)) and estimated_eps != 0):
+                            
+                            surprise_pct = ((reported_eps - estimated_eps) / estimated_eps) * 100
+                            
+                        fundamentals["latest_earnings_report"] = {
+                            "date": report_date,
+                            "reported_eps": reported_eps,
+                            "estimated_eps": estimated_eps,
+                            "surprise_pct": surprise_pct
+                        }
+
+                        # Fetch price change after latest earnings date (existing logic, but ensure it works with new 'date' format)
+                        # current_price needs to be defined BEFORE this block. It is now.
+                        if report_date and current_price is not None:
+                            recent_price_df = self.price_provider.fetch(
+                                symbol, 
+                                period="1mo", # Get last month's data
+                                interval="1d"
+                            )
+                            if not recent_price_df.empty and 'Close' in recent_price_df.columns:
+                                prices_after_earnings = recent_price_df.loc[recent_price_df.index.date >= pd.to_datetime(report_date).date(), 'Close']
+                                
+                                if len(prices_after_earnings) >= 2: # Need at least report date + next day
+                                    report_date_price = prices_after_earnings.iloc[0] # Close on report date
+                                    next_day_price = prices_after_earnings.iloc[1] # Close on next trading day
+                                    
+                                    if report_date_price and not pd.isna(report_date_price) and next_day_price and not pd.isna(next_day_price) and report_date_price != 0:
+                                        fundamentals["earnings_1d_price_change_pct"] = ((next_day_price - report_date_price) / report_date_price) * 100
+                                    
+                                    if len(prices_after_earnings) >= 4: # Need at least report date + 3 days
+                                        day3_price = prices_after_earnings.iloc[3] # Close on 3rd trading day after report
+                                        if report_date_price and not pd.isna(report_date_price) and day3_price and not pd.isna(day3_price) and report_date_price != 0:
+                                            fundamentals["earnings_3d_price_change_pct"] = ((day3_price - report_date_price) / report_date_price) * 100
+                                
+            except Exception as e:
+                print(f"[{symbol}] Warning: Could not fetch latest earnings report details or price reaction (using earnings_dates): {e}")
+                # traceback.print_exc() # Uncomment for more detailed debug if needed
+                # Continue with other fundamentals even if this fails
+
+            # This print and return should be outside the innermost try-except
+            print(f"[{symbol}] Fundamental data fetched: {fundamentals.keys()} including historical P/E, analyst targets, quality metrics, and recent earnings reactions if available.")
+            return fundamentals
+
+        except Exception as e:
+            print(f"Error fetching fundamental data for {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {} # Return empty dict on error
+        
 def _series_tail_list(ser: pd.Series, n=30) -> list[float]:
     return ser.dropna().tail(n).to_numpy(dtype=float).tolist()
 
@@ -651,10 +797,6 @@ class TrendsAdapter:
     def adapt(raw: Dict[str, float]) -> Dict[str, float]:
         return {"GoogleTrendScore": raw.get("trends", 0.0)}
 
-class UnusualOptionsAdapter:
-    @staticmethod
-    def adapt(raw: Dict[str, Any]) -> Dict[str, Any]:
-        return {"UnusualActivity": raw} if raw else {}
 
 class MomentumAdapter:
     @staticmethod
@@ -691,6 +833,12 @@ class EarningsAdapter:
     def adapt(raw: Dict[str, Any]) -> Dict[str, Any]:
         # Replacing the old stub metric
         return {"UpcomingEarnings": raw} if raw else {}
+    
+class FundamentalAdapter:
+    @staticmethod
+    def adapt(raw: Dict[str, Any]) -> Dict[str, Any]:
+        # Fundamental data is already well-structured, so just pass it through
+        return raw if raw else {}
 
 class MacroAdapter:
     @staticmethod
@@ -701,12 +849,11 @@ class MacroAdapter:
 class ProviderHub:
     _price = YahooPriceProvider()
     _iv = IVRankProvider(_price)
-    _reddit = PushshiftRedditProvider()
     _trends = GoogleTrendsProvider()
-    _unusual_options = MockUnusualOptionsProvider()
     _momentum = MomentumProvider()
     _earnings = YfinanceEarningsProvider() 
     _macro = HardcodedMacroProvider()
+    _fundamental = FundamentalDataProvider(_price)
 
     @classmethod
     @lru_cache(maxsize=512)
@@ -762,11 +909,6 @@ class ProviderHub:
             print(f"Error fetching IV data for {symbol}: {e}")
             iv_raw = {}
 
-        try:
-            reddit_raw = cls._reddit.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching Reddit data for {symbol}: {e}")
-            reddit_raw = {}
 
         try:
             trends_raw = cls._trends.fetch(symbol)
@@ -774,13 +916,7 @@ class ProviderHub:
             print(f"Error fetching trends data for {symbol}: {e}")
             trends_raw = {}
         # ADDED DELAY HERE TO PREVENT 429 ERRORS FROM GOOGLE TRENDS
-        time.sleep(7) # Adjust this value (e.g., 5-15 seconds) based on your usage and how many symbols you query.
-
-        try:
-            unusual_raw = cls._unusual_options.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching unusual options data for {symbol}: {e}")
-            unusual_raw = {}
+        #time.sleep(7) # Adjust this value (e.g., 5-15 seconds) based on your usage and how many symbols you query.
 
         try:
             momentum_raw = cls._momentum.fetch(symbol)
@@ -794,6 +930,13 @@ class ProviderHub:
             print(f"Error fetching earnings data for {symbol}: {e}")
             earnings_raw = {}
 
+        try:
+            #  Fetch fundamental data
+            fundamental_raw = cls._fundamental.fetch(symbol)
+        except Exception as e:
+            print(f"Error fetching fundamental data for {symbol}: {e}")
+            fundamental_raw = {}
+
         # ---------- assemble ------------------------------------------
         data: Dict[str, Any] = {
             "price_sparkline": spark,
@@ -801,11 +944,10 @@ class ProviderHub:
             "price_above_sma50": above_sma,
         }
         data.update(IVAdapter.adapt(iv_raw))
-        data.update(RedditAdapter.adapt(reddit_raw))
         data.update(TrendsAdapter.adapt(trends_raw))
-        data.update(UnusualOptionsAdapter.adapt(unusual_raw))
         data.update(MomentumAdapter.adapt(momentum_raw))
         data.update(EarningsAdapter.adapt(earnings_raw))
+        data.update(FundamentalAdapter.adapt(fundamental_raw))
 
         return data
 
