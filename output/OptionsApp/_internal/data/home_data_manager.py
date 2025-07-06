@@ -115,7 +115,9 @@ class HomeDataManager:
         rows: list[tuple[str, float | None, str]] = []             # table rows
         scores: list[float] = []                                   # for overall
 
-        def _append(title: str, link: str):
+        def _append(title: str, link:str):
+            if not title:  # If title is empty or None, skip this article
+                return
             s = _score(title)
             rows.append((title, s, link))
             if s is not None:
@@ -168,9 +170,20 @@ class HomeDataManager:
             for item in sorted(leftovers, key=lambda d: d.get("providerPublishTime", 0)):
                 title = item.get("title") or getattr(item, "title", "")
                 link  = item.get("link")  or getattr(item, "link", "")
+
+                if not title:  # If title is empty or None, skip to the next item
+                    continue
+
                 if any(r[0] == title for r in rows):      # already added
                     continue
-                rows.append((title, _score(title), link))
+                
+                # --- Start of Fix ---
+                score = _score(title)
+                rows.append((title, score, link))
+                if score is not None:
+                    scores.append(score)
+                # --- End of Fix ---
+
                 if len(rows) >= n:
                     break
         # ---------------------------------------------------------------------

@@ -32,7 +32,10 @@ class CandlestickChartPane(ttk.Frame):
         self._history = [list(self._annotations)]
         # Saved charts persistence
         self._saved_charts = {}
-        self._saved_file = Path(__file__).with_name("saved_charts.json")
+        # Create a dedicated, writable directory in the user's home folder
+        data_dir = Path.home() / ".option_analyzer_data"
+        data_dir.mkdir(exist_ok=True) # This ensures the directory exists
+        self._saved_file = data_dir / "saved_charts.json"
         if self._saved_file.exists():
             try:
                 self._saved_charts = json.loads(self._saved_file.read_text())
