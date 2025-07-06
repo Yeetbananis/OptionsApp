@@ -54,13 +54,6 @@ from app.llm_helper                 import LLMHelper
 from ui.StockChartWindow            import StockChartWindow
 
 
-# News Sentiment Analyzer window
-try:
-    from ui.NewsSentimentAnalyzer     import NewsSentimentAnalyzerWindow
-except ImportError:
-    NewsSentimentAnalyzerWindow = None
-    print("Warning: NewsSentimentAnalyzer.py not found.")
-
 
 
 def configure_global_styles(theme: str):
@@ -1032,10 +1025,30 @@ class OptionAnalyzerApp:
         if self.strategy_tester_instance == tester_instance: 
             self.strategy_tester_instance = None
 
-    def launch_news_sentiment_analyzer(self):
-        window = NewsSentimentAnalyzerWindow(self.root, theme=self.current_theme)
-        self.child_windows.append(window.win)
-        self.apply_theme_to_window(window.win)
+    def launch_stock_research_suite(self):
+        """Launches the new Stock Research Suite window."""
+        try:
+            # Import the new suite locally to keep startup fast
+            from ui.StockResearchSuite import StockResearchSuite
+            
+            # Check if an instance already exists
+            if hasattr(self, "_research_suite_win") and self._research_suite_win.winfo_exists():
+                self._research_suite_win.lift()
+                self._research_suite_win.focus_force()
+                return
+
+            # Pass the theme and any necessary API keys from settings
+            finnhub_key = "d114k6hr01qse6lf8c1gd114k6hr01qse6lf8c20" # You should ideally load this from settings
+            suite = StockResearchSuite(parent=self.root, app_controller=self, theme=self.current_theme, finnhub_key=finnhub_key)
+            self._research_suite_win = suite # Store a reference
+            self.child_windows.append(suite) # For theme updates
+
+        except ImportError:
+            messagebox.showerror("Error", "StockResearchSuite.py not found.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to open Stock Research Suite:\n{e}")
+            import traceback
+            traceback.print_exc()
 
 
     def _get_python_executable(self):

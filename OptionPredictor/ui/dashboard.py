@@ -289,7 +289,7 @@ class SideMenu(ttk.Frame):
         # --- Other Action Buttons (New Analysis is no longer here) ---
         btn_map = {
             "💡 Idea Suite": self.controller.launch_idea_suite,
-            "📰 Sentiment Analyzer": self.controller.launch_news_sentiment_analyzer,
+            "🔬 Stock Research Suite": self.controller.launch_stock_research_suite,
             "📐 Strategy Builder": self.controller.launch_strategy_builder,
             "🧪 Strategy Tester": self.controller.launch_strategy_tester,
             "💬 Chatbot": self.controller.launch_chatbot,

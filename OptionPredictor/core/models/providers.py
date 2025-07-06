@@ -582,6 +582,15 @@ class FundamentalDataProvider(DataProvider):
             fundamentals["returnOnEquity"] = info.get("returnOnEquity")
             fundamentals["debtToEquity"] = info.get("debtToEquity")
 
+            try:
+                # Fetch recommendations and get the last 5
+                recs = ticker_obj.recommendations
+                if recs is not None and not recs.empty:
+                    fundamentals["recommendations"] = recs.tail(5)
+            except Exception as e:
+                print(f"Could not fetch recommendations for {symbol}: {e}")
+            # --------------------
+
             # NEW: Analyst Price Targets (existing)
             fundamentals["analyst_target_mean_price"] = info.get("targetMeanPrice")
             fundamentals["analyst_target_high_price"] = info.get("targetHighPrice")
@@ -776,6 +785,63 @@ class GoogleTrendsProvider(DataProvider):
         
 
 
+class InsiderTransactionsProvider(DataProvider):
+    """Fetches recent insider transactions from the Finnhub API."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    @lru_cache(maxsize=128)
+    def fetch(self, symbol: str, **kwargs) -> List[Dict[str, Any]]:
+        url = f"https://finnhub.io/api/v1/stock/insider-transactions?symbol={symbol}&token={self.api_key}"
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json().get('data', [])
+
+            # We only want the most recent transactions
+            recent_transactions = sorted(data, key=lambda x: x.get('transactionDate'), reverse=True)[:15]
+
+            # Format the data for display
+            formatted = []
+            for tx in recent_transactions:
+                change_char = "➕" if tx['change'] > 0 else "➖" if tx['change'] < 0 else "⚪"
+                formatted.append({
+                    "date": tx.get('transactionDate'),
+                    "name": tx.get('name', 'N/A').title(),
+                    "share": tx.get('share'),
+                    "change": f"{change_char} {abs(tx.get('change', 0)):,}",
+                    "price": f"${tx.get('transactionPrice', 0):.2f}"
+                })
+            return formatted
+        except Exception as e:
+            print(f"Error fetching insider transactions for {symbol}: {e}")
+            return []
+        
+# In data/providers.py, add this new class
+
+class OptionsChainProvider(DataProvider):
+    """Fetches the full options chain for several upcoming expiries."""
+    @lru_cache(maxsize=32)
+    def fetch(self, symbol: str, **kwargs) -> Dict[str, Dict[str, pd.DataFrame]]:
+        try:
+            ticker_obj = yf.Ticker(symbol)
+            expirations = ticker_obj.options
+
+            if not expirations:
+                return {}
+
+            # Fetch for the next 4 available weekly/monthly expirations
+            options_data = {}
+            for expiry in expirations[:4]:
+                chain = ticker_obj.option_chain(expiry)
+                options_data[expiry] = {
+                    "calls": chain.calls,
+                    "puts": chain.puts
+                }
+            return options_data
+        except Exception as e:
+            print(f"Error fetching options chain for {symbol}: {e}")
+            return {}
 
 # --- ADAPTERS FOR CLEAN METRICS ---
 class IVAdapter:
@@ -845,21 +911,40 @@ class MacroAdapter:
     def adapt(raw: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"MacroEvents": raw} if raw else {}
 
-# --- PROVIDER HUB FACADE ---
+# --- PROVIDER HUB ---
+
+
+
 class ProviderHub:
     _price = YahooPriceProvider()
     _iv = IVRankProvider(_price)
     _trends = GoogleTrendsProvider()
     _momentum = MomentumProvider()
-    _earnings = YfinanceEarningsProvider() 
+    _earnings = YfinanceEarningsProvider()
     _macro = HardcodedMacroProvider()
     _fundamental = FundamentalDataProvider(_price)
+    # Instantiate new provider with your Finnhub key
+    _insider = InsiderTransactionsProvider(api_key="d114k6hr01qse6lf8c1gd114k6hr01qse6lf8c20")
+
+    @classmethod
+    def get_macro_data(cls) -> Dict[str, Any]:
+        """
+        Fetches global macro economic events and wraps them in a dictionary
+        to maintain a consistent return type.
+        """
+        try:
+            # The fix is to wrap the list from fetch() in a dictionary
+            events_list = cls._macro.fetch("GLOBAL")
+            return {"MacroEvents": events_list}
+        except Exception as e:
+            print(f"Error fetching macro data: {e}")
+            return {"error": str(e), "MacroEvents": []}
 
     @classmethod
     @lru_cache(maxsize=512)
     def get(cls, symbol: str) -> Dict[str, Any]:
         """
-        Unified data access. Guarantees:
+        Unified data access for a specific symbol. Guarantees:
           • price_sparkline is a list[float] (never Series/DataFrame)
           • Always returns at least synthetic data, never {'error': ...}
         """
@@ -890,9 +975,8 @@ class ProviderHub:
                     spark = close.tail(30).to_numpy(dtype=float).tolist()
                     last_price = float(close.iloc[-1])
 
-                    # Handle SMA50 check
-                    if "SMA50" in price_df.columns and len(price_df) > 0:
-                        sma50 = price_df["SMA50"].iloc[-1]
+                    if len(close) >= 50:
+                        sma50 = close.rolling(window=50).mean().iloc[-1]
                         above_sma = bool(last_price > float(sma50)) if not pd.isna(sma50) else False
                     else:
                         above_sma = False
@@ -902,61 +986,39 @@ class ProviderHub:
             last_price = spark[-1]
             above_sma = False
 
-        # ---------- other providers ------------------------------------
-        try:
-            iv_raw = cls._iv.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching IV data for {symbol}: {e}")
-            iv_raw = {}
-
-
-        try:
-            trends_raw = cls._trends.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching trends data for {symbol}: {e}")
-            trends_raw = {}
-        # ADDED DELAY HERE TO PREVENT 429 ERRORS FROM GOOGLE TRENDS
-        #time.sleep(7) # Adjust this value (e.g., 5-15 seconds) based on your usage and how many symbols you query.
-
-        try:
-            momentum_raw = cls._momentum.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching momentum data for {symbol}: {e}")
-            momentum_raw = {}
-
-        try:
-            earnings_raw = cls._earnings.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching earnings data for {symbol}: {e}")
-            earnings_raw = {}
-
-        try:
-            #  Fetch fundamental data
-            fundamental_raw = cls._fundamental.fetch(symbol)
-        except Exception as e:
-            print(f"Error fetching fundamental data for {symbol}: {e}")
-            fundamental_raw = {}
+        # ---------- other providers (with error handling) -----------------
+        providers_to_fetch = {
+            "iv": cls._iv.fetch,
+            "trends": cls._trends.fetch,
+            "momentum": cls._momentum.fetch,
+            "earnings": cls._earnings.fetch,
+            "fundamental": cls._fundamental.fetch,
+            "insider": cls._insider.fetch
+        }
+        
+        raw_data = {}
+        for key, fetch_func in providers_to_fetch.items():
+            try:
+                raw_data[key] = fetch_func(symbol)
+            except Exception as e:
+                print(f"Error fetching {key} data for {symbol}: {e}")
+                raw_data[key] = {} # Ensure it's an empty dict on failure
 
         # ---------- assemble ------------------------------------------
         data: Dict[str, Any] = {
             "price_sparkline": spark,
             "last_price": last_price,
             "price_above_sma50": above_sma,
+            "price_df": price_df # Pass the full DataFrame for charting
         }
-        data.update(IVAdapter.adapt(iv_raw))
-        data.update(TrendsAdapter.adapt(trends_raw))
-        data.update(MomentumAdapter.adapt(momentum_raw))
-        data.update(EarningsAdapter.adapt(earnings_raw))
-        data.update(FundamentalAdapter.adapt(fundamental_raw))
+        
+        # Adapt and update data
+        data.update(IVAdapter.adapt(raw_data.get("iv", {})))
+        data.update(TrendsAdapter.adapt(raw_data.get("trends", {})))
+        data.update(MomentumAdapter.adapt(raw_data.get("momentum", {})))
+        data.update(EarningsAdapter.adapt(raw_data.get("earnings", {})))
+        data.update(FundamentalAdapter.adapt(raw_data.get("fundamental", {})))
+        # A simple pass-through for insider data
+        data["insider_transactions"] = raw_data.get("insider", [])
 
         return data
-
-    @classmethod
-    def get_macro_data(cls) -> Dict[str, Any]:
-        """Explicitly fetches and adapts macro data."""
-        try:
-            macro_raw = cls._macro.fetch("GLOBAL") # Call the macro provider
-            return MacroAdapter.adapt(macro_raw) # Adapt it here
-        except Exception as e:
-            print(f"Error fetching raw macro data: {e}")
-            return {"MacroEvents": [], "error": str(e)} # Return empty list on error
