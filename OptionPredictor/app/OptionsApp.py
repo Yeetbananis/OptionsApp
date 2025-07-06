@@ -519,25 +519,14 @@ class OptionAnalyzerApp:
         
         elapsed_time = (time.time() - start_time) * 1000
 
-        # --- Check for completion or timeout ---
+           # --- Check for completion or timeout ---
         if not self.initial_load_tasks or elapsed_time > MAX_LOAD_TIME:
             if not self.loading_complete:
                 self.loading_complete = True
                 
-                if self.loading_screen and self.loading_screen.winfo_exists():
-                    self.loading_screen.update_progress_bar(1.0)
-                    if elapsed_time > MAX_LOAD_TIME:
-                        print("Loading timed out, proceeding anyway.")
-                    self.loading_screen.trigger_pre_climax_dip()
+                # When loading finishes, call the single, reliable final sequence method.
+                self._trigger_final_sequence()
 
-                def final_sequence():
-                    if self.loading_screen and self.loading_screen.winfo_exists():
-                        self.loading_screen.animate_take_profit()
-                        self.root.after(1000, self.loading_screen.fade_out_and_close)
-                        self.root.after(1500, self.show_main_window)
-                
-                # Use a shorter delay here as the main delay is now the timeout
-                self.root.after(2000, final_sequence)
             return # Stop this monitoring loop
         else:
             # --- Still loading ---
@@ -550,12 +539,24 @@ class OptionAnalyzerApp:
             self.root.after(100, self._loading_status_monitor)
 
     def _trigger_final_sequence(self):
-        """Runs the final 'god candle' and fade-out sequence."""
-        if self.loading_screen and self.loading_screen.winfo_exists():
-            self.loading_screen.animate_take_profit()
-            # Hold on the final frame for 1 second before fading
-            self.root.after(1000, self.loading_screen.fade_out_and_close)
-            self.root.after(1500, self.show_main_window)
+        """Forces dashboard render, then runs the finale animation and reveals the app."""
+        if not (self.loading_screen and self.loading_screen.winfo_exists()):
+            self.show_main_window()
+            return
+
+        # 1. Force the dashboard to process all pending geometry and drawing tasks.
+        #    This is the key step that happens invisibly behind the loading screen.
+        self.dashboard.update_idletasks()
+
+        # 2. Now that the dashboard UI is ready, run the finale on the loading screen.
+        self.loading_screen.update_progress_bar(1.0)
+        self.loading_screen.trigger_pre_climax_dip()
+        self.loading_screen.animate_take_profit()
+
+        # 3. Schedule the reveal of the main window *after* the animation is complete.
+        #    The animation takes about 1.2s, so 1500ms is a safe delay.
+        self.root.after(1200, self.loading_screen.fade_out_and_close)
+        self.root.after(1500, self.show_main_window)
 
 
     def on_initial_load_complete(self, task_name):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import queue, time, random, datetime as dt, threading, traceback
 from typing import List, Dict, Tuple, TYPE_CHECKING
+from collections import defaultdict
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -10,6 +11,7 @@ if TYPE_CHECKING:
     from core.engine.idea_suite_controller import IdeaSuiteController
 
 from ui.LoadingScreen import LoadingScreen, IdeaSuiteLoadingOverlay
+from ui.events_calendar import PREGENERATED_EVENTS
 
 from ui.idea_card import IdeaCard
 from core.engine.idea_engine import CATEGORY_LABELS
@@ -450,41 +452,37 @@ class IdeaSuiteView(ttk.Frame):
     def _poll_queue(self):
         """Check for new ideas AND progress updates from the background thread."""
         try:
-            # Process completed ideas (this branch means the full list of ideas has arrived)
+            # Process completed ideas when they arrive from the queue.
             new_ideas = self.queue.get_nowait()
 
-            # Full data received, trigger finale on loader
+            # --- FOOLPROOF FIX FOR WHITE FLASH ---
+            # 1. Process the data and render the main UI first. The new widgets
+            #    are created but remain hidden behind the loading overlay.
+            for i in new_ideas:
+                i.is_saved = i.uid in self._saved_ids
+            self._all_ideas = new_ideas
+            self._apply_filters()
+
+            # 2. Force Tkinter to process all pending drawing and geometry updates.
+            #    This is the key to preventing the flash.
+            self.update_idletasks()
+
+            # 3. Now that the main UI is ready underneath, trigger the loader's finale.
             if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
-                self._idea_suite_loader.trigger_climax_and_take_profit() # NEW: Trigger finale here
-                # Schedule hiding AFTER the climax animation completes
-                self._idea_suite_loader.after(1500, lambda: self._idea_suite_loader.place_forget()) # Hide after 1.5s
+                self._idea_suite_loader.trigger_climax_and_take_profit()
+                # 4. Schedule the loader to disappear AFTER its animation is complete.
+                self.after(1500, self._idea_suite_loader.place_forget)
+            # --- END OF FIX ---
 
             self.app.set_status("Idea generation complete.", color="green")
             if self.app and hasattr(self.app, '_cancel_loading_animation'):
-                self.app._cancel_loading_animation() # Stop main app's spinner if it was active
-
-            for i in new_ideas:
-                i.is_saved = i.uid in self._saved_ids
-
-            self._all_ideas = new_ideas
-            self._apply_filters()
+                self.app._cancel_loading_animation()
 
             self.last_updated_label.config(text=f"Last updated: {time.strftime('%I:%M:%S %p')}")
             self.refresh_button.config(state="normal")
         except queue.Empty:
             pass # No new idea data
-
-        try:
-            # Process progress updates
-            processed_count, total_count = self._progress_queue.get_nowait()
-            if total_count > 0:
-                progress_pct = processed_count / total_count
-                if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
-                    self._idea_suite_loader.update_progress_bar(progress_pct)
-                self.app.set_status(f"Generating ideas... {processed_count}/{total_count} symbols processed.", color="blue")
-        except queue.Empty:
-            pass # No new progress data
-
+        
         finally:
             self.after(self.POLL_MS, self._poll_queue)
 
@@ -527,6 +525,47 @@ class IdeaSuiteView(ttk.Frame):
             self.app._cancel_loading_animation()
             self.app.set_status("Idea generation complete.", color="green")
 
+    def _gather_and_render_timeline_events(self):
+        """
+        Gathers all static macro events and dynamic earnings events
+        and populates the bottom timeline. This makes the timeline a
+        comprehensive calendar independent of the filtered ideas.
+        """
+        # Start with the pre-generated macro events from the calendar file
+        macro_events = PREGENERATED_EVENTS
+
+        # Get earnings data from the application's central settings
+        earnings_data = self.app.settings.get("earnings_data", {})
+
+        # --- Format all events into a single, consistent list ---
+        # The timeline expects a list of tuples: (timestamp, symbol, title)
+        all_timeline_events = []
+
+        # Process and format the macro events
+        for event_data in macro_events:
+            date_str, label, _, _, _, _ = event_data
+            # Use the first word of the label as a "symbol" (e.g., "CPI", "FOMC")
+            symbol_guess = label.split()[0]
+            try:
+                ts = int(dt.datetime.strptime(date_str, "%Y-%m-%d").timestamp())
+                all_timeline_events.append((ts, symbol_guess, label))
+            except (ValueError, TypeError):
+                continue  # Skip if date is invalid
+
+        # Process and format the earnings events
+        for symbol, data in earnings_data.items():
+            if data and data.get("next_earnings_date"):
+                date_str = data["next_earnings_date"]
+                title = f"Earnings: {symbol}"
+                try:
+                    ts = int(dt.datetime.strptime(date_str, "%Y-%m-%d").timestamp())
+                    all_timeline_events.append((ts, symbol, title))
+                except (ValueError, TypeError):
+                    continue # Skip if date is invalid
+
+        # Pass the complete, combined list to the timeline widget
+        self.timeline.set_events(all_timeline_events)
+
 
 
     def _apply_filters(self, event=None):
@@ -542,10 +581,11 @@ class IdeaSuiteView(ttk.Frame):
             
         self._render(filtered_ideas)
 
+
     def _render(self, ideas: List[Idea]):
         self._render_highlight_reel(ideas)
         self._render_category_tabs(ideas)
-        self._render_timeline(ideas)
+        self._gather_and_render_timeline_events() 
         self._render_saved_tab()
 
     def _render_highlight_reel(self, ideas: List[Idea]):
@@ -669,48 +709,167 @@ class ScrollableFrame(ttk.Frame):
         self.scrollable_frame.bind("<Configure>", on_frame_configure)
         canvas.bind("<Configure>", on_canvas_configure)
 
+
 class Timeline(ttk.Frame):
-    """Horizontal timeline with hover tooltips."""
+    """
+    A horizontally scrollable timeline with well-spaced events and detailed,
+    multi-line tooltips that appear correctly above the cursor.
+    """
+    EVENT_SPACING = 90  # Pixels between each day's marker
+    CANVAS_PADDING = 30  # Padding on the left and right edges
+
     def __init__(self, parent: tk.Misc, is_dark: bool):
         super().__init__(parent)
         bg = '#2a2a2e' if is_dark else '#ffffff'
-        self._canvas = tk.Canvas(self, height=45, highlightthickness=0, bg=bg)
-        self._canvas.pack(fill="x", expand=True)
-        self.canvas = self._canvas        # ← add this alias line
-        self._events: list = []
-        self._tooltips: list = []
-        self._canvas.bind("<Configure>", lambda e: self._redraw())
 
+        # --- Setup Canvas and Scrollbar ---
+        # The canvas will be placed inside this frame, and a scrollbar will control it.
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(self, height=60, highlightthickness=0, bg=bg)
+        self.canvas.grid(row=0, column=0, sticky="ew")
+
+        # Add a horizontal scrollbar linked to the canvas
+        x_scrollbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        x_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.canvas.configure(xscrollcommand=x_scrollbar.set)
+
+        self._events: list = []
+
+        # --- Tooltip State ---
+        self._tooltip_window = None
+        self._tooltip_label = None
+        # This dictionary maps the ID of a canvas item (our hover target) to its detailed text.
+        self._event_item_map: dict[int, str] = {}
+
+        # Bind mouse events to the canvas for tooltip and scrolling.
+        self.canvas.bind("<Motion>", self._on_mouse_move)
+        self.canvas.bind("<Leave>", self._on_mouse_leave)
+        self.canvas.bind("<Configure>", lambda e: self._redraw())
+
+        # Bind mousewheel scrolling for horizontal movement (Shift + Wheel on most systems).
+        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+
+    def _on_mousewheel(self, event):
+        """Scrolls the canvas horizontally."""
+        # On Windows/macOS, event.delta is used. On Linux, event.num might be 4 or 5.
+        if event.delta:
+            self.canvas.xview_scroll(-1 * int(event.delta / 120), "units")
+        else:
+            # Basic Linux support
+            if event.num == 5:
+                self.canvas.xview_scroll(1, "units")
+            elif event.num == 4:
+                self.canvas.xview_scroll(-1, "units")
+
+    def _create_tooltip_widget(self):
+        """Creates the pop-up tooltip window once when first needed."""
+        if self._tooltip_window is None:
+            self._tooltip_window = tk.Toplevel(self)
+            self._tooltip_window.wm_overrideredirect(True)
+            self._tooltip_label = ttk.Label(
+                self._tooltip_window,
+                text="",
+                justify=tk.LEFT,
+                background="#2E2E2E", # Darker background
+                foreground="#E0E0E0", # Light text
+                relief=tk.SOLID,
+                borderwidth=1,
+                padding=(10, 8),
+                font=("Segoe UI", 10)
+            )
+            self._tooltip_label.pack()
+            self._tooltip_window.withdraw()
+
+    def _on_mouse_move(self, event):
+        """Shows and updates the tooltip when hovering over an event."""
+        self._create_tooltip_widget()
+        # Find canvas items directly under the mouse, identified by the 'tooltip_target' tag.
+        items_under_cursor = self.canvas.find_withtag("current")
+
+        target_id = None
+        if items_under_cursor and "tooltip_target" in self.canvas.gettags(items_under_cursor[0]):
+            target_id = items_under_cursor[0]
+
+        if target_id and target_id in self._event_item_map:
+            # A valid event is being hovered over.
+            tooltip_text = self._event_item_map[target_id]
+            self._tooltip_label.config(text=tooltip_text)
+
+            # Position the tooltip window above the cursor.
+            self._tooltip_window.update_idletasks()
+            tip_height = self._tooltip_window.winfo_reqheight()
+            # Use canvas coordinates to find absolute screen position
+            x = self.canvas.winfo_rootx() + event.x + 20
+            y = self.canvas.winfo_rooty() + event.y - tip_height - 15
+
+            self._tooltip_window.wm_geometry(f"+{int(x)}+{int(y)}")
+            self._tooltip_window.deiconify() # Show the window.
+        else:
+            # The mouse is not over an event, so hide the tooltip.
+            self._tooltip_window.withdraw()
+
+    def _on_mouse_leave(self, event):
+        """Hides the tooltip when the mouse leaves the timeline canvas."""
+        if self._tooltip_window:
+            self._tooltip_window.withdraw()
 
     def set_events(self, events: list):
+        """Receives new event data and triggers a full redraw of the timeline."""
         self._events = sorted(events, key=lambda x: x[0])
         self._redraw()
 
     def _redraw(self):
-        self._canvas.delete("all")
-        self._tooltips.clear()
-        if not self._events: return
+        """
+        Clears and redraws all events, grouping them by day and spacing them
+        out evenly on a wide, scrollable canvas.
+        """
+        self.canvas.delete("all")
+        self._event_item_map.clear()
+        if not self._events:
+            self.canvas.configure(scrollregion=(0, 0, self.canvas.winfo_width(), 60))
+            return
 
         now = int(time.time())
         future_events = [e for e in self._events if e[0] > now]
-        if not future_events: return
+        if not future_events:
+            self.canvas.configure(scrollregion=(0, 0, self.canvas.winfo_width(), 60))
+            return
 
-        max_ts = max(ts for ts, _, _ in future_events)
-        min_ts = min(ts for ts, _, _ in future_events)
-        
-        time_span = max_ts - min_ts if max_ts > min_ts else 1
-        w = self._canvas.winfo_width()
-        
+        # --- Group Events by Day for consolidated tooltips ---
+        events_by_day = defaultdict(list)
         for ts, symbol, title in future_events:
-            x = int(((ts - min_ts) / time_span) * (w - 60)) + 30 # Add padding
-            if not (20 < x < w - 20): continue
-            
-            line = self._canvas.create_line(x, 10, x, 30, fill="#888")
-            date_str = dt.datetime.fromtimestamp(ts).strftime('%a, %b %d')
-            text = self.canvas.create_text(x, 35, text=f"{symbol}\n{date_str}", anchor="n", font=("Segoe UI", 7), fill="#aaa")
-            
-            hover_target = self._canvas.create_rectangle(x-10, 10, x+10, 45, fill="", outline="")
-            
-            tooltip_text = f"{symbol}: {title}\nDate: {dt.datetime.fromtimestamp(ts).strftime('%Y-%m-%d')}"
-            # Store the tooltip object to prevent it from being garbage collected
-            self._tooltips.append(IdeaTooltip(self._canvas, tooltip_text, hover_target))
+            date_key = dt.datetime.fromtimestamp(ts).date()
+            events_by_day[date_key].append({'symbol': symbol, 'title': title})
+
+        # --- Calculate Total Canvas Width ---
+        num_days = len(events_by_day)
+        total_width = (num_days * self.EVENT_SPACING) + (2 * self.CANVAS_PADDING)
+        self.canvas.configure(scrollregion=(0, 0, total_width, 60))
+
+        # --- Draw One Marker Per Day ---
+        sorted_dates = sorted(events_by_day.keys())
+        for i, date_obj in enumerate(sorted_dates):
+            # Calculate the horizontal position for each day's marker
+            x = self.CANVAS_PADDING + (i * self.EVENT_SPACING)
+            daily_events = events_by_day[date_obj]
+
+            # Draw the visual elements (line and date text)
+            self.canvas.create_line(x, 15, x, 40, fill="#999999", width=2)
+            self.canvas.create_text(x, 45, text=date_obj.strftime('%b %d'), anchor="n", font=("Segoe UI", 8), fill="#CCCCCC")
+
+            # --- Create Consolidated Tooltip Text ---
+            header = f"📅 {date_obj.strftime('%A, %B %d, %Y')}\n"
+            # Bullet point for each event on that day
+            details = "\n".join([f"  •  {evt['symbol']}: {evt['title']}" for evt in daily_events])
+            tooltip_text = header + details
+
+            # Create an invisible rectangle to act as the hover area for the day.
+            hover_target_id = self.canvas.create_rectangle(
+                x - 15, 10, x + 15, 55,  # Wider hover target
+                fill="", outline="", tags=("tooltip_target",)
+            )
+            # Map this invisible item's ID to its detailed text.
+            self._event_item_map[hover_target_id] = tooltip_text
