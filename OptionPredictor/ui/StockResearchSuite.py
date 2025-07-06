@@ -9,6 +9,7 @@ from PIL import Image, ImageTk
 import requests
 import io
 import math
+from curl_cffi import requests as cffi_requests
 
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import mplfinance as mpf
@@ -89,6 +90,7 @@ class StockResearchSuite(tk.Toplevel):
         self.after_id = None
         self.news_articles = []
         self.company_logo = None
+        self.current_session = None # Add this line
 
         self._build_ui()
         self.app_controller.apply_theme_to_window(self)
@@ -173,10 +175,11 @@ class StockResearchSuite(tk.Toplevel):
         self.progress_bar.pack_forget()
         return frame
 
-    # In StockResearchSuite.py, REPLACE this method
+    # In ui/StockResearchSuite.py, REPLACE this method
     def _build_overview_tab(self):
         # --- Create a single scrollable container for the entire tab ---
         canvas = tk.Canvas(self.overview_tab, borderwidth=0, highlightthickness=0)
+        self.overview_canvas = canvas # Save a reference to the canvas
         vsb = ttk.Scrollbar(self.overview_tab, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         
@@ -193,9 +196,7 @@ class StockResearchSuite(tk.Toplevel):
         def _on_canvas_configure(event):
             canvas.itemconfig(frame_id, width=event.width)
 
-        # --- FIX: Add Trackpad/Mouse Wheel Scrolling ---
         def _on_mousewheel(event):
-            # The direction of scroll is different on Windows/macOS vs. Linux
             if event.num == 4 or event.delta > 0:
                 canvas.yview_scroll(-1, "units")
             elif event.num == 5 or event.delta < 0:
@@ -203,7 +204,6 @@ class StockResearchSuite(tk.Toplevel):
 
         canvas.bind("<Configure>", _on_canvas_configure)
         scrollable_frame.bind("<Configure>", _on_frame_configure)
-        # Bind scrolling to the canvas and all its children
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
         canvas.bind_all("<Button-4>", _on_mousewheel)
         canvas.bind_all("<Button-5>", _on_mousewheel)
@@ -213,13 +213,23 @@ class StockResearchSuite(tk.Toplevel):
 
         # 1. Chart Frame
         self.chart_frame = ttk.LabelFrame(scrollable_frame, text="Price Chart", padding=5)
-        self.chart_frame.config(height=500) # Give it a clean, fixed height
-        self.chart_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.chart_frame.config(height=500)
+        self.chart_frame.grid(row=0, column=0, sticky="ew")
         self.chart_frame.grid_propagate(False)
 
-        # 2. Key Metrics & Profile Frame
+        # 2. --- FIX: Frame for the timeframe buttons, placed INSIDE the scrollable frame ---
+        button_bar = ttk.Frame(scrollable_frame)
+        button_bar.grid(row=1, column=0, sticky="ew", pady=(5, 10))
+        
+        # 3. --- FIX: Create the buttons ---
+        timeframes = {"1M": 30, "1Y": 252, "5Y": 252*5, "All": None}
+        for text, days in timeframes.items():
+            btn = ttk.Button(button_bar, text=text, width=4, command=lambda d=days: self._redraw_chart_with_period(d))
+            btn.pack(side="left", padx=2)
+
+        # 4. Key Metrics & Profile Frame (now at row 2)
         info_frame = ttk.Frame(scrollable_frame)
-        info_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        info_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         info_frame.columnconfigure(0, weight=1)
         info_frame.columnconfigure(1, weight=2)
         
@@ -233,9 +243,9 @@ class StockResearchSuite(tk.Toplevel):
         self.profile_text.pack(fill="both", expand=True)
         self.profile_text.config(state="disabled")
 
-        # 3. --- FIX: Add Former Sidebar Panels at the bottom ---
+        # 5. Former Sidebar Panels at the bottom (now at row 3)
         bottom_panels_frame = ttk.Frame(scrollable_frame)
-        bottom_panels_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        bottom_panels_frame.grid(row=3, column=0, sticky="ew", pady=(10, 10))
         bottom_panels_frame.columnconfigure(0, weight=1)
         bottom_panels_frame.columnconfigure(1, weight=1)
         bottom_panels_frame.columnconfigure(2, weight=1)
@@ -249,7 +259,6 @@ class StockResearchSuite(tk.Toplevel):
         self.insider_frame = ttk.LabelFrame(bottom_panels_frame, text="💼 Insider Transactions", padding=10)
         self.insider_frame.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
         
-        # Initialize the Treeviews inside these frames
         self.analyst_tree = _tree(self.analyst_frame)
         self.events_tree = _tree(self.events_frame)
         self.insider_tree = _tree(self.insider_frame)
@@ -325,18 +334,27 @@ class StockResearchSuite(tk.Toplevel):
         funda_frame.grid(row=0, column=1, sticky="nsew")
         self.funda_tree = _tree(funda_frame)
 
+
     def _on_research_click(self, event=None):
+        # FIX: Change the boolean flag to a counter, reset it on each manual click.
+        self.auto_retry_count = getattr(self, 'auto_retry_count', 0) if event is None else 0
+
         ticker = self.ticker_entry.get()
         if not ticker: return
+        
         self._clear_all_data_views()
         self.research_button.config(state="disabled")
         self.progress_bar.pack(side="left", fill="x", expand=True, padx=10)
-        self.data_queue, self.tasks_to_complete = self.orchestrator.fetch_all_data(ticker)
+        
+        self.data_queue, self.tasks_to_complete = self.orchestrator.fetch_all_data(ticker, self.current_session)
+        
         self.tasks_completed = 0
         self.progress_bar.config(maximum=self.tasks_to_complete, value=0)
         self.snapshot_frame.grid()
+        
         if self.after_id: self.after_cancel(self.after_id)
         self._poll_data_queue()
+
 
     def _poll_data_queue(self):
         try:
@@ -348,10 +366,26 @@ class StockResearchSuite(tk.Toplevel):
         except queue.Empty:
             if self.tasks_completed >= self.tasks_to_complete:
                 self.progress_bar.pack_forget()
+
+                # --- FIX: Check the counter before retrying, and limit to 5 attempts ---
+                profile_is_blank = "No company profile available." in self.profile_text.get("1.0", "3.0")
+                
+                # If it failed AND our retry count is less than 5...
+                if profile_is_blank and getattr(self, 'auto_retry_count', 0) < 5:
+                    self.auto_retry_count += 1 # Increment the counter
+                    print(f"Critical data missing. Auto-retrying... (Attempt {self.auto_retry_count}/5)")
+                    self.after(50, self._on_research_click)
+                    return # Exit to let the new fetch start
+                
+                # If the fetch was successful OR we've hit the retry limit, finish normally.
                 self.research_button.config(state="normal")
+                self.update_idletasks()
+                if hasattr(self, 'overview_canvas'):
+                    self.overview_canvas.configure(scrollregion=self.overview_canvas.bbox("all"))
             else:
                 self.after_id = self.after(100, self._poll_data_queue)
 
+    # In ui/StockResearchSuite.py, REPLACE this method
     def _update_ui_component(self, key, payload):
         if payload is None: return
         if isinstance(payload, dict) and payload.get("error"):
@@ -360,9 +394,11 @@ class StockResearchSuite(tk.Toplevel):
         try:
             if key == "profile": self._update_profile(payload)
             elif key == "provider_hub":
+                # --- FIX: Store the full price DataFrame and trigger the initial chart draw ---
+                self.price_df = payload.get("price_df")
+                self._redraw_chart_with_period(252) # Draw initial 1-year chart
+                
                 self._update_snapshot_bar(payload)
-                # --- FIX: Pass the correct data object to the chart ---
-                self._update_chart(payload.get("price_df"))
                 self._update_insider_transactions(payload.get("insider_transactions", []))
                 self._update_technicals_tab(payload)
             elif key == "fundamentals":
@@ -422,9 +458,13 @@ class StockResearchSuite(tk.Toplevel):
 
         for widget in self.perf_frame.winfo_children(): widget.destroy()
         
-        low_52, high_52 = data.get('fiftyTwoWeekLow'), data.get('fiftyTwoWeekHigh')
+        # --- FIX: Use safe .get() with defaults for all values ---
+        low_52 = data.get('fiftyTwoWeekLow')
+        high_52 = data.get('fiftyTwoWeekHigh')
         range_52_str = f"{fmt_num(low_52)} - {fmt_num(high_52)}" if low_52 and high_52 else "N/A"
-        yield_str = f"{data.get('dividendYield', 0) * 100:.2f}%" if data.get('dividendYield') else "N/A"
+        
+        div_yield = data.get('dividendYield')
+        yield_str = f"{div_yield * 100:.2f}%" if isinstance(div_yield, (int, float)) else "N/A"
 
         metrics = {
             "Market Cap": fmt_large_num(data.get("marketCap")),
@@ -432,15 +472,26 @@ class StockResearchSuite(tk.Toplevel):
             "52 Week Range": range_52_str,
             "P/E Ratio": fmt_num(data.get('current_pe')),
             "EPS": fmt_num(data.get('trailingEps')),
-            "Dividend Yield": yield_str }
+            "Dividend Yield": yield_str 
+        }
         
         for i, (label, value) in enumerate(metrics.items()):
             ttk.Label(self.perf_frame, text=f"{label}:", font=("Segoe UI", 9, "bold")).grid(row=i, column=0, sticky="w", pady=2)
             ttk.Label(self.perf_frame, text=value).grid(row=i, column=1, sticky="w", padx=5)
 
-    # In StockResearchSuite.py, REPLACE this method
+    def _redraw_chart_with_period(self, days: int | None):
+        """Slices the main DataFrame and calls the plot function."""
+        if self.price_df is None or self.price_df.empty:
+            return
+
+        # If days is None, use the whole dataframe ("All" button)
+        # Otherwise, get the last N days.
+        df_to_plot = self.price_df if days is None else self.price_df.tail(days)
+        
+        self._update_chart(df_to_plot)
+
     def _update_chart(self, df):
-        # Clear previous chart
+        """The actual plotting function that draws the mplfinance chart."""
         for widget in self.chart_frame.winfo_children():
             widget.destroy()
 
@@ -451,18 +502,18 @@ class StockResearchSuite(tk.Toplevel):
         style = 'nightclouds' if self.current_theme == 'dark' else 'yahoo'
         
         try:
-            # Create a more professional-looking chart
             fig, _ = mpf.plot(df,
                               type='candle',
                               style=style,
                               title=f"\n{self.ticker_entry.get().upper()} Price Chart",
                               ylabel='Price ($)',
-                              volume=True,
+                              volume=False, # Set to False for a cleaner look
                               mav=(50, 200),
                               returnfig=True,
                               figsize=(12, 6),
-                              tight_layout=True, # Improves spacing
-                              datetime_format='%b %d, %Y')
+                              figratio=(16, 7),
+                              tight_layout=True,
+                              xrotation=0)
                               
             canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
             canvas.draw()
@@ -483,34 +534,81 @@ class StockResearchSuite(tk.Toplevel):
         except Exception as e:
             print(f"Error processing financial data: {e}")
 
+    # In ui/StockResearchSuite.py, REPLACE this method
     def _plot_financial_charts(self, income_stmt):
         for widget in self.financial_chart_frame.winfo_children(): widget.destroy()
         if income_stmt.empty: return
+
         df = income_stmt.transpose()
         df.index = pd.to_datetime(df.index)
         df_annual = df[df.index.month == df.index.month[-1]].sort_index().tail(5)
+        
         theme = self.app_controller.theme_settings()
-        fig = Figure(figsize=(12, 3), dpi=100, facecolor=theme['bg'])
+        fig = Figure(figsize=(12, 3.5), dpi=100, facecolor=theme['bg'])
+        fig.subplots_adjust(bottom=0.2)
         axes = [fig.add_subplot(121), fig.add_subplot(122)]
         
         def style_ax(ax, title):
             ax.set_title(title, color=theme['fg'])
             ax.tick_params(axis='y', colors=theme['fg'])
-            ax.tick_params(axis='x', colors=theme['fg'], rotation=45)
+            ax.tick_params(axis='x', colors=theme['fg'], rotation=30, labelsize=9)
             ax.set_facecolor(theme['bg'])
+            ax.get_yaxis().set_major_formatter(lambda x, p: f'{x/1e6:,.0f}M')
             for spine in ax.spines.values(): spine.set_edgecolor(theme['fg'])
 
         if "Total Revenue" in df_annual:
-            axes[0].bar(df_annual.index.strftime('%Y'), df_annual["Total Revenue"], color='#2980b9')
+            bars1 = axes[0].bar(df_annual.index.strftime('%Y'), df_annual["Total Revenue"], color='#2980b9', width=0.6)
             style_ax(axes[0], "Annual Revenue")
+            
         if "Net Income" in df_annual:
             colors = ['#27ae60' if x >= 0 else '#c0392b' for x in df_annual["Net Income"]]
-            axes[1].bar(df_annual.index.strftime('%Y'), df_annual["Net Income"], color=colors)
+            bars2 = axes[1].bar(df_annual.index.strftime('%Y'), df_annual["Net Income"], color=colors, width=0.6)
             style_ax(axes[1], "Annual Net Income")
-        fig.tight_layout()
+
         canvas = FigureCanvasTkAgg(fig, master=self.financial_chart_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(fill="both", expand=True)
+
+        # --- START OF FIX: Use theme colors for the tooltip ---
+        annot1 = axes[0].annotate("", xy=(0,0), xytext=(-20,20), textcoords="offset points",
+                                  bbox=dict(boxstyle="round", fc=theme['entry_bg'], ec=theme['fg'], lw=1),
+                                  arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.1", color=theme['fg']),
+                                  color=theme['fg']) # Set text color
+        annot2 = axes[1].annotate("", xy=(0,0), xytext=(-20,20), textcoords="offset points",
+                                  bbox=dict(boxstyle="round", fc=theme['entry_bg'], ec=theme['fg'], lw=1),
+                                  arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.1", color=theme['fg']),
+                                  color=theme['fg']) # Set text color
+        # --- END OF FIX ---
+                                  
+        annot1.set_visible(False)
+        annot2.set_visible(False)
+
+        def update_annot(bar_container, annot, event):
+            for bar in bar_container:
+                cont, _ = bar.contains(event)
+                if cont:
+                    height = bar.get_height()
+                    annot.xy = (bar.get_x() + bar.get_width() / 2, height)
+                    annot.set_text(f"${height/1e6:,.1f} M")
+                    annot.set_visible(True)
+                    fig.canvas.draw_idle()
+                    return
+            
+            if annot.get_visible():
+                annot.set_visible(False)
+                fig.canvas.draw_idle()
+
+        def on_hover(event):
+            if event.inaxes == axes[0] and "bars1" in locals():
+                update_annot(bars1, annot1, event)
+            elif event.inaxes == axes[1] and "bars2" in locals():
+                update_annot(bars2, annot2, event)
+            else: # If mouse is not over any axes with bars, hide tooltips
+                if annot1.get_visible(): annot1.set_visible(False); fig.canvas.draw_idle()
+                if annot2.get_visible(): annot2.set_visible(False); fig.canvas.draw_idle()
+
+        fig.canvas.mpl_connect("motion_notify_event", on_hover)
         canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
 
     def _update_news_and_sentiment(self, articles):
         self.news_articles = sorted(articles, key=lambda x: x.get('published', {})) # Safe get
@@ -560,7 +658,15 @@ class StockResearchSuite(tk.Toplevel):
     def _on_expiry_selected(self, event=None):
         expiry = self.exp_combo.get()
         if not expiry: return
-        df = self.options_data[expiry][self.option_type_var.get()]
+        # This safer .get() prevents errors if data is malformed
+        df = self.options_data.get(expiry, {}).get(self.option_type_var.get())
+
+        # This new block checks for None BEFORE trying to access .empty
+        if df is None:
+            _fill(self.options_tree, pd.DataFrame(columns=['Message']))
+            if self.options_tree.get_children(): self.options_tree.item(self.options_tree.get_children()[0], values=("Data not available for this type.",))
+            return
+            
         if df.empty:
             _fill(self.options_tree, pd.DataFrame(columns=['Message']))
             if self.options_tree.get_children(): self.options_tree.item(self.options_tree.get_children()[0], values=("No options data for this expiry.",))
@@ -578,8 +684,20 @@ class StockResearchSuite(tk.Toplevel):
         _fill(self.tech_tree, pd.DataFrame(list(tech_data.items()), columns=["Indicator", "Status"]))
 
     def _update_fundamentals_tab(self, data):
-        def fmt(val, mult=1, suffix=""): return f"{val*mult:.2f}{suffix}" if isinstance(val, (int,float)) else "N/A"
-        funda_data = {"P/E Ratio": fmt(data.get('current_pe')), "Forward P/E": fmt(data.get('forward_pe')), "PEG Ratio": fmt(data.get('peg_ratio')), "Price/Book": fmt(data.get('priceToBook')), "Revenue Growth (Q)": fmt(data.get('revenueGrowth'), 100, '%'), "Earnings Growth (Q)": fmt(data.get('earningsGrowth'), 100, '%'), "Return on Equity": fmt(data.get('returnOnEquity'), 100, '%'), "Debt to Equity": fmt(data.get('debtToEquity')), "Gross Margins": fmt(data.get('grossMargins'), 100, '%'), "Profit Margins": fmt(data.get('profitMargins'), 100, '%')}
+        def fmt(val, mult=1, suffix=""): 
+            return f"{val*mult:.2f}{suffix}" if isinstance(val, (int, float)) else "N/A"
+        
+        # --- FIX: Use safe .get() for all fundamental data points ---
+        funda_data = {
+            "P/E Ratio": fmt(data.get('trailingPE')),
+            "Price/Book": fmt(data.get('priceToBook')),
+            "Revenue Growth (Q)": fmt(data.get('revenueGrowth'), 100, '%'),
+            "Earnings Growth (Q)": fmt(data.get('earningsGrowth'), 100, '%'),
+            "Return on Equity": fmt(data.get('returnOnEquity'), 100, '%'),
+            "Debt to Equity": fmt(data.get('debtToEquity')),
+            "Gross Margins": fmt(data.get('grossMargins'), 100, '%'),
+            "Profit Margins": fmt(data.get('profitMargins'), 100, '%')
+        }
         _fill(self.funda_tree, pd.DataFrame(list(funda_data.items()), columns=["Ratio", "Value"]))
 
     def _update_events(self, events):

@@ -544,6 +544,8 @@ class YfinanceEarningsProvider(DataProvider):
             traceback.print_exc() # Print full traceback for debugging
             return None
         
+# In data/providers.py, REPLACE this entire class
+
 class FundamentalDataProvider(DataProvider):
     """
     Fetches fundamental data (P/E, growth, market cap, etc.)
@@ -554,50 +556,56 @@ class FundamentalDataProvider(DataProvider):
         self.price_provider = price_provider or YahooPriceProvider()
 
     @lru_cache(maxsize=128) # Cache results for each symbol
-    def fetch(self, symbol: str, **kwargs) -> Dict[str, Any]:
+    def fetch(self, symbol: str, session=None, **kwargs) -> Dict[str, Any]:
         fundamentals = {}
         try:
-            ticker_obj = yf.Ticker(symbol)
+            ticker_obj = yf.Ticker(symbol, session=session)
             info = ticker_obj.info
+
+            # --- START OF FIX: Add a robust check for the main info object ---
+            # This prevents all downstream errors if the initial API call fails.
+            if not isinstance(info, dict) or len(info) <= 1: # Check if it's not a dict or is empty
+                print(f"[{symbol}] yfinance info object is not a valid dictionary. Aborting fundamental fetch.")
+                return {}
+            # --- END OF FIX ---
 
             # Get current price early, as it's needed for earnings price change
             current_price = info.get('currentPrice') or info.get('regularMarketPrice')
 
             # Basic current valuation/size metrics (existing)
             fundamentals["current_pe"] = info.get("trailingPE")
-            fundamentals["forward_pe"] = info.get("forwardPE")
-            fundamentals["peg_ratio"] = info.get("pegRatio")
+            fundamentals["forwardPE"] = info.get("forwardPE")
+            fundamentals["pegRatio"] = info.get("pegRatio")
             fundamentals["market_cap"] = info.get("marketCap")
             fundamentals["dividend_yield"] = info.get("dividendYield")
             fundamentals["beta"] = info.get("beta")
-            fundamentals["short_percent_of_float"] = info.get("shortPercentOfFloat") # Short interest data
+            fundamentals["short_percent_of_float"] = info.get("shortPercentOfFloat")
             fundamentals["priceToBook"] = info.get("priceToBook") 
             fundamentals["enterpriseValue"] = info.get("enterpriseValue")
             fundamentals["grossMargins"] = info.get("grossMargins")
             fundamentals["profitMargins"] = info.get("profitMargins")
-            fundamentals["revenueGrowth"] = info.get("revenueGrowth") # Quarterly revenue growth
-            fundamentals["earningsGrowth"] = info.get("earningsGrowth") # Quarterly earnings growth
+            fundamentals["revenueGrowth"] = info.get("revenueGrowth")
+            fundamentals["earningsGrowth"] = info.get("earningsGrowth")
             
-            # NEW: Quality Metrics
+            # Quality Metrics
             fundamentals["returnOnEquity"] = info.get("returnOnEquity")
             fundamentals["debtToEquity"] = info.get("debtToEquity")
 
             try:
-                # Fetch recommendations and get the last 5
+                # Fetch recommendations
                 recs = ticker_obj.recommendations
                 if recs is not None and not recs.empty:
                     fundamentals["recommendations"] = recs.tail(5)
             except Exception as e:
                 print(f"Could not fetch recommendations for {symbol}: {e}")
-            # --------------------
 
-            # NEW: Analyst Price Targets (existing)
+            # Analyst Price Targets
             fundamentals["analyst_target_mean_price"] = info.get("targetMeanPrice")
             fundamentals["analyst_target_high_price"] = info.get("targetHighPrice")
             fundamentals["analyst_target_low_price"] = info.get("targetLowPrice")
             fundamentals["analyst_target_median_price"] = info.get("targetMedianPrice")
 
-            # Historical P/E Calculation (existing logic)
+            # Historical P/E Calculation (Preserved Logic)
             quarterly_financials_df = ticker_obj.quarterly_financials
             
             if (quarterly_financials_df is not None and not quarterly_financials_df.empty and
@@ -605,36 +613,27 @@ class FundamentalDataProvider(DataProvider):
 
                 eps_df_transposed = quarterly_financials_df.T
                 eps_series = pd.to_numeric(eps_df_transposed['Basic EPS'], errors='coerce').dropna()
-                
                 eps_series = eps_series.sort_index()
 
                 if len(eps_series) >= 4:
                     ttm_eps_series = eps_series.rolling(window=4, min_periods=4).sum()
-                    
                     price_df = self.price_provider.fetch(symbol, period="5y", interval="1mo") 
                     
                     if not price_df.empty and 'Close' in price_df.columns:
                         price_df['Close'] = pd.to_numeric(price_df['Close'], errors='coerce')
-                        
                         min_date = max(price_df.index.min(), ttm_eps_series.index.min())
                         max_date = min(price_df.index.max(), ttm_eps_series.index.max()) 
                         
                         if min_date < max_date:
                             full_date_range = pd.date_range(start=min_date, end=max_date, freq='D')
-                            
                             ttm_eps_daily = ttm_eps_series.reindex(full_date_range).ffill()
-                            
                             aligned_prices = price_df['Close'].reindex(full_date_range).bfill()
-
                             historical_pe = aligned_prices / ttm_eps_daily
                             
                             historical_pe = historical_pe[
-                                historical_pe.notna() & 
-                                (historical_pe != np.inf) & 
-                                (historical_pe != -np.inf) & 
-                                (ttm_eps_daily != 0)
+                                historical_pe.notna() & (historical_pe != np.inf) & 
+                                (historical_pe != -np.inf) & (ttm_eps_daily != 0)
                             ]
-                            
                             historical_pe = historical_pe[(historical_pe > 0) & (historical_pe < 1000)] 
 
                             if not historical_pe.empty:
@@ -644,19 +643,13 @@ class FundamentalDataProvider(DataProvider):
                                 fundamentals["historical_pe_max"] = historical_pe.max()
                                 fundamentals["historical_pe_std"] = historical_pe.std()
             
-            # NEW: Recent Earnings Report Details (for Post-Earnings Drift)
-            # Fetching from ticker.earnings_dates as an alternative to deprecated ticker.quarterly_earnings
-            # for Reported/Estimated EPS and Surprise (%).
+            # Recent Earnings Report Details (Preserved Logic)
             try:
                 earnings_dates_df = ticker_obj.earnings_dates
                 if earnings_dates_df is not None and not earnings_dates_df.empty:
-                   
-                    # Filter for past earnings dates (latest report has passed)
-                    # Convert both sides to timezone-naive datetime.date for comparison to avoid timezone issues.
                     current_naive_date = dt.date.today()
                     past_earnings_dates_df = earnings_dates_df[earnings_dates_df.index.date < current_naive_date]
                     if not past_earnings_dates_df.empty:
-                        # Sort by date descending to get the most recent report
                         latest_report_row = past_earnings_dates_df.sort_index(ascending=False).iloc[0]
                         
                         report_date = latest_report_row.name.strftime("%Y-%m-%d")
@@ -664,56 +657,105 @@ class FundamentalDataProvider(DataProvider):
                         estimated_eps = latest_report_row.get("Estimated EPS")
                         surprise_pct = latest_report_row.get("Surprise(%)")
 
-                        # If Surprise(%) is missing but we have reported and estimated, calculate it
                         if (surprise_pct is None and reported_eps is not None and estimated_eps is not None and
                             isinstance(reported_eps, (int, float)) and isinstance(estimated_eps, (int, float)) and estimated_eps != 0):
-                            
-                            surprise_pct = ((reported_eps - estimated_eps) / estimated_eps) * 100
+                            surprise_pct = ((reported_eps - estimated_eps) / abs(estimated_eps)) * 100
                             
                         fundamentals["latest_earnings_report"] = {
-                            "date": report_date,
-                            "reported_eps": reported_eps,
-                            "estimated_eps": estimated_eps,
-                            "surprise_pct": surprise_pct
+                            "date": report_date, "reported_eps": reported_eps,
+                            "estimated_eps": estimated_eps, "surprise_pct": surprise_pct
                         }
 
-                        # Fetch price change after latest earnings date (existing logic, but ensure it works with new 'date' format)
-                        # current_price needs to be defined BEFORE this block. It is now.
                         if report_date and current_price is not None:
-                            recent_price_df = self.price_provider.fetch(
-                                symbol, 
-                                period="1mo", # Get last month's data
-                                interval="1d"
-                            )
+                            recent_price_df = self.price_provider.fetch(symbol, period="1mo", interval="1d")
                             if not recent_price_df.empty and 'Close' in recent_price_df.columns:
                                 prices_after_earnings = recent_price_df.loc[recent_price_df.index.date >= pd.to_datetime(report_date).date(), 'Close']
                                 
-                                if len(prices_after_earnings) >= 2: # Need at least report date + next day
-                                    report_date_price = prices_after_earnings.iloc[0] # Close on report date
-                                    next_day_price = prices_after_earnings.iloc[1] # Close on next trading day
+                                if len(prices_after_earnings) >= 2:
+                                    report_date_price = prices_after_earnings.iloc[0]
+                                    next_day_price = prices_after_earnings.iloc[1]
                                     
                                     if report_date_price and not pd.isna(report_date_price) and next_day_price and not pd.isna(next_day_price) and report_date_price != 0:
                                         fundamentals["earnings_1d_price_change_pct"] = ((next_day_price - report_date_price) / report_date_price) * 100
                                     
-                                    if len(prices_after_earnings) >= 4: # Need at least report date + 3 days
-                                        day3_price = prices_after_earnings.iloc[3] # Close on 3rd trading day after report
+                                    if len(prices_after_earnings) >= 4:
+                                        day3_price = prices_after_earnings.iloc[3]
                                         if report_date_price and not pd.isna(report_date_price) and day3_price and not pd.isna(day3_price) and report_date_price != 0:
                                             fundamentals["earnings_3d_price_change_pct"] = ((day3_price - report_date_price) / report_date_price) * 100
-                                
             except Exception as e:
-                print(f"[{symbol}] Warning: Could not fetch latest earnings report details or price reaction (using earnings_dates): {e}")
-                # traceback.print_exc() # Uncomment for more detailed debug if needed
-                # Continue with other fundamentals even if this fails
+                print(f"[{symbol}] Warning: Could not fetch latest earnings report details or price reaction: {e}")
 
-            # This print and return should be outside the innermost try-except
-            print(f"[{symbol}] Fundamental data fetched: {fundamentals.keys()} including historical P/E, analyst targets, quality metrics, and recent earnings reactions if available.")
             return fundamentals
 
         except Exception as e:
             print(f"Error fetching fundamental data for {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
-            return {} # Return empty dict on error
+            return {}
+# In data/providers.py, add this new class
+class FinnhubProfileProvider(DataProvider):
+    """Fetches company profile data from the reliable Finnhub API."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    @lru_cache(maxsize=128)
+    def fetch(self, symbol: str, **kwargs) -> Dict[str, Any]:
+        try:
+            url = f"https://finnhub.io/api/v1/stock/profile2?symbol={symbol}&token={self.api_key}"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+
+            # If data is empty, it means the ticker is likely not found on Finnhub
+            if not data:
+                return {}
+
+            # Normalize Finnhub's keys to match what our UI expects from yfinance
+            profile = {
+                "longBusinessSummary": data.get("description", "No company profile available."),
+                "sector": data.get("finnhubIndustry", "N/A"),
+                "industry": "N/A", # Finnhub combines sector/industry
+                "logo_url": data.get("logo", "")
+            }
+            return profile
+        except Exception as e:
+            print(f"Error fetching Finnhub profile for {symbol}: {e}")
+            return {} # Return empty dict on any failure
+        
+# In data/providers.py, add this new class
+
+class FinnhubFundamentalsProvider(DataProvider):
+    """Fetches key financial metrics from the reliable Finnhub API."""
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    @lru_cache(maxsize=128)
+    def fetch(self, symbol: str, **kwargs) -> Dict[str, Any]:
+        try:
+            url = f"https://finnhub.io/api/v1/stock/metric?symbol={symbol}&metric=all&token={self.api_key}"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json().get("metric", {})
+
+            if not data:
+                return {}
+
+            # IMPORTANT: Normalize Finnhub's data keys to match what the UI expects from yfinance
+            fundamentals = {
+                "trailingPE": data.get("peTTM"),
+                "forwardPE": data.get("forwardPE"),
+                "pegRatio": data.get("pegRatioTTM"),
+                "marketCap": data.get("marketCapitalization"),
+                "dividendYield": data.get("dividendYield"),
+                "beta": data.get("beta"),
+                "fiftyTwoWeekLow": data.get("52WeekLow"),
+                "fiftyTwoWeekHigh": data.get("52WeekHigh"),
+                "averageVolume": data.get("10DayAverageTradingVolume"),
+                "trailingEps": data.get("epsTTM")
+                # Add any other key mappings here if needed
+            }
+            return fundamentals
+        except Exception as e:
+            print(f"Error fetching Finnhub fundamentals for {symbol}: {e}")
+            return {}
         
 def _series_tail_list(ser: pd.Series, n=30) -> list[float]:
     return ser.dropna().tail(n).to_numpy(dtype=float).tolist()
@@ -822,9 +864,9 @@ class InsiderTransactionsProvider(DataProvider):
 class OptionsChainProvider(DataProvider):
     """Fetches the full options chain for several upcoming expiries."""
     @lru_cache(maxsize=32)
-    def fetch(self, symbol: str, **kwargs) -> Dict[str, Dict[str, pd.DataFrame]]:
+    def fetch(self, symbol: str, session=None, **kwargs) -> Dict[str, Dict[str, pd.DataFrame]]:
         try:
-            ticker_obj = yf.Ticker(symbol)
+            ticker_obj = yf.Ticker(symbol, session=session)
             expirations = ticker_obj.options
 
             if not expirations:
@@ -960,7 +1002,7 @@ class ProviderHub:
 
         # ---------- price & sparkline ----------------------------------
         try:
-            price_df = cls._price.fetch(symbol)
+            price_df = cls._price.fetch(symbol, period="max")
             if price_df.empty or "Close" not in price_df.columns:
                 spark = _static_price_list()
                 last_price = spark[-1]
