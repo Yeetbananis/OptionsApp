@@ -1,3 +1,5 @@
+import os
+import sys
 import time
 import threading
 import sqlite3
@@ -6,11 +8,22 @@ from pathlib import Path
 from typing import Dict, Any, Iterable, List
 from core.models.providers import ProviderHub
 
-import numpy as np # Ensure this import is here
-import pandas as pd # Ensure this import is here
+import numpy as np
+import pandas as pd
 
 class MarketDataService:
-    DB_FILE = Path("market_cache.sqlite3")
+    # Function to get the correct path when bundled with PyInstaller
+    @staticmethod # <--- ADD THIS DECORATOR
+    def _get_resource_path(relative_path):
+        """Get absolute path to resource, works for dev and for PyInstaller."""
+        try:
+            # PyInstaller creates a temp folder and stores path in _MEIPASS
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.path.abspath(".")
+        return os.path.join(base_path, relative_path)
+
+    DB_FILE = _get_resource_path("market_cache.sqlite3") # This line now works correctly
 
     def __init__(self, ttl_sec: int = 900) -> None:
         self.ttl_sec = ttl_sec

@@ -43,6 +43,7 @@ from ui.DockingPlotWindow         import DockingPlotWindow
 from app.AnalysisPersistence      import AnalysisPersistence
 from ui.LoadAnalysisWindow        import LoadAnalysisWindow
 from ui.LoadingScreen             import LoadingScreen
+from ui.DebugConsoleWindow         import DebugConsoleWindow
 
 # ====================
 # Local Module Imports
@@ -363,6 +364,13 @@ class OptionAnalyzerApp:
         self.llm = LLMHelper(model="deepseek-q4ks")
         self.idea_engine = IdeaEngine()
         self.user_name = self.settings.get("user_name", "Trader")
+
+
+        # --- Debug Console Initialization (NEW) ---
+        self.debug_console_window = DebugConsoleWindow(self.root, theme=self.current_theme)
+        self.debug_console_window.hide_window() # Start hidden
+        self.debug_console_window.start_redirection() # Start redirecting output early
+        # --- END NEW --
 
         # 4. STATE AND WINDOW MANAGEMENT
         self.input_data = {}
@@ -2083,6 +2091,10 @@ class OptionAnalyzerApp:
         # 2. Terminate any external processes.
         if hasattr(self, "_chatbot_proc") and self._chatbot_proc.poll() is None:
             self._chatbot_proc.terminate()
+
+        if hasattr(self, 'debug_console_window') and self.debug_console_window:
+            self.debug_console_window.stop_redirection() # Stop redirection before closing
+            self.debug_console_window.destroy() # Destroy the console window
 
         # 3. Tell the main event loop to exit. This is safer than destroy().
         #    The script will terminate after this.

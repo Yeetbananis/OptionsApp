@@ -669,7 +669,7 @@ class IdeaEngine:
                 # --- NEW DEBUG PRINT ---
                 # Print the entire 'full' metrics dictionary for inspection
                 # This will show if '0m' exists in any field *after* ProviderHub.get
-                print(f"DEBUG: Full metrics for {sym} before detectors: {full}")
+                # print(f"DEBUG: Full metrics for {sym} before detectors: {full}")
                 # --- END NEW DEBUG PRINT ---
 
                 sym_ideas: list[Idea] = []

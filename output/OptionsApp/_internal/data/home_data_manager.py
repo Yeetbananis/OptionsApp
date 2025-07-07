@@ -102,7 +102,7 @@ class HomeDataManager:
         # ── nested scorer (prefer your in-house analyser) ────────────────
         def _score(txt: str) -> float | None:
             try:
-                from ui.NewsSentimentAnalyzer import score_text
+                from OptionPredictor.ui.StockResearchSuite import score_text
                 return float(score_text(txt))
             except Exception:
                 try:

@@ -61,7 +61,7 @@ class IdeaSuiteView(ttk.Frame):
 
         # NEW: Create a dedicated loading screen instance for Idea Suite refreshes
         # It's now a ttk.Frame directly within this IdeaSuiteView
-        self._idea_suite_loader = IdeaSuiteLoadingOverlay(self, self.app.user_name, theme=self.app.current_theme)
+        self._idea_suite_loader = IdeaSuiteLoadingOverlay(self, self.app, self.app.user_name, theme=self.app.current_theme) # PASS self.app as app_controller
         # It is placed to cover the entire view, but starts hidden
         self._idea_suite_loader.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._idea_suite_loader.place_forget() # Initially hidden
@@ -74,11 +74,13 @@ class IdeaSuiteView(ttk.Frame):
         self.controller = controller
 
     def refresh_ideas(self):
-        """Public method to trigger a data refresh for the view."""
-        if self.controller:
-            self._show_loading_overlay()
-            self.universe = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
-            self.controller.refresh(self.universe, self._progress_queue) 
+     """Public method to trigger a data refresh for the view."""
+     if self.controller:
+         self._all_ideas = [] # Clear existing ideas for a fresh start
+         self._idea_suite_loading_finalized = False # Reset flag for new loading sequence
+         self._show_loading_overlay()
+         self.universe = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
+         self.controller.refresh(self.universe, self._progress_queue)
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
@@ -450,80 +452,107 @@ class IdeaSuiteView(ttk.Frame):
             self.refresh_ideas()
 
     def _poll_queue(self):
-        """Check for new ideas AND progress updates from the background thread."""
-        try:
-            # Process completed ideas when they arrive from the queue.
-            new_ideas = self.queue.get_nowait()
+     """Check for new ideas AND progress updates from the background thread."""
+     try:
+         # Process completed ideas when they arrive from the ideas queue.
+         new_ideas_received_this_poll = False
+         try:
+             while True: # Try to get all ideas available
+                 ideas_batch = self.queue.get_nowait()
+                 for i in ideas_batch:
+                     i.is_saved = i.uid in self._saved_ids
+                 self._all_ideas.extend(ideas_batch) # Accumulate all ideas
+                 new_ideas_received_this_poll = True
+         except queue.Empty:
+             pass # No new ideas yet
 
-            # --- FOOLPROOF FIX FOR WHITE FLASH ---
-            # 1. Process the data and render the main UI first. The new widgets
-            #    are created but remain hidden behind the loading overlay.
-            for i in new_ideas:
-                i.is_saved = i.uid in self._saved_ids
-            self._all_ideas = new_ideas
-            self._apply_filters()
+         # Process progress updates from the _progress_queue.
+         loading_complete_from_progress = False
+         try:
+             while True: # Get all pending progress updates
+                 processed, total = self._progress_queue.get_nowait()
+                 if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
+                     progress_percent = processed / total if total > 0 else 0.0
+                     self._idea_suite_loader.update_progress_bar(progress_percent)
+                     if processed == total and total > 0: # All tasks complete
+                         loading_complete_from_progress = True
+                         # Do not break here immediately, let it process all pending progress.
+         except queue.Empty:
+             pass # No new progress updates yet
 
-            # 2. Force Tkinter to process all pending drawing and geometry updates.
-            #    This is the key to preventing the flash.
-            self.update_idletasks()
+         # If new ideas were received, or if loading is complete and we need a final render
+         if new_ideas_received_this_poll or loading_complete_from_progress:
+             self._apply_filters() # Re-apply filters to update displayed ideas
 
-            # 3. Now that the main UI is ready underneath, trigger the loader's finale.
-            if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
-                self._idea_suite_loader.trigger_climax_and_take_profit()
-                # 4. Schedule the loader to disappear AFTER its animation is complete.
-                self.after(1500, self._idea_suite_loader.place_forget)
-            # --- END OF FIX ---
+         # If loading is complete based on progress updates, trigger final sequence
+         if loading_complete_from_progress:
+             self._trigger_idea_suite_final_sequence()
+             return # Stop polling as loading is done and final sequence initiated
 
-            self.app.set_status("Idea generation complete.", color="green")
-            if self.app and hasattr(self.app, '_cancel_loading_animation'):
-                self.app._cancel_loading_animation()
+     except Exception as e:
+         # Catch any unexpected errors in the polling loop itself
+         print(f"Error in IdeaSuiteView _poll_queue: {e}")
+         traceback.print_exc()
 
-            self.last_updated_label.config(text=f"Last updated: {time.strftime('%I:%M:%S %p')}")
-            self.refresh_button.config(state="normal")
-        except queue.Empty:
-            pass # No new idea data
-        
-        finally:
-            self.after(self.POLL_MS, self._poll_queue)
+     finally:
+         # Always reschedule the poll, unless we've already triggered the final sequence and returned
+         if not getattr(self, '_idea_suite_loading_finalized', False):
+             self.after(self.POLL_MS, self._poll_queue)
 
     def _show_loading_overlay(self):
-        """Displays the Idea Suite's dedicated animated loading screen as an overlay."""
+     """Displays the Idea Suite's dedicated animated loading screen as an overlay."""
+     if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
+         # Ensure the loader is placed to cover the entire view
+         self._idea_suite_loader.place(relx=0, rely=0, relwidth=1, relheight=1)
+         self._idea_suite_loader.lift() # Bring to front
+         self._idea_suite_loader.focus_force() # Ensure it captures focus
+
+         # Reset the loader's internal state
+         self._idea_suite_loader._setup_chart() # Reset chart
+         self._idea_suite_loader.candles = [] # Clear old candles
+         self._idea_suite_loader.is_finale_triggered = False # Reset finale state
+         self._idea_suite_loader.in_pre_climax_mode = False # Reset mode
+         self._idea_suite_loader.price_velocity = 0.0 # Reset velocity
+         self._idea_suite_loader.progress_bar['value'] = 0 # Reset progress bar
+
+         self.app.set_status("Generating ideas...", color="blue")
+
+         # Start the animation loop directly on the _idea_suite_loader instance
+         # Removed total_duration_ms, as progress is now driven by external calls.
+         self._idea_suite_loader.start_animation_loop(update_interval_ms=5) # No total_duration_ms here
+
+
+    def _trigger_idea_suite_final_sequence(self):
+        """
+        Triggers the final animation sequence on the Idea Suite loader
+        and then hides it, revealing the fully rendered ideas.
+        """
+        # Prevent multiple calls to final sequence
+        if getattr(self, '_idea_suite_loading_finalized', False):
+            return
+        self._idea_suite_loading_finalized = True # Set flag to prevent re-triggering
+
+        # 1. Force Tkinter to process all pending drawing and geometry updates.
+        #    This is the key step that happens invisibly behind the loading screen
+        #    and prevents the white flash when the overlay disappears.
+        self.update_idletasks()
+
+        # 2. Trigger the loader's finale.
         if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
-            # Ensure the loader is placed to cover the entire view
-            self._idea_suite_loader.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self._idea_suite_loader.lift() # Bring to front
-            self._idea_suite_loader.focus_force() # Ensure it captures focus
+            self._idea_suite_loader.trigger_climax_and_take_profit()
+            # 3. Schedule the loader to disappear AFTER its animation is complete.
+            #    The animation takes about 1.2s, so 1500ms is a safe delay.
+            self.after(1500, self._idea_suite_loader.place_forget) # Hide the frame after animation
 
-            # Reset the loader's internal state
-            self._idea_suite_loader._setup_chart() # Reset chart
-            self._idea_suite_loader.candles = [] # Clear old candles
-            self._idea_suite_loader.is_finale_triggered = False # Reset finale state
-            self._idea_suite_loader.in_pre_climax_mode = False # Reset mode
-            self._idea_suite_loader.price_velocity = 0.0 # Reset velocity
-            self._idea_suite_loader.progress_bar['value'] = 0 # Reset progress bar
-
-            self.app.set_status("Generating ideas...", color="blue")
-
-            # Start the animation loop directly on the _idea_suite_loader instance
-            self._idea_suite_loader.start_animation_loop(total_duration_ms=10000, update_interval_ms=5) # Start its own animation
-
-
-    def _hide_loading_overlay(self):
-        """Hides the Idea Suite's dedicated loading screen and restores content."""
-        if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
-            # Trigger finale sequence on the dedicated loader
-            self._idea_suite_loader.update_progress_bar(1.0)
-            self._idea_suite_loader.trigger_pre_climax_dip()
-            self._idea_suite_loader.animate_take_profit()
-
-            # Schedule the animation finale and then hide the loader frame
-            # The animation has its own internal timer, so we schedule the hiding after it completes.
-            self._idea_suite_loader.after(1500, lambda: self._idea_suite_loader.place_forget()) # Hide the frame after animation
-
-        # Stop main app's general loading animation/status if it was linked
+        # Update main app's status
+        self.app.set_status("Idea generation complete.", color="green")
         if self.app and hasattr(self.app, '_cancel_loading_animation'):
-            self.app._cancel_loading_animation()
-            self.app.set_status("Idea generation complete.", color="green")
+            self.app._cancel_loading_animation() # Cancel any app-wide loading animations
+
+        self.last_updated_label.config(text=f"Last updated: {time.strftime('%I:%M:%S %p')}")
+        self.refresh_button.config(state="normal")
+        self._render_saved_tab() # Ensure saved tab is rendered with potentially new ideas
+        self._gather_and_render_timeline_events() # Re-gather events if new earnings data came in
 
     def _gather_and_render_timeline_events(self):
         """
@@ -601,6 +630,12 @@ class IdeaSuiteView(ttk.Frame):
         top5 = sorted(ideas, key=blended_score, reverse=True)[:5]
         if not top5:
             ttk.Label(self.highlight_fr, text="No ideas generated. Check console for data errors.").grid()
+            
+            # --- NEW FIX: Automatically open the debug console ---
+            if hasattr(self.app, 'debug_console_window') and self.app.debug_console_window:
+                self.app.debug_console_window.show_window()
+            # --- END NEW FIX ---
+            
             return
 
         for idx, idea in enumerate(top5):

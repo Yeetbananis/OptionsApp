@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -315,7 +315,7 @@ class IdeaSuiteLoadingOverlay(ttk.Frame): # Inherit from ttk.Frame
     featuring a candlestick chart animation and progress bar.
     It is designed to be placed as an overlay within another widget.
     """
-    def __init__(self, parent, trader_name="Trader", theme="dark"):
+    def __init__(self, parent, app_controller, trader_name="Trader", theme="dark"): # ADD app_controller
         super().__init__(parent) # Call ttk.Frame init
         
         # --- Theme and Color Setup ---
@@ -357,6 +357,16 @@ class IdeaSuiteLoadingOverlay(ttk.Frame): # Inherit from ttk.Frame
         self.progress_bar = ttk.Progressbar(main_frame, orient='horizontal', mode='determinate', length=400, style="Loading.Horizontal.TProgressbar")
         self.progress_bar.pack(pady=(30, 20))
 
+         # --- Debug Console Button (NEW) ---
+        self.debug_console_button = ttk.Button(
+            main_frame, # Place it in the main_frame of the overlay
+            text="Show Debug Console",
+            command=self._show_debug_console
+        )
+        self.debug_console_button.pack(pady=(10, 0)) # Pack it below the progress bar
+
+        self.app_controller = app_controller # Store the app_controller
+
         # --- State Variables ---
         self.candles = []
         self.price_velocity = 0.0
@@ -391,6 +401,14 @@ class IdeaSuiteLoadingOverlay(ttk.Frame): # Inherit from ttk.Frame
         self.ax.set_xlim(x_min, x_max)
         self.ax.set_ylim(self.sl_level * 0.95, self.tp_level * 1.05)
         self.fig.tight_layout()
+
+    def _show_debug_console(self):
+        """Opens/shows the debug console window."""
+        if hasattr(self.app_controller, 'debug_console_window') and self.app_controller.debug_console_window:
+            self.app_controller.debug_console_window.show_window()
+        else:
+            # This case should ideally not happen if initialized correctly in OptionAnalyzerApp
+            messagebox.showwarning("Debug Console", "Debug console not initialized.")
 
     def add_new_candle(self):
         """Generates a new candle with the exact same price logic."""
@@ -497,34 +515,43 @@ class IdeaSuiteLoadingOverlay(ttk.Frame): # Inherit from ttk.Frame
         self.progress_bar['value'] = percent * 100
         
 
-    def start_animation_loop(self, total_duration_ms: int = 5000, update_interval_ms: int = 5):
-        """Starts the internal animation loop for this instance."""
-        self.total_duration_ms = total_duration_ms
+    def start_animation_loop(self, update_interval_ms: int = 5): # Removed total_duration_ms
+        """
+        Starts the internal animation loop for this instance.
+        The progress bar is now updated externally.
+        """
+        # total_duration_ms is no longer relevant as progress is external
         self.update_interval_ms = update_interval_ms
-        self.start_time = time.time()
+        self.start_time = time.time() # Still useful for internal candle logic
         self._animation_job = None
+
+        # Reset progress bar to 0 when starting animation loop
+        self.progress_bar['value'] = 0 # Ensure it starts from 0
 
         self._animation_step_internal()
 
     def _animation_step_internal(self):
         """Internal step of the animation loop."""
         if self.is_finale_triggered:
+            # Animation has finished its finale, stop regular candle drawing
             if self._animation_job:
                 self.after_cancel(self._animation_job)
                 self._animation_job = None
             return
 
-        # No longer using elapsed_time for progress_percent
-        # progress_percent is now updated externally via update_progress_bar
+        # Removed: progress calculation based on elapsed_time.
+        # The progress bar value is now *only* updated by external calls to update_progress_bar.
+        # The self.progress_bar['value'] will thus reflect the actual ticker processing.
 
-        self.update_progress_bar(self.progress_bar['value'] / 100) # Use actual progress bar value for internal logic
-        self.add_new_candle()
+        self.add_new_candle() # Draw a new candle
 
         # Trigger pre-climax dip if percentage is met (still use external progress bar value)
-        if (self.progress_bar['value'] / 100) >= 0.7 and not self.in_pre_climax_mode:
+        # The progress_bar['value'] is now kept updated by IdeaSuiteView
+        if (self.progress_bar['value'] / self.progress_bar['maximum']) >= 0.7 and not self.in_pre_climax_mode:
             self.trigger_pre_climax_dip()
 
         # This loop continues indefinitely until is_finale_triggered is set externally
+        # or until it's explicitly cancelled by _trigger_climax_and_take_profit or similar.
         self._animation_job = self.after(self.update_interval_ms, self._animation_step_internal)
 
     def trigger_climax_and_take_profit(self):
