@@ -544,70 +544,138 @@ class YfinanceEarningsProvider(DataProvider):
             traceback.print_exc() # Print full traceback for debugging
             return None
         
-# In data/providers.py, REPLACE this entire class
+# In data/providers.py
 
+
+# =============================================================
+# Helper function to be placed inside the providers.py file,
+# before the FundamentalDataProvider class definition.
+# =============================================================
+def _to_float(val: Any) -> float | None:
+    """
+    Robustly converts a value to a float, handling formatted strings
+    like '1.5b', '250m', '75k', etc., and also '0m', '0k', etc.
+    Added explicit string conversion and debug for problematic values.
+    """
+    if isinstance(val, (int, float)):
+        return float(val)
+    
+    # Crucial: Ensure the value is treated as a string for parsing
+    if not isinstance(val, str):
+        # If it's not a string and not a number, try converting it to string.
+        # This catches pandas Series, numpy objects, etc.
+        try:
+            val_str = str(val).lower().strip()
+        except Exception:
+            return None # Cannot even convert to string
+    else:
+        val_str = val.lower().strip()
+
+    # Handle empty strings or 'nan' strings
+    if not val_str or val_str in ['nan', 'n/a', 'none']:
+        return None
+
+    multipliers = {'t': 1e12, 'b': 1e9, 'm': 1e6, 'k': 1e3}
+
+    # Check for a known multiplier suffix
+    if val_str and val_str[-1] in multipliers:
+        multiplier = multipliers[val_str[-1]]
+        numeric_part_str = val_str[:-1]
+        try:
+            # Handle cases like '0m', '0k' gracefully
+            if numeric_part_str == '0':
+                return 0.0 # Explicitly return 0.0 for "0m", "0k" etc.
+            return float(numeric_part_str) * multiplier
+        except (ValueError, TypeError):
+            print(f"DEBUG: _to_float failed to convert numeric part '{numeric_part_str}' from '{val}' with multiplier. Returning None.")
+            return None # Failed to convert the numeric part
+    
+    # Try direct conversion if no suffix
+    try:
+        return float(val_str)
+    except (ValueError, TypeError):
+        # This is where the '0m' error *might* originate if it bypasses the multiplier check
+        # For example, if val_str was "0m" and the suffix check failed for some reason
+        # or if the string was something truly unparseable.
+        print(f"DEBUG: _to_float failed direct conversion for '{val_str}' (original: '{val}'). Returning None.")
+        return None
+
+# =============================================================
+# == REPLACE THE ENTIRE FundamentalDataProvider CLASS WITH THIS ==
+# =============================================================
 class FundamentalDataProvider(DataProvider):
     """
-    Fetches fundamental data (P/E, growth, market cap, etc.)
-    and calculates historical P/E and other valuation metrics for comparison.
-    Also fetches recent earnings results for post-earnings analysis.
+    Fetches fundamental data and sanitizes formatted numbers (e.g., '1.5b')
+    into proper floating-point values before returning them.
     """
     def __init__(self, price_provider: DataProvider = None) -> None:
         self.price_provider = price_provider or YahooPriceProvider()
 
-    @lru_cache(maxsize=128) # Cache results for each symbol
+    @lru_cache(maxsize=128)
     def fetch(self, symbol: str, session=None, **kwargs) -> Dict[str, Any]:
         fundamentals = {}
         try:
             ticker_obj = yf.Ticker(symbol, session=session)
             info = ticker_obj.info
 
-            # --- START OF FIX: Add a robust check for the main info object ---
-            # This prevents all downstream errors if the initial API call fails.
-            if not isinstance(info, dict) or len(info) <= 1: # Check if it's not a dict or is empty
-                print(f"[{symbol}] yfinance info object is not a valid dictionary. Aborting fundamental fetch.")
+            if not isinstance(info, dict) or len(info) <= 1:
+                print(f"[{symbol}] yfinance info object is not valid. Aborting fundamental fetch.")
                 return {}
-            # --- END OF FIX ---
 
-            # Get current price early, as it's needed for earnings price change
-            current_price = info.get('currentPrice') or info.get('regularMarketPrice')
+            current_price = _to_float(info.get('currentPrice') or info.get('regularMarketPrice'))
 
-            # Basic current valuation/size metrics (existing)
-            fundamentals["current_pe"] = info.get("trailingPE")
-            fundamentals["forwardPE"] = info.get("forwardPE")
-            fundamentals["pegRatio"] = info.get("pegRatio")
-            fundamentals["market_cap"] = info.get("marketCap")
-            fundamentals["dividend_yield"] = info.get("dividendYield")
-            fundamentals["beta"] = info.get("beta")
-            fundamentals["short_percent_of_float"] = info.get("shortPercentOfFloat")
-            fundamentals["priceToBook"] = info.get("priceToBook") 
-            fundamentals["enterpriseValue"] = info.get("enterpriseValue")
-            fundamentals["grossMargins"] = info.get("grossMargins")
-            fundamentals["profitMargins"] = info.get("profitMargins")
-            fundamentals["revenueGrowth"] = info.get("revenueGrowth")
-            fundamentals["earningsGrowth"] = info.get("earningsGrowth")
-            
-            # Quality Metrics
-            fundamentals["returnOnEquity"] = info.get("returnOnEquity")
-            fundamentals["debtToEquity"] = info.get("debtToEquity")
+            # Sanitize all numeric fields using the _to_float helper
+            fundamentals["current_pe"] = _to_float(info.get("trailingPE"))
+            fundamentals["forwardPE"] = _to_float(info.get("forwardPE"))
+            fundamentals["pegRatio"] = _to_float(info.get("pegRatio"))
+            fundamentals["market_cap"] = _to_float(info.get("marketCap"))
+            fundamentals["dividend_yield"] = _to_float(info.get("dividendYield"))
+            fundamentals["beta"] = _to_float(info.get("beta"))
+            fundamentals["short_percent_of_float"] = _to_float(info.get("shortPercentOfFloat"))
+            fundamentals["priceToBook"] = _to_float(info.get("priceToBook"))
+            fundamentals["enterpriseValue"] = _to_float(info.get("enterpriseValue"))
+            fundamentals["grossMargins"] = _to_float(info.get("grossMargins"))
+            fundamentals["profitMargins"] = _to_float(info.get("profitMargins"))
+            fundamentals["revenueGrowth"] = _to_float(info.get("revenueGrowth"))
+            fundamentals["earningsGrowth"] = _to_float(info.get("earningsGrowth"))
+            fundamentals["returnOnEquity"] = _to_float(info.get("returnOnEquity"))
+            fundamentals["debtToEquity"] = _to_float(info.get("debtToEquity"))
 
+            # In providers.py, find this block within FundamentalDataProvider.fetch:
             try:
-                # Fetch recommendations
                 recs = ticker_obj.recommendations
                 if recs is not None and not recs.empty:
-                    fundamentals["recommendations"] = recs.tail(5)
+                    # FIX: Convert the DataFrame to a JSON-serializable format (list of dicts)
+                    # We'll also specifically select columns that are useful for caching if needed
+                    # Or, if only summary is needed, this can be even more simplified.
+                    # For now, let's keep the structure that _update_analyst_ratings expects.
+                    # _update_analyst_ratings expects recs.iloc[-1] and then specific columns.
+                    # So, saving the whole DataFrame as a list of dicts is too verbose.
+                    # Let's save only the latest rating as a dictionary to avoid DataFrame serialization.
+                    
+                    # If you want to keep the full recommendations history,
+                    # you must convert the DataFrame to a list of records.
+                    # For a simple fix that allows JSON serialization:
+                    fundamentals["recommendations"] = recs.to_dict(orient='records') # Convert entire DataFrame to list of dicts
+                    
+                    # Or, if only the latest is truly needed for caching:
+                    # if not recs.empty:
+                    #     latest_ratings = recs.iloc[-1].to_dict()
+                    #     fundamentals["recommendations"] = latest_ratings
+                    # else:
+                    #     fundamentals["recommendations"] = {}
+                else:
+                    fundamentals["recommendations"] = [] # Ensure it's an empty list if no recs
             except Exception as e:
-                print(f"Could not fetch recommendations for {symbol}: {e}")
+                print(f"Could not fetch or process recommendations for {symbol}: {e}")
+                fundamentals["recommendations"] = [] # Ensure it's an empty list on error
 
-            # Analyst Price Targets
-            fundamentals["analyst_target_mean_price"] = info.get("targetMeanPrice")
-            fundamentals["analyst_target_high_price"] = info.get("targetHighPrice")
-            fundamentals["analyst_target_low_price"] = info.get("targetLowPrice")
-            fundamentals["analyst_target_median_price"] = info.get("targetMedianPrice")
+            fundamentals["analyst_target_mean_price"] = _to_float(info.get("targetMeanPrice"))
+            fundamentals["analyst_target_high_price"] = _to_float(info.get("targetHighPrice"))
+            fundamentals["analyst_target_low_price"] = _to_float(info.get("targetLowPrice"))
+            fundamentals["analyst_target_median_price"] = _to_float(info.get("targetMedianPrice"))
 
-            # Historical P/E Calculation (Preserved Logic)
             quarterly_financials_df = ticker_obj.quarterly_financials
-            
             if (quarterly_financials_df is not None and not quarterly_financials_df.empty and
                 'Basic EPS' in quarterly_financials_df.index):
 
@@ -617,13 +685,13 @@ class FundamentalDataProvider(DataProvider):
 
                 if len(eps_series) >= 4:
                     ttm_eps_series = eps_series.rolling(window=4, min_periods=4).sum()
-                    price_df = self.price_provider.fetch(symbol, period="5y", interval="1mo") 
-                    
+                    price_df = self.price_provider.fetch(symbol, period="5y", interval="1mo")
+
                     if not price_df.empty and 'Close' in price_df.columns:
                         price_df['Close'] = pd.to_numeric(price_df['Close'], errors='coerce')
                         min_date = max(price_df.index.min(), ttm_eps_series.index.min())
-                        max_date = min(price_df.index.max(), ttm_eps_series.index.max()) 
-                        
+                        max_date = min(price_df.index.max(), ttm_eps_series.index.max())
+
                         if min_date < max_date:
                             full_date_range = pd.date_range(start=min_date, end=max_date, freq='D')
                             ttm_eps_daily = ttm_eps_series.reindex(full_date_range).ffill()
@@ -631,10 +699,10 @@ class FundamentalDataProvider(DataProvider):
                             historical_pe = aligned_prices / ttm_eps_daily
                             
                             historical_pe = historical_pe[
-                                historical_pe.notna() & (historical_pe != np.inf) & 
+                                historical_pe.notna() & (historical_pe != np.inf) &
                                 (historical_pe != -np.inf) & (ttm_eps_daily != 0)
                             ]
-                            historical_pe = historical_pe[(historical_pe > 0) & (historical_pe < 1000)] 
+                            historical_pe = historical_pe[(historical_pe > 0) & (historical_pe < 1000)]
 
                             if not historical_pe.empty:
                                 fundamentals["historical_pe_avg"] = historical_pe.mean()
@@ -643,7 +711,6 @@ class FundamentalDataProvider(DataProvider):
                                 fundamentals["historical_pe_max"] = historical_pe.max()
                                 fundamentals["historical_pe_std"] = historical_pe.std()
             
-            # Recent Earnings Report Details (Preserved Logic)
             try:
                 earnings_dates_df = ticker_obj.earnings_dates
                 if earnings_dates_df is not None and not earnings_dates_df.empty:
@@ -653,12 +720,11 @@ class FundamentalDataProvider(DataProvider):
                         latest_report_row = past_earnings_dates_df.sort_index(ascending=False).iloc[0]
                         
                         report_date = latest_report_row.name.strftime("%Y-%m-%d")
-                        reported_eps = latest_report_row.get("Reported EPS")
-                        estimated_eps = latest_report_row.get("Estimated EPS")
-                        surprise_pct = latest_report_row.get("Surprise(%)")
+                        reported_eps = _to_float(latest_report_row.get("Reported EPS"))
+                        estimated_eps = _to_float(latest_report_row.get("Estimated EPS"))
+                        surprise_pct = _to_float(latest_report_row.get("Surprise(%)"))
 
-                        if (surprise_pct is None and reported_eps is not None and estimated_eps is not None and
-                            isinstance(reported_eps, (int, float)) and isinstance(estimated_eps, (int, float)) and estimated_eps != 0):
+                        if (surprise_pct is None and reported_eps is not None and estimated_eps is not None and estimated_eps != 0):
                             surprise_pct = ((reported_eps - estimated_eps) / abs(estimated_eps)) * 100
                             
                         fundamentals["latest_earnings_report"] = {
@@ -690,6 +756,8 @@ class FundamentalDataProvider(DataProvider):
         except Exception as e:
             print(f"Error fetching fundamental data for {symbol}: {e}")
             return {}
+
+
 # In data/providers.py, add this new class
 class FinnhubProfileProvider(DataProvider):
     """Fetches company profile data from the reliable Finnhub API."""
@@ -720,10 +788,13 @@ class FinnhubProfileProvider(DataProvider):
             print(f"Error fetching Finnhub profile for {symbol}: {e}")
             return {} # Return empty dict on any failure
         
-# In data/providers.py, add this new class
+# In data/providers.py, find and REPLACE the FinnhubFundamentalsProvider class with this:
 
 class FinnhubFundamentalsProvider(DataProvider):
-    """Fetches key financial metrics from the reliable Finnhub API."""
+    """
+    Fetches key financial metrics from the reliable Finnhub API and
+    sanitizes formatted numbers into proper floating-point values.
+    """
     def __init__(self, api_key: str):
         self.api_key = api_key
 
@@ -739,18 +810,19 @@ class FinnhubFundamentalsProvider(DataProvider):
                 return {}
 
             # IMPORTANT: Normalize Finnhub's data keys to match what the UI expects from yfinance
+            # And apply _to_float to all numeric values fetched from Finnhub
             fundamentals = {
-                "trailingPE": data.get("peTTM"),
-                "forwardPE": data.get("forwardPE"),
-                "pegRatio": data.get("pegRatioTTM"),
-                "marketCap": data.get("marketCapitalization"),
-                "dividendYield": data.get("dividendYield"),
-                "beta": data.get("beta"),
-                "fiftyTwoWeekLow": data.get("52WeekLow"),
-                "fiftyTwoWeekHigh": data.get("52WeekHigh"),
-                "averageVolume": data.get("10DayAverageTradingVolume"),
-                "trailingEps": data.get("epsTTM")
-                # Add any other key mappings here if needed
+                "trailingPE": _to_float(data.get("peTTM")),
+                "forwardPE": _to_float(data.get("forwardPE")),
+                "pegRatio": _to_float(data.get("pegRatioTTM")),
+                "marketCap": _to_float(data.get("marketCapitalization")),
+                "dividendYield": _to_float(data.get("dividendYield")),
+                "beta": _to_float(data.get("beta")),
+                "fiftyTwoWeekLow": _to_float(data.get("52WeekLow")),
+                "fiftyTwoWeekHigh": _to_float(data.get("52WeekHigh")),
+                "averageVolume": _to_float(data.get("10DayAverageTradingVolume")),
+                "trailingEps": _to_float(data.get("epsTTM"))
+                # Add any other key mappings here if needed, always applying _to_float
             }
             return fundamentals
         except Exception as e:

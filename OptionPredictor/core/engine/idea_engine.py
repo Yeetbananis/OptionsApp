@@ -275,24 +275,24 @@ class FundamentalValueDetector(DetectorBase):
     def run(self, symbol: str, m: dict) -> List[Idea] | None:
         ideas = []
 
-        # Core Fundamental Metrics
-        current_pe = m.get("current_pe")
-        historical_pe_avg = m.get("historical_pe_avg")
-        peg_ratio = m.get("peg_ratio")
-        earnings_growth = m.get("earningsGrowth")
-        revenue_growth = m.get("revenueGrowth")
-        market_cap = m.get("market_cap")
-        current_price = m.get("last_price") 
-        
-        # New Quality Metrics
-        profit_margins = m.get("profitMargins")
-        gross_margins = m.get("grossMargins")
-        return_on_equity = m.get("returnOnEquity")
-        debt_to_equity = m.get("debtToEquity")
+        from core.models.providers import _to_float
 
-        # New Valuation Metrics
-        analyst_target_mean = m.get("analyst_target_mean_price")
-        price_to_book = m.get("priceToBook")
+        current_pe = _to_float(m.get("current_pe"))
+        historical_pe_avg = _to_float(m.get("historical_pe_avg"))
+        peg_ratio = _to_float(m.get("peg_ratio"))
+        earnings_growth = _to_float(m.get("earningsGrowth"))
+        revenue_growth = _to_float(m.get("revenueGrowth"))
+        market_cap = _to_float(m.get("market_cap"))
+        current_price = _to_float(m.get("last_price"))
+
+        profit_margins = _to_float(m.get("profitMargins"))
+        gross_margins = _to_float(m.get("grossMargins"))
+        return_on_equity = _to_float(m.get("returnOnEquity"))
+        debt_to_equity = _to_float(m.get("debtToEquity"))
+
+        analyst_target_mean = _to_float(m.get("analyst_target_mean_price"))
+        price_to_book = _to_float(m.get("priceToBook"))
+
 
         # Helper to avoid adding duplicate ideas based on a primary fundamental insight
         existing_fundamental_idea_titles = set()
@@ -636,12 +636,12 @@ class IdeaEngine:
         self.cache = cache or IdeaCache(ttl_sec=900)
         self.progress_sink = progress_sink 
 
+    # In idea_engine.py, inside IdeaEngine.generate method
     def generate(self, universe: Iterable[str]) -> list[Idea]:
         ideas: list[Idea] = []
-        total_symbols = len(list(universe)) # Get total count for progress
+        total_symbols = len(list(universe))
         processed_symbols = 0
 
-        # get cached macro snapshot, bypass ProviderHub for 'GLOBAL'
         try:
             macro_metrics = self.market_data._read("GLOBAL") or {}
         except Exception:
@@ -651,20 +651,26 @@ class IdeaEngine:
             try:
                 if cached := self.cache.read(sym):
                     ideas.extend(cached)
-                    processed_symbols += 1 # Count cached symbols as processed
+                    processed_symbols += 1
                     if self.progress_sink:
-                        self.progress_sink.put((processed_symbols, total_symbols)) # Send progress
+                        self.progress_sink.put((processed_symbols, total_symbols))
                     continue
 
                 metrics = self.market_data.get_metrics(sym)
                 if metrics.get("error"):
                     print(f"Skipping {sym} due to data error: {metrics['error']}")
-                    processed_symbols += 1 # Count skipped symbols as processed for progress
+                    processed_symbols += 1
                     if self.progress_sink:
-                        self.progress_sink.put((processed_symbols, total_symbols)) # Send progress
+                        self.progress_sink.put((processed_symbols, total_symbols))
                     continue
 
                 full = {**metrics, **macro_metrics}
+
+                # --- NEW DEBUG PRINT ---
+                # Print the entire 'full' metrics dictionary for inspection
+                # This will show if '0m' exists in any field *after* ProviderHub.get
+                print(f"DEBUG: Full metrics for {sym} before detectors: {full}")
+                # --- END NEW DEBUG PRINT ---
 
                 sym_ideas: list[Idea] = []
                 for det in DETECTORS:
@@ -676,17 +682,20 @@ class IdeaEngine:
                             sym_ideas.append(res)
                     except Exception as de:
                         print(f"Detector {det.__class__.__name__} failed on {sym}: {de}")
+                        # If the error is still 'could not convert string to float: '0m'',
+                        # this print will show which detector fails.
 
                 if sym_ideas:
                     self.cache.write(sym, sym_ideas)
                     ideas.extend(sym_ideas)
 
             except Exception as e:
-                print(f"Error processing {sym}: {e}")
-                # Ensure progress is still updated even on a symbol-level error
+                print(f"Error processing {sym} in IdeaEngine.generate: {e}")
+                import traceback
+                traceback.print_exc() # Print full traceback for this high-level error
 
             processed_symbols += 1
             if self.progress_sink:
-                self.progress_sink.put((processed_symbols, total_symbols)) # Send progress
+                self.progress_sink.put((processed_symbols, total_symbols))
 
         return ideas

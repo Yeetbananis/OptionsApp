@@ -1323,12 +1323,18 @@ class HomeDashboard(ttk.Frame):
                 return
             arrow  = "▲" if f["chg_pct"] and f["chg_pct"] > 0 else "▼"
             change = f"{f['chg_pct']:+.2f}%" if f["chg_pct"] is not None else "—"
+             # Safely format 'low' and 'high' to handle None values
+            # If 'low' or 'high' is None, display "N/A" instead of attempting numeric formatting
+            formatted_low = f"{f['low']:,}" if f.get('low') is not None else "N/A"
+            formatted_high = f"{f['high']:,}" if f.get('high') is not None else "N/A"
+
+
             tip.update(
                 f"{ticker} — {f['name']}\n"
                 f"Price: {f['price']:,} {arrow} {change}\n"
                 f"Market Cap: {f['cap']/1e9:.1f} B\n" if f['cap'] else "Market Cap: N/A\n"
                 f"P/E Ratio:  {f['pe'] or '—'}\n"
-                f"Day Range:  {f['low']:,} – {f['high']:,}"
+                f"Day Range:  {formatted_low} – {formatted_high}"
             )
 
         # ── bindings ──────────────────────────────────────────────

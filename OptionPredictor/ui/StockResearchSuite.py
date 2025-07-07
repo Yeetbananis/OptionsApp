@@ -717,13 +717,37 @@ class StockResearchSuite(tk.Toplevel):
 
     def _update_analyst_ratings(self, recs):
         self.analyst_tree.delete(*self.analyst_tree.get_children())
-        if recs is None or recs.empty: self.analyst_tree.insert("", "end", values=("No ratings available.", "")); return
-        latest_ratings = recs.iloc[-1]
+        
+        # Check if recs is None or an empty list
+        # A list does not have '.empty', so check its length instead.
+        if recs is None or not recs: # 'not recs' handles empty list []
+            self.analyst_tree.insert("", "end", values=("No ratings available.", "")); 
+            return
+
+        # recs is now a list of dictionaries.
+        # We need to ensure we're getting the *latest* rating from this list.
+        # If the list is sorted by date (most recent last, as from .to_dict(orient='records')),
+        # then the last item is the latest. Assuming the sorting from yfinance.
+        if isinstance(recs, list) and recs:
+            latest_ratings_dict = recs[-1] # Get the last dictionary (latest rating)
+        else: # Fallback if for some reason recs isn't a list or is malformed
+            self.analyst_tree.insert("", "end", values=("No ratings available.", "")); 
+            return
+
         rating_columns = ['strongBuy', 'buy', 'hold', 'sell', 'strongSell']
-        ratings_data = [(col.replace('strong', 'Strong ').capitalize(), latest_ratings[col]) for col in rating_columns if col in latest_ratings]
+        
+        ratings_data = []
+        for col in rating_columns:
+            # Safely get the value from the dictionary
+            if col in latest_ratings_dict and latest_ratings_dict[col] is not None:
+                rating_name = col.replace('strong', 'Strong ').capitalize()
+                analysts_count = latest_ratings_dict[col]
+                ratings_data.append((rating_name, analysts_count))
+
+        # Create DataFrame for display
         recs_df = pd.DataFrame(ratings_data, columns=["Rating", "Analysts"])
         _fill(self.analyst_tree, recs_df)
-
+        
     def _open_article(self, event):
         selection = self.news_tree.selection()
         if not selection: return
