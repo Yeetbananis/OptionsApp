@@ -324,16 +324,38 @@ class StockResearchSuite(tk.Toplevel):
         self.options_tree = _tree(self.options_tab)
 
     def _build_technicals_tab(self):
+        # Configure the grid to have three rows, one for each panel
         self.technicals_tab.rowconfigure(0, weight=1)
+        self.technicals_tab.rowconfigure(1, weight=1)
+        self.technicals_tab.rowconfigure(2, weight=2) # Give more weight to the new peer table
         self.technicals_tab.columnconfigure(0, weight=1)
-        self.technicals_tab.columnconfigure(1, weight=1)
+
+        # 1. Technical Indicators Frame (top)
         tech_frame = ttk.LabelFrame(self.technicals_tab, text="Technical Indicators", padding=10)
-        tech_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        tech_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
         self.tech_tree = _tree(tech_frame)
+
+        # 2. Fundamental Ratios Frame (middle)
         funda_frame = ttk.LabelFrame(self.technicals_tab, text="Fundamental Ratios", padding=10)
-        funda_frame.grid(row=0, column=1, sticky="nsew")
+        funda_frame.grid(row=1, column=0, sticky="nsew", pady=5)
         self.funda_tree = _tree(funda_frame)
 
+        # 3. Peer Comparison Frame (bottom)
+        peer_frame = ttk.LabelFrame(self.technicals_tab, text="Peer Comparison", padding=10)
+        peer_frame.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
+        self.peer_tree = _tree(peer_frame)
+
+
+    def _redraw_chart_with_period(self, days: int | None):
+        """Slices the main DataFrame and calls the plot function."""
+        if self.price_df is None or self.price_df.empty:
+            return
+
+        # If days is None, use the whole dataframe ("All" button)
+        # Otherwise, get the last N days.
+        df_to_plot = self.price_df if days is None else self.price_df.tail(days)
+        
+        self._update_chart(df_to_plot)
 
     def _on_research_click(self, event=None):
         # FIX: Change the boolean flag to a counter, reset it on each manual click.
@@ -385,6 +407,14 @@ class StockResearchSuite(tk.Toplevel):
             else:
                 self.after_id = self.after(100, self._poll_data_queue)
 
+
+    def _update_peer_comparison(self, df):
+        if df is None or df.empty:
+            _fill(self.peer_tree, pd.DataFrame(columns=['Message']))
+            if self.peer_tree.get_children(): self.peer_tree.item(self.peer_tree.get_children()[0], values=("No peer data available.",))
+            return
+        _fill(self.peer_tree, df)
+
     # In ui/StockResearchSuite.py, REPLACE this method
     def _update_ui_component(self, key, payload):
         if payload is None: return
@@ -409,6 +439,7 @@ class StockResearchSuite(tk.Toplevel):
             elif key == "financials": self._update_financials(payload)
             elif key == "news": self._update_news_and_sentiment(payload)
             elif key == "options": self._update_options_tab(payload)
+            elif key == "peers": self._update_peer_comparison(payload)
         except Exception as e:
             import traceback
             print(f"Error updating UI for component '{key}': {e}")
@@ -449,46 +480,42 @@ class StockResearchSuite(tk.Toplevel):
     def _update_performance_snapshot(self, data):
         def fmt_num(value, format_str="{:,.2f}"):
             return format_str.format(value) if isinstance(value, (int, float)) else "N/A"
+        
         def fmt_large_num(n):
+            """Correctly formats large numbers into T, B, M suffixes."""
             if not isinstance(n, (int, float)): return "N/A"
-            if n > 1e12: return f"${n/1e12:.2f} T"
-            if n > 1e9: return f"${n/1e9:.2f} B"
-            if n > 1e6: return f"${n/1e6:.2f} M"
+            if n >= 1e12: return f"${n/1e12:.2f} T"
+            if n >= 1e9: return f"${n/1e9:.2f} B"
+            if n >= 1e6: return f"${n/1e6:.2f} M"
             return f"${n:,.2f}"
+
+        def fmt_volume(n):
+            """Correctly formats volume numbers into B, M, K suffixes."""
+            if not isinstance(n, (int, float)): return "N/A"
+            if n >= 1000: return f"{n/1000:.2f} B"
+            return f"{n:.2f} M"
 
         for widget in self.perf_frame.winfo_children(): widget.destroy()
         
-        # --- FIX: Use safe .get() with defaults for all values ---
+        market_cap_val = data.get("marketCap")
+        avg_volume_val = data.get('averageVolume')
         low_52 = data.get('fiftyTwoWeekLow')
         high_52 = data.get('fiftyTwoWeekHigh')
         range_52_str = f"{fmt_num(low_52)} - {fmt_num(high_52)}" if low_52 and high_52 else "N/A"
         
-        div_yield = data.get('dividendYield')
-        yield_str = f"{div_yield * 100:.2f}%" if isinstance(div_yield, (int, float)) else "N/A"
+        # --- REMOVED dividend yield logic ---
 
         metrics = {
-            "Market Cap": fmt_large_num(data.get("marketCap")),
-            "Avg. Volume": fmt_num(data.get('averageVolume'), format_str="{:,.0f}"),
+            "Market Cap": fmt_large_num(market_cap_val),
+            "Avg. Volume (10d)": fmt_volume(avg_volume_val),
             "52 Week Range": range_52_str,
             "P/E Ratio": fmt_num(data.get('current_pe')),
             "EPS": fmt_num(data.get('trailingEps')),
-            "Dividend Yield": yield_str 
         }
         
         for i, (label, value) in enumerate(metrics.items()):
             ttk.Label(self.perf_frame, text=f"{label}:", font=("Segoe UI", 9, "bold")).grid(row=i, column=0, sticky="w", pady=2)
             ttk.Label(self.perf_frame, text=value).grid(row=i, column=1, sticky="w", padx=5)
-
-    def _redraw_chart_with_period(self, days: int | None):
-        """Slices the main DataFrame and calls the plot function."""
-        if self.price_df is None or self.price_df.empty:
-            return
-
-        # If days is None, use the whole dataframe ("All" button)
-        # Otherwise, get the last N days.
-        df_to_plot = self.price_df if days is None else self.price_df.tail(days)
-        
-        self._update_chart(df_to_plot)
 
     def _update_chart(self, df):
         """The actual plotting function that draws the mplfinance chart."""
@@ -765,7 +792,7 @@ class StockResearchSuite(tk.Toplevel):
         self.news_sentiment_label.config(text="Fetching...")
         if self.company_logo: self.logo_label.config(image=''); self.company_logo = None
 
-        # --- FIX: Only clear frames that hold dynamically generated content ---
+        # Only clear frames that hold dynamically generated content ---
         frames_to_clear = [self.chart_frame, self.financial_chart_frame, self.perf_frame]
         for frame in frames_to_clear:
             for widget in frame.winfo_children():
@@ -774,11 +801,11 @@ class StockResearchSuite(tk.Toplevel):
         # Clear text widgets
         self.profile_text.config(state="normal"); self.profile_text.delete("1.0", tk.END); self.profile_text.config(state="disabled")
 
-        # --- FIX: Safely clear all Treeviews without destroying them ---
-        # The sidebar frames are no longer touched, only the Treeviews inside them.
-        for tv in [self.income_tv, self.balance_tv, self.cash_tv, self.news_tree, 
-                   self.options_tree, self.tech_tree, self.funda_tree, 
-                   self.analyst_tree, self.events_tree, self.insider_tree]:
+       # Safely clear all Treeviews without destroying them ---
+        for tv in [self.income_tv, self.balance_tv, self.cash_tv, self.news_tree,
+                   self.options_tree, self.tech_tree, self.funda_tree,
+                   self.analyst_tree, self.events_tree, self.insider_tree,
+                   self.peer_tree]: 
             if tv.winfo_exists():
                 tv.delete(*tv.get_children())
         

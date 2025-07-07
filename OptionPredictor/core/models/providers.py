@@ -600,9 +600,6 @@ def _to_float(val: Any) -> float | None:
         print(f"DEBUG: _to_float failed direct conversion for '{val_str}' (original: '{val}'). Returning None.")
         return None
 
-# =============================================================
-# == REPLACE THE ENTIRE FundamentalDataProvider CLASS WITH THIS ==
-# =============================================================
 class FundamentalDataProvider(DataProvider):
     """
     Fetches fundamental data and sanitizes formatted numbers (e.g., '1.5b')
@@ -629,7 +626,8 @@ class FundamentalDataProvider(DataProvider):
             fundamentals["forwardPE"] = _to_float(info.get("forwardPE"))
             fundamentals["pegRatio"] = _to_float(info.get("pegRatio"))
             fundamentals["market_cap"] = _to_float(info.get("marketCap"))
-            fundamentals["dividend_yield"] = _to_float(info.get("dividendYield"))
+            # --- FIX: Standardize the 'dividendYield' key to camelCase ---
+            fundamentals["dividendYield"] = _to_float(info.get("dividendYield"))
             fundamentals["beta"] = _to_float(info.get("beta"))
             fundamentals["short_percent_of_float"] = _to_float(info.get("shortPercentOfFloat"))
             fundamentals["priceToBook"] = _to_float(info.get("priceToBook"))
@@ -757,7 +755,6 @@ class FundamentalDataProvider(DataProvider):
             print(f"Error fetching fundamental data for {symbol}: {e}")
             return {}
 
-
 # In data/providers.py, add this new class
 class FinnhubProfileProvider(DataProvider):
     """Fetches company profile data from the reliable Finnhub API."""
@@ -788,8 +785,6 @@ class FinnhubProfileProvider(DataProvider):
             print(f"Error fetching Finnhub profile for {symbol}: {e}")
             return {} # Return empty dict on any failure
         
-# In data/providers.py, find and REPLACE the FinnhubFundamentalsProvider class with this:
-
 class FinnhubFundamentalsProvider(DataProvider):
     """
     Fetches key financial metrics from the reliable Finnhub API and
@@ -809,20 +804,25 @@ class FinnhubFundamentalsProvider(DataProvider):
             if not data:
                 return {}
 
-            # IMPORTANT: Normalize Finnhub's data keys to match what the UI expects from yfinance
-            # And apply _to_float to all numeric values fetched from Finnhub
+            mkt_cap_millions = _to_float(data.get("marketCapitalization"))
+            full_market_cap = mkt_cap_millions * 1e6 if mkt_cap_millions is not None else None
+            
+            dividend_yield_percent = _to_float(data.get("dividendYieldTTM"))
+            dividend_yield_decimal = dividend_yield_percent / 100.0 if dividend_yield_percent is not None else None
+
             fundamentals = {
                 "trailingPE": _to_float(data.get("peTTM")),
                 "forwardPE": _to_float(data.get("forwardPE")),
                 "pegRatio": _to_float(data.get("pegRatioTTM")),
-                "marketCap": _to_float(data.get("marketCapitalization")),
-                "dividendYield": _to_float(data.get("dividendYield")),
+                "marketCap": full_market_cap,
+                "dividendYield": dividend_yield_decimal,
                 "beta": _to_float(data.get("beta")),
                 "fiftyTwoWeekLow": _to_float(data.get("52WeekLow")),
                 "fiftyTwoWeekHigh": _to_float(data.get("52WeekHigh")),
                 "averageVolume": _to_float(data.get("10DayAverageTradingVolume")),
-                "trailingEps": _to_float(data.get("epsTTM"))
-                # Add any other key mappings here if needed, always applying _to_float
+                "trailingEps": _to_float(data.get("epsTTM")),
+                # --- FIX: Add Price-to-Book ratio from the correct API key ---
+                "priceToBook": _to_float(data.get("pbAnnual")),
             }
             return fundamentals
         except Exception as e:
@@ -956,7 +956,72 @@ class OptionsChainProvider(DataProvider):
         except Exception as e:
             print(f"Error fetching options chain for {symbol}: {e}")
             return {}
+        
+class PeerComparisonProvider(DataProvider):
+    """
+    Fetches a list of peers from Finnhub and then gathers key fundamental
+    metrics for each peer to create a comparison table.
+    """
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.fundamentals_provider = FinnhubFundamentalsProvider(api_key)
 
+    @lru_cache(maxsize=128)
+    def fetch(self, symbol: str, **kwargs) -> pd.DataFrame:
+        print(f"[{symbol}] Fetching peer comparison data...")
+        peers_url = f"https://finnhub.io/api/v1/stock/peers?symbol={symbol}&token={self.api_key}"
+        try:
+            response = requests.get(peers_url, timeout=10)
+            response.raise_for_status()
+            peer_tickers = response.json()
+
+            if not peer_tickers:
+                print(f"[{symbol}] No peers found.")
+                return pd.DataFrame()
+
+            # --- FIX: Ensure the primary symbol appears only once ---
+            unique_peers = set(peer_tickers)
+            unique_peers.discard(symbol)
+            comparison_list = [symbol] + list(unique_peers)
+            comparison_list = comparison_list[:10]
+
+            all_peers_data = []
+            for peer_symbol in comparison_list:
+                funda_data = self.fundamentals_provider.fetch(peer_symbol)
+                if funda_data:
+                    # --- FIX: Removed "Div. Yield" ---
+                    all_peers_data.append({
+                        "Ticker": peer_symbol,
+                        "Market Cap": funda_data.get("marketCap"),
+                        "P/E Ratio": funda_data.get("trailingPE"),
+                        "P/B Ratio": funda_data.get("priceToBook"),
+                        "EPS": funda_data.get("trailingEps")
+                    })
+
+            if not all_peers_data:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(all_peers_data)
+            df = df.set_index("Ticker")
+
+            def fmt_large_num(n):
+                if not isinstance(n, (int, float)): return "N/A"
+                if abs(n) >= 1e12: return f"{n/1e12:.2f} T"
+                if abs(n) >= 1e9: return f"{n/1e9:.2f} B"
+                if abs(n) >= 1e6: return f"{n/1e6:.2f} M"
+                return f"{n:,.0f}"
+
+            df["Market Cap"] = df["Market Cap"].apply(fmt_large_num)
+            
+            for col in ["P/E Ratio", "P/B Ratio", "EPS"]:
+                df[col] = df[col].apply(lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else "N/A")
+
+            return df.reset_index()
+
+        except Exception as e:
+            print(f"Error fetching peer comparison data for {symbol}: {e}")
+            return pd.DataFrame()
+        
 # --- ADAPTERS FOR CLEAN METRICS ---
 class IVAdapter:
     @staticmethod

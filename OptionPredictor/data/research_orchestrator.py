@@ -6,7 +6,7 @@ import yfinance as yf
 from curl_cffi import requests as cffi_requests
 import functools
 
-from core.models.providers import ProviderHub, FundamentalDataProvider, OptionsChainProvider, FinnhubProfileProvider, FinnhubFundamentalsProvider
+from core.models.providers import ProviderHub, FundamentalDataProvider, OptionsChainProvider, FinnhubProfileProvider, FinnhubFundamentalsProvider, PeerComparisonProvider
 from tools.StockEventTracker import StockEventTracker
 
 # In data/research_orchestrator.py, REPLACE the decorator
@@ -54,6 +54,7 @@ class ResearchOrchestrator:
         self.finnhub_profile_provider = FinnhubProfileProvider(finnhub_key)
         self.event_tracker = StockEventTracker(alpha_api_key="JJDYBMACWY5SUU7M", finnhub_api_key=finnhub_key)
         self.finnhub_fundamentals_provider = FinnhubFundamentalsProvider(finnhub_key)
+        self.peer_provider = PeerComparisonProvider(finnhub_key)
 
     @retry_on_failure(retries=3, delay=1, default_value={})
     def _fetch_profile_data(self, ticker, session=None):
@@ -133,6 +134,7 @@ class ResearchOrchestrator:
             "news": lambda: self.event_tracker.scrape_google_news_rss_articles_multiple_queries(ticker),
             "options": lambda: self._fetch_options_data(ticker, session=session),
             "profile": lambda: self._fetch_profile_data(ticker, session=session),
+            "peers": lambda: self.peer_provider.fetch(ticker),
         }
 
         self.threads = []
