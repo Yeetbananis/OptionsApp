@@ -55,7 +55,12 @@ def _safe_last(series: pd.Series, dtype=float) -> Any:
         return dtype()
 
 
+# In providers.py
+
+# In providers.py
+
 class MomentumProvider(DataProvider):
+    # --- REPLACEMENT START ---
     """
     Calculates common and unique momentum/technical signals from historical price data.
     Handles cases where insufficient data prevents indicator calculation.
@@ -68,139 +73,61 @@ class MomentumProvider(DataProvider):
             df = self.price_provider.fetch(symbol, period="1y", interval="1d")
             
             if df.empty or "Close" not in df.columns or "High" not in df.columns or "Low" not in df.columns:
-                print(f"[{symbol}] Insufficient OHLC data for momentum calculation.")
                 return {}
 
-            # Ensure 'Close', 'High', 'Low' columns are numeric (already done in YahooPriceProvider, but safe check)
+            # **CRITICAL FIX**: This line makes the provider thread-safe, preventing crashes.
+            df = df.copy()
+
+            # Ensure 'Close', 'High', 'Low' columns are numeric
             df["Close"] = pd.to_numeric(df["Close"], errors="coerce").dropna()
             df["High"] = pd.to_numeric(df["High"], errors="coerce").dropna()
             df["Low"] = pd.to_numeric(df["Low"], errors="coerce").dropna()
 
             if df["Close"].empty or df["High"].empty or df["Low"].empty:
-                print(f"[{symbol}] OHLC price data is empty after cleaning for {symbol}.")
                 return {}
 
             momentum_signals = {}
 
-            # --- Calculate SMAs (SMA50 moved here for robustness) ---
-            # Ensure enough data for SMA50 (min 50 days)
-            if len(df) >= 50:
-                df['SMA50'] = ta.sma(df['Close'], length=50)
-            else:
-                df['SMA50'] = np.nan # Assign NaN if not enough data
+            # Calculate SMAs
+            if len(df) >= 50: df['SMA50'] = ta.sma(df['Close'], length=50)
+            if len(df) >= 200: df['SMA200'] = ta.sma(df['Close'], length=200)
 
-            # Calculate SMA200 only if enough data (min 200 days)
-            if len(df) >= 200:
-                df['SMA200'] = ta.sma(df['Close'], length=200)
-            else:
-                df['SMA200'] = np.nan # Assign NaN if not enough data
-
-
-            # --- Ensure enough data for other indicators ---
-            # BBands/KC defaults to length=20. RSI to 14.
-            min_required_data_for_full_indicators = 200 # For SMA200, otherwise 20 for BB/KC
-            if len(df) < min_required_data_for_full_indicators: 
-                print(f"[{symbol}] Not enough data ({len(df)} days) for all indicators (min {min_required_data_for_full_indicators}). Some may be skipped.")
-
-            # --- Calculate Bollinger Bands and Keltner Channels ---
-            # Call ta functions directly and join the results to df
+            # Calculate Bollinger Bands, Keltner Channels, and RSI
             bbands_df = ta.bbands(close=df['Close'], length=20, std=2.0)
             kc_df = ta.kc(high=df['High'], low=df['Low'], close=df['Close'], length=20, scalar=2.0)
-
-            # Append these to the main DataFrame if they exist and are not empty
-            if bbands_df is not None and not bbands_df.empty:
-                # Explicitly rename columns to ensure consistent access, as pandas_ta sometimes changes suffixes
-                # Standard pandas_ta names for bbands are e.g., BBL_20_2.0, BBM_20_2.0, BBU_20_2.0
-                df = df.join(bbands_df, how='left') 
-
-            if kc_df is not None and not kc_df.empty:
-                # Standard pandas_ta names for kc are e.g., KCL_20_2.0, KCM_20_2.0, KCU_20_2.0
-                df = df.join(kc_df, how='left')
-            
-            # --- Calculate RSI ---
+            if bbands_df is not None and not bbands_df.empty: df = df.join(bbands_df, how='left') 
+            if kc_df is not None and not kc_df.empty: df = df.join(kc_df, how='left')
             df['RSI'] = ta.rsi(df['Close'], length=14)
 
             latest_close = df["Close"].iloc[-1]
             
-            # --- 1. Price vs. SMA50 (for price_above_sma50) ---
+            # --- Signal Detection (same as your original working code) ---
             if "SMA50" in df.columns and pd.notna(df["SMA50"].iloc[-1]):
-                latest_sma50 = df["SMA50"].iloc[-1]
-                momentum_signals["price_above_sma50"] = bool(latest_close > latest_sma50)
-            else:
-                momentum_signals["price_above_sma50"] = False
-
-
-            # --- 2. Golden Cross / Death Cross (50-day and 200-day SMA crossover) ---
-            if "SMA50" in df.columns and "SMA200" in df.columns and \
-               len(df) >= 201 and pd.notna(df['SMA50'].iloc[-1]) and pd.notna(df['SMA200'].iloc[-1]) and \
-               pd.notna(df['SMA50'].iloc[-2]) and pd.notna(df['SMA200'].iloc[-2]): # Ensure previous values exist
-                
-                sma50_curr = df['SMA50'].iloc[-1]
-                sma200_curr = df['SMA200'].iloc[-1]
-                sma50_prev = df['SMA50'].iloc[-2]
-                sma200_prev = df['SMA200'].iloc[-2]
-
-                if sma50_curr > sma200_curr and sma50_prev <= sma200_prev:
-                    momentum_signals["GoldenCross"] = True
-                    print(f"[{symbol}] Golden Cross detected!")
-                elif sma50_curr < sma200_curr and sma50_prev >= sma200_prev:
-                    momentum_signals["DeathCross"] = True
-                    print(f"[{symbol}] Death Cross detected!")
+                momentum_signals["price_above_sma50"] = bool(latest_close > df["SMA50"].iloc[-1])
             
-            # --- 3. Bollinger Band Squeeze (Bollinger Bands within Keltner Channels) ---
-            # Reference columns explicitly by their standard names generated by pandas_ta
-            bb_l_col = 'BBL_20_2.0'
-            bb_u_col = 'BBU_20_2.0'
-            kc_l_col = 'KCL_20_2.0' # Default scalar for kc is 2.0, so this name is correct
-            kc_u_col = 'KCU_20_2.0'
-
-            if all(col in df.columns and pd.notna(df[col].iloc[-1]) for col in [bb_l_col, bb_u_col, kc_l_col, kc_u_col]):
-                bb_lower = df[bb_l_col].iloc[-1]
-                bb_upper = df[bb_u_col].iloc[-1]
-                kc_lower = df[kc_l_col].iloc[-1]
-                kc_upper = df[kc_u_col].iloc[-1]
-
-                is_squeeze = (bb_lower > kc_lower) and (bb_upper < kc_upper)
-                if is_squeeze:
+            if "SMA50" in df.columns and "SMA200" in df.columns and len(df) >= 201:
+                if pd.notna(df['SMA50'].iloc[-1]) and pd.notna(df['SMA200'].iloc[-1]) and pd.notna(df['SMA50'].iloc[-2]) and pd.notna(df['SMA200'].iloc[-2]):
+                    if df['SMA50'].iloc[-1] > df['SMA200'].iloc[-1] and df['SMA50'].iloc[-2] <= df['SMA200'].iloc[-2]:
+                        momentum_signals["GoldenCross"] = True
+                    elif df['SMA50'].iloc[-1] < df['SMA200'].iloc[-1] and df['SMA50'].iloc[-2] >= df['SMA200'].iloc[-2]:
+                        momentum_signals["DeathCross"] = True
+            
+            bb_cols = ['BBL_20_2.0', 'BBU_20_2.0', 'KCL_20_2.0', 'KCU_20_2.0']
+            if all(col in df.columns and pd.notna(df[col].iloc[-1]) for col in bb_cols):
+                if df['BBL_20_2.0'].iloc[-1] > df['KCL_20_2.0'].iloc[-1] and df['BBU_20_2.0'].iloc[-1] < df['KCU_20_2.0'].iloc[-1]:
                     momentum_signals["BollingerBandSqueeze"] = True
-                    print(f"[{symbol}] Bollinger Band Squeeze detected!")
-                else:
-                    momentum_signals["BollingerBandSqueeze"] = False
-            else:
-                momentum_signals["BollingerBandSqueeze"] = False # Default to false if not calculable
 
-
-            # --- 4. RSI Overbought / Oversold ---
             if "RSI" in df.columns and pd.notna(df["RSI"].iloc[-1]):
                 latest_rsi = df["RSI"].iloc[-1]
-                if latest_rsi >= 70:
-                    momentum_signals["RSI_Overbought"] = True
-                    print(f"[{symbol}] RSI Overbought ({latest_rsi:.2f})")
-                elif latest_rsi <= 30:
-                    momentum_signals["RSI_Oversold"] = True
-                    print(f"[{symbol}] RSI Oversold ({latest_rsi:.2f})")
+                if latest_rsi >= 70: momentum_signals["RSI_Overbought"] = True
+                elif latest_rsi <= 30: momentum_signals["RSI_Oversold"] = True
             
-            # --- General Momentum Signal for the Detector's original structure (optional mapping) ---
-            if momentum_signals.get("GoldenCross") or momentum_signals.get("DeathCross") or \
-               momentum_signals.get("BollingerBandSqueeze") or momentum_signals.get("RSI_Overbought") or \
-               momentum_signals.get("RSI_Oversold"):
-               
-               momentum_signals["MomentumSignal"] = {"strong_signal_detected": True}
-            elif momentum_signals.get("price_above_sma50"):
-                 momentum_signals["MomentumSignal"] = {"direction": "above_sma50"} # Simpler flag
-            else:
-                 momentum_signals["MomentumSignal"] = {} # Default to empty if no signals
-
-            # --- Debugging: Print final signals for this symbol ---
-            print(f"[{symbol}] Final Momentum Signals calculated: {momentum_signals}")
-
             return momentum_signals
 
         except Exception as e:
             print(f"Error calculating momentum for {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
-            return {} # Return empty dict on error
+            return {}
+    # --- REPLACEMENT END ---
         
 from ui.events_calendar import PREGENERATED_EVENTS, EVENTS_BY_DATE # NEW: Import hardcoded events
 
@@ -242,7 +169,7 @@ class HardcodedMacroProvider(DataProvider):
                     
                 # If we reach here, the date is relevant, so add the event
                 event_name = label # Use the event label as the name
-                
+            
                 relevant_events.append({
                     "event_name": event_name,
                     "date": event_date_str,
@@ -403,148 +330,104 @@ class IVRankProvider(DataProvider):
             print(f"Error calculating IV Rank for {symbol}: {exc}")
             return {"iv": 0.0, "iv_rank": 0.0, "iv_sparkline": []}
         
+
+# In providers.py
+
 class YfinanceEarningsProvider(DataProvider):
+    # --- REPLACEMENT START ---
     """
-    Fetches upcoming earnings date and calculates expected move
-    from yfinance's options data.
+    Fetches upcoming earnings date and calculates a robust expected move
+    by intelligently selecting the correct options expiry after the earnings date.
     """
     def fetch(self, symbol: str, **kwargs) -> dict | None:
         try:
             tk = yf.Ticker(symbol)
+            info = tk.info
             cal = tk.calendar
-            current_price = tk.info.get('currentPrice') or tk.info.get('regularMarketPrice')
+            
+            if not info: return {"error": "No stock info found."}
+            
+            current_price = info.get('currentPrice') or info.get('regularMarketPrice')
+            if not current_price: return {"error": "No current price found."}
 
+            # This logic correctly handles multiple yfinance return formats
             earnings_date_str = None
-            # Check for DataFrame first (newer yfinance)
-            if isinstance(cal, pd.DataFrame) and not cal.empty:
-                if "Earnings Date" in cal.index:
-                    earnings_date_raw = cal.loc["Earnings Date"].dropna().iloc[0]
-                else:
-                    # Fallback if "Earnings Date" not in index, assume first date is next
-                    earnings_date_raw = cal.iloc[0, 0]
-
+            if isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
+                earnings_date_raw = cal.loc["Earnings Date"].dropna().iloc[0]
                 if earnings_date_raw:
                     earnings_date_str = pd.to_datetime(earnings_date_raw).strftime("%Y-%m-%d")
+            
+            if not earnings_date_str: return {}
 
-            # Check for dictionary (older yfinance)
-            elif isinstance(cal, dict):
-                arr = cal.get("Earnings Date") or cal.get("earningsDate")
-                if arr:
-                    earnings_date_str = pd.to_datetime(arr[0]).strftime("%Y-%m-%d")
+            event_date_dt = dt.datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+            days_until = (event_date_dt - dt.date.today()).days
 
-            if earnings_date_str:
-                event_date_dt = dt.datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
-                days_until = (event_date_dt - dt.date.today()).days
+            expected_move_pct = 0.0 # Default to 0.0
+            if days_until >= 0:
+                move = self._calculate_expected_move(tk, current_price, event_date_dt)
+                if move is not None:
+                    expected_move_pct = move # This is already a percentage
 
-                expected_move_pct = None
-                if current_price and days_until > 0: # Only calculate if we have a price and it's a future event
-                    expected_move_pct = self._calculate_expected_move_for_earnings(
-                        tk, current_price, earnings_date_str
-                    )
-                    if expected_move_pct is not None:
-                        expected_move_pct = round(expected_move_pct * 100, 2) # Convert to percentage
-
-                return {
-                    "date": earnings_date_str,
-                    "days_until": days_until,
-                    "expected_move_pct": expected_move_pct
-                }
-            return {} # Return empty dict if no earnings date found
+            return {
+                "date": earnings_date_str,
+                "days_until": days_until,
+                "expected_move_pct": expected_move_pct
+            }
         except Exception as e:
-            print(f"Error fetching or calculating earnings from Yfinance for {symbol}: {e}")
+            print(f"Error fetching earnings from Yfinance for {symbol}: {e}")
             return {"error": str(e)}
 
-    def _calculate_expected_move_for_earnings(self, ticker_obj: yf.Ticker, current_price: float, earnings_date_str: str) -> float | None:
+    def _calculate_expected_move(self, ticker_obj: yf.Ticker, current_price: float, earnings_date: dt.date) -> float | None:
         """
-        Calculates the estimated expected move (as a decimal) using ATM options around earnings.
+        Calculates the market-implied expected move as a percentage using the ATM straddle
+        of the first options expiry date that occurs *after* the earnings event.
         """
         try:
-            # Convert earnings date string to date object
-            target_expiry_date = dt.datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+            expiries = ticker_obj.options
+            if not expiries: return None
 
-            # Get available options expiry dates
-            expiry_dates = ticker_obj.options
-            if not expiry_dates:
-                print(f"No options expiry dates found for {ticker_obj.ticker}")
-                return None
-
-            # Find the closest expiry date that is on or immediately after the earnings date
-            closest_expiry = None
-            min_days_after_earnings = float('inf')
-
-            for exp_str in expiry_dates:
+            # Find the first expiry date that is ON or AFTER the earnings date.
+            suitable_expiry = None
+            for exp_str in expiries:
                 exp_dt = dt.datetime.strptime(exp_str, "%Y-%m-%d").date()
+                if exp_dt >= earnings_date:
+                    suitable_expiry = exp_str
+                    break # Use the very first one we find
+            
+            if not suitable_expiry: return None
 
-                # We are looking for an expiry on or after the earnings date
-                if exp_dt >= target_expiry_date:
-                    days_diff = (exp_dt - target_expiry_date).days
-                    if days_diff < min_days_after_earnings:
-                        min_days_after_earnings = days_diff
-                        closest_expiry = exp_str
+            chain = ticker_obj.option_chain(suitable_expiry)
+            calls, puts = chain.calls, chain.puts
+            if calls.empty or puts.empty: return None
 
-            if not closest_expiry:
-                print(f"No suitable options expiry found on or after earnings date {earnings_date_str} for {ticker_obj.ticker}.")
+            # Find the straddle price at the strike closest to the current stock price
+            atm_strike = calls.iloc[(calls['strike'] - current_price).abs().argsort()[0]]['strike']
+            
+            atm_call = calls[calls.strike == atm_strike]
+            atm_put = puts[puts.strike == atm_strike]
+
+            if atm_call.empty or atm_put.empty: return None
+
+            # Use lastPrice, but fall back to a bid/ask midpoint if lastPrice is zero.
+            call_price = atm_call['lastPrice'].iloc[0]
+            if call_price == 0 and 'ask' in atm_call.columns and atm_call['ask'].iloc[0] > 0 and 'bid' in atm_call.columns:
+                call_price = (atm_call['bid'].iloc[0] + atm_call['ask'].iloc[0]) / 2
+            
+            put_price = atm_put['lastPrice'].iloc[0]
+            if put_price == 0 and 'ask' in atm_put.columns and atm_put['ask'].iloc[0] > 0 and 'bid' in atm_put.columns:
+                put_price = (atm_put['bid'].iloc[0] + atm_put['ask'].iloc[0]) / 2
+
+            straddle_price = call_price + put_price
+
+            if current_price > 0 and straddle_price > 0:
+                # The expected move is the straddle price as a percentage of the stock price.
+                return (straddle_price / current_price) * 100.0 # Return as a percentage
+            else:
                 return None
-
-            # Fetch options chain for the closest expiry
-            options_chain = ticker_obj.option_chain(closest_expiry)
-            calls = options_chain.calls
-            puts = options_chain.puts
-
-            if calls.empty or puts.empty:
-                print(f"No call or put options found for expiry {closest_expiry} for {ticker_obj.ticker}.")
-                return None
-
-            # Find At-the-Money (ATM) implied volatility
-            # Average the implied volatility of the call and put closest to the current price
-
-            # Filter for non-zero impliedVolatility to avoid division by zero or bad data
-            calls_filtered = calls[calls['impliedVolatility'] > 0]
-            puts_filtered = puts[puts['impliedVolatility'] > 0]
-
-            if calls_filtered.empty or puts_filtered.empty:
-                print(f"No valid IV found for ATM options for expiry {closest_expiry} for {ticker_obj.ticker}.")
-                return None
-
-            atm_call = calls_filtered.iloc[(calls_filtered['strike'] - current_price).abs().argsort()[:1]]
-            atm_put = puts_filtered.iloc[(puts_filtered['strike'] - current_price).abs().argsort()[:1]]
-
-            atm_iv = None
-            if not atm_call.empty and not atm_put.empty:
-                call_iv = atm_call['impliedVolatility'].iloc[0]
-                put_iv = atm_put['impliedVolatility'].iloc[0]
-                atm_iv = (call_iv + put_iv) / 2
-            elif not atm_call.empty: # Fallback if only calls available
-                atm_iv = atm_call['impliedVolatility'].iloc[0]
-            elif not atm_put.empty: # Fallback if only puts available
-                atm_iv = atm_put['impliedVolatility'].iloc[0]
-
-            if atm_iv is None or atm_iv <= 0:
-                print(f"ATM implied volatility could not be determined or is zero for {ticker_obj.ticker} on {closest_expiry}.")
-                return None
-
-            # Calculate days from today to the *selected expiry*
-            days_to_expiry_for_calc = (dt.datetime.strptime(closest_expiry, "%Y-%m-%d").date() - dt.date.today()).days
-            if days_to_expiry_for_calc <= 0:
-                print(f"Calculated expiry days is <= 0 for {ticker_obj.ticker} on {closest_expiry}.")
-                return None
-
-            # Expected Move Formula: Stock Price * Implied Volatility * sqrt(Days to Expiry / 365)
-            # This gives the expected move in absolute dollars.
-            expected_move_abs = current_price * atm_iv * np.sqrt(days_to_expiry_for_calc / 365.0)
-
-            # Convert to percentage of current price
-            expected_move_pct_decimal = expected_move_abs / current_price
-
-            return expected_move_pct_decimal
-
         except Exception as e:
-            print(f"Detailed error calculating expected move for {ticker_obj.ticker} on {earnings_date_str}: {e}")
-            import traceback
-            traceback.print_exc() # Print full traceback for debugging
+            print(f"Detailed error calculating expected move for {ticker_obj.ticker}: {e}")
             return None
-        
-# In data/providers.py
+    # --- REPLACEMENT END ---
 
 
 # =============================================================

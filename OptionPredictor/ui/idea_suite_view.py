@@ -73,14 +73,51 @@ class IdeaSuiteView(ttk.Frame):
         """Gives the view a reference to its controller to request refreshes."""
         self.controller = controller
 
+    # In class IdeaSuiteView:
+
+    def _start_refresh(self):
+        # --- REPLACEMENT START ---
+        """Clears the UI and initiates a full, clean refresh."""
+        self.refresh_button.config(state="disabled")
+        self.last_updated_label.config(text="Initializing Refresh...")
+        
+        # Immediately clear the UI to remove all old ideas
+        for w in self.highlight_fr.winfo_children(): w.destroy()
+        ttk.Label(self.highlight_fr, text="Clearing old data...").grid()
+        for tab_frame in self._category_tabs.values():
+            for w in tab_frame.scrollable_frame.winfo_children():
+                w.destroy()
+        
+        # Call the main refresh method to tear down and restart the engine
+        self.refresh_ideas()
+        # --- REPLACEMENT END ---
+
     def refresh_ideas(self):
-     """Public method to trigger a data refresh for the view."""
-     if self.controller:
-         self._all_ideas = [] # Clear existing ideas for a fresh start
-         self._idea_suite_loading_finalized = False # Reset flag for new loading sequence
-         self._show_loading_overlay()
-         self.universe = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
-         self.controller.refresh(self.universe, self._progress_queue)
+        # --- REPLACEMENT START ---
+        """
+        Performs a true "hard refresh" by completely resetting the controller,
+        clearing all data, and restarting the UI polling loop.
+        """
+        # 1. Clear all local data stores and queues to ensure a clean slate.
+        self._all_ideas.clear()
+        if hasattr(self, 'queue'): self.queue.queue.clear()
+        if hasattr(self, '_progress_queue'): self._progress_queue.queue.clear()
+        
+        # 2. Reset the loading finalization flag.
+        self._idea_suite_loading_finalized = False
+        
+        # 3. Re-create the controller to ensure it has no stale state. This is the "relaunch".
+        from core.engine.idea_suite_controller import IdeaSuiteController
+        self.controller = IdeaSuiteController(self.app.idea_engine, self.queue)
+        
+        # 4. Show the loading overlay and start the background fetch.
+        self._show_loading_overlay()
+        self.universe = self.app.settings.get("idea_universe", DEFAULT_UNIVERSE)
+        self.controller.refresh(self.universe, self._progress_queue)
+        
+        # 5. **CRITICAL FIX**: Re-start the polling loop that listens for progress and completion.
+        self.after(self.POLL_MS, self._poll_queue)
+        # --- REPLACEMENT END ---
 
     def _build_ui(self):
         self.columnconfigure(0, weight=1)
@@ -307,10 +344,13 @@ class IdeaSuiteView(ttk.Frame):
         self._render_saved_tab()   # live update tab
     
     def _persist_notes(self, uid: str, notes: str, tags: list[str]):
+        # --- REPLACEMENT START ---
         self._saved_notes[uid] = {"notes": notes, "tags": tags}
         save_notes(self._saved_notes)
-        # if you want to immediately refresh the “Saved Ideas” tab:
+        # This is the key change: Only refresh the "Saved Ideas" tab.
+        # This will NOT affect the Highlight Reel or any other part of the UI.
         self._render_saved_tab()
+        # --- REPLACEMENT END ---
 
     def _open_universe_settings(self):
         win = tk.Toplevel(self)
@@ -407,35 +447,41 @@ class IdeaSuiteView(ttk.Frame):
         
         ttk.Button(prompt_frame, text="Generate", command=self._ask_copilot).grid(row=0, column=1)
 
+    # In class IdeaSuiteView:
     def _ask_copilot(self):
         prompt = self.copilot_prompt_entry.get()
         if not prompt: return
 
-       # reveal & start the loading indicator just left of the action buttons
         self.llm_status_label.pack(side="left",  before=self.action_frame, padx=(0,8))
-        self.llm_progress    .pack(side="left",  before=self.action_frame, padx=(0,8))
-        self.llm_status_label.config(text="Fetching AI…")
+        self.llm_progress.pack(side="left",  before=self.action_frame, padx=(0,8))
+        self.llm_status_label.config(text="Thinking...")
         self.llm_progress.start()
 
         def llm_worker():
+            # --- REPLACEMENT START ---
             try:
-                llm = LLMHelper()
-                # assemble a simple context string for the AI
-                context_str = "\n".join(f"{i.symbol}: {i.title}" for i in self._all_ideas)
+                # Use the shared LLM helper from the main app
+                llm = self.app.llm
+                context_str = "\n".join(f"- {i.symbol}: {i.title}" for i in self._all_ideas)
                 answer = llm.answer_query_with_context(prompt, context_str)
                 self.after(0, lambda: self._display_copilot(answer))
+            except (ConnectionError, PermissionError) as e:
+                # Capture the error message 'e' with a default argument
+                self.after(0, lambda err_msg=str(e): messagebox.showerror("AI Co-Pilot Error", err_msg, parent=self))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("LLM Error", str(e), parent=self))
+                # Capture the error message 'e' with a default argument
+                self.after(0, lambda err_msg=str(e): messagebox.showerror("AI Co-Pilot Error", f"An unexpected error occurred: {err_msg}", parent=self))
             finally:
+                # This block now correctly handles UI cleanup on both success and failure
                 self.after(0, lambda: (
-                        self.llm_progress.stop(),
-                        self.llm_status_label.config(text=""),
-                        self.llm_progress.pack_forget(),
-                        self.llm_status_label.pack_forget()
+                    self.llm_progress.stop(),
+                    self.llm_status_label.config(text=""),
+                    self.llm_progress.pack_forget(),
+                    self.llm_status_label.pack_forget()
                 ))
+      
 
         threading.Thread(target=llm_worker, daemon=True).start()
-
     def _display_copilot(self, text: str):
         # insert LLM answer into the copilot text box
         self.copilot_response_text.config(state="normal")
@@ -445,59 +491,83 @@ class IdeaSuiteView(ttk.Frame):
 
 
 
-    def _start_refresh(self):
-            """Internal method called by the refresh button."""
-            self.refresh_button.config(state="disabled")
-            self.last_updated_label.config(text="Updating...")
-            self.refresh_ideas()
+
+    # In class IdeaSuiteView:
 
     def _poll_queue(self):
-     """Check for new ideas AND progress updates from the background thread."""
-     try:
-         # Process completed ideas when they arrive from the ideas queue.
-         new_ideas_received_this_poll = False
-         try:
-             while True: # Try to get all ideas available
-                 ideas_batch = self.queue.get_nowait()
-                 for i in ideas_batch:
-                     i.is_saved = i.uid in self._saved_ids
-                 self._all_ideas.extend(ideas_batch) # Accumulate all ideas
-                 new_ideas_received_this_poll = True
-         except queue.Empty:
-             pass # No new ideas yet
+        # --- REPLACEMENT START ---
+        """
+        Checks for new ideas and progress, with a timeout to prevent infinite loading.
+        """
+        # Failsafe Timeout: If a refresh is running and takes too long, abort.
+        TIMEOUT_SECONDS = 60
+        if hasattr(self, '_refresh_start_time') and not self._idea_suite_loading_finalized:
+            if (time.time() - self._refresh_start_time) > TIMEOUT_SECONDS:
+                print("Idea Suite refresh timed out. Forcing UI update.")
+                self._handle_refresh_failure("Refresh timed out. Check API keys or network connection.")
+                return # Stop polling
 
-         # Process progress updates from the _progress_queue.
-         loading_complete_from_progress = False
-         try:
-             while True: # Get all pending progress updates
-                 processed, total = self._progress_queue.get_nowait()
-                 if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
-                     progress_percent = processed / total if total > 0 else 0.0
-                     self._idea_suite_loader.update_progress_bar(progress_percent)
-                     if processed == total and total > 0: # All tasks complete
-                         loading_complete_from_progress = True
-                         # Do not break here immediately, let it process all pending progress.
-         except queue.Empty:
-             pass # No new progress updates yet
+        try:
+            # Process new ideas from the main queue
+            new_ideas_received = False
+            try:
+                while True:
+                    ideas_batch = self.queue.get_nowait()
+                    for i in ideas_batch: i.is_saved = i.uid in self._saved_ids
+                    self._all_ideas.extend(ideas_batch)
+                    new_ideas_received = True
+            except queue.Empty:
+                pass
 
-         # If new ideas were received, or if loading is complete and we need a final render
-         if new_ideas_received_this_poll or loading_complete_from_progress:
-             self._apply_filters() # Re-apply filters to update displayed ideas
+            # Process progress updates from the progress queue
+            loading_complete = False
+            try:
+                while True:
+                    processed, total = self._progress_queue.get_nowait()
+                    if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
+                        progress = processed / total if total > 0 else 0
+                        self._idea_suite_loader.update_progress_bar(progress)
+                    if processed == total and total > 0:
+                        loading_complete = True
+            except queue.Empty:
+                pass
 
-         # If loading is complete based on progress updates, trigger final sequence
-         if loading_complete_from_progress:
-             self._trigger_idea_suite_final_sequence()
-             return # Stop polling as loading is done and final sequence initiated
+            # If we received new ideas, update the display
+            if new_ideas_received:
+                self._apply_filters()
 
-     except Exception as e:
-         # Catch any unexpected errors in the polling loop itself
-         print(f"Error in IdeaSuiteView _poll_queue: {e}")
-         traceback.print_exc()
+            # If the progress queue says we're done, finalize the UI
+            if loading_complete:
+                self._trigger_idea_suite_final_sequence()
+                return # Stop the polling loop
 
-     finally:
-         # Always reschedule the poll, unless we've already triggered the final sequence and returned
-         if not getattr(self, '_idea_suite_loading_finalized', False):
-             self.after(self.POLL_MS, self._poll_queue)
+        except Exception as e:
+            print(f"Error in IdeaSuiteView _poll_queue: {e}")
+            self._handle_refresh_failure(f"An error occurred during refresh: {e}")
+            return
+
+        # Reschedule the next poll if the process isn't finalized yet
+        if not getattr(self, '_idea_suite_loading_finalized', False):
+            self.after(self.POLL_MS, self._poll_queue)
+        # --- REPLACEMENT END ---
+
+    # In class IdeaSuiteView:
+
+    # --- ADD THIS ENTIRE NEW METHOD TO THE CLASS ---
+    def _handle_refresh_failure(self, error_message: str):
+        """A centralized way to handle a failed refresh and update the UI."""
+        self._idea_suite_loading_finalized = True
+        
+        if self._idea_suite_loader and self._idea_suite_loader.winfo_exists():
+            self._idea_suite_loader.place_forget()
+
+        self.last_updated_label.config(text="Update Failed")
+        self.refresh_button.config(state="normal")
+        for w in self.highlight_fr.winfo_children(): w.destroy()
+        ttk.Label(self.highlight_fr, text=error_message, foreground="red").grid()
+
+        if hasattr(self.app, 'debug_console_window'):
+            self.app.debug_console_window.show_window()
 
     def _show_loading_overlay(self):
      """Displays the Idea Suite's dedicated animated loading screen as an overlay."""
@@ -617,32 +687,48 @@ class IdeaSuiteView(ttk.Frame):
         self._gather_and_render_timeline_events() 
         self._render_saved_tab()
 
+    # In class IdeaSuiteView:
+
+    # In idea_suite_view.py
+
     def _render_highlight_reel(self, ideas: List[Idea]):
+        # --- REPLACEMENT START ---
         for w in self.highlight_fr.winfo_children(): w.destroy()
         
+        # A scoring function to prioritize interesting ideas for the highlight reel
         def blended_score(idea: Idea):
             score = idea.score
+            # Boost scores for certain categories or watchlist items to make highlights more relevant
             if idea.category == "💬 Social": score *= 1.2
             if "UnusualActivity" in idea.metrics: score *= 1.5
             if hasattr(self.app, 'settings') and idea.symbol in self.app.settings.get("watchlist", ""): score *= 1.3
             return score
 
         top5 = sorted(ideas, key=blended_score, reverse=True)[:5]
+
+        # If no ideas were generated after a refresh...
         if not top5:
-            ttk.Label(self.highlight_fr, text="No ideas generated. Check console for data errors.").grid()
+            # **NEW**: Check if the engine flagged a critical failure.
+            # This provides much better user feedback than just saying "No ideas".
+            if self.controller and self.controller.idea_engine.had_critical_failure:
+                msg = "Data fetch failed. Check API keys or network.\nOpening debug console for details..."
+                # Automatically open the debug console (if available) to show the user the errors.
+                if hasattr(self.app, 'debug_console_window') and self.app.debug_console_window:
+                    self.app.debug_console_window.show_window()
+            else:
+                # This message shows if the data fetch was successful but no detectors triggered.
+                msg = "No high-scoring ideas found for the current universe."
             
-            # --- NEW FIX: Automatically open the debug console ---
-            if hasattr(self.app, 'debug_console_window') and self.app.debug_console_window:
-                self.app.debug_console_window.show_window()
-            # --- END NEW FIX ---
-            
+            ttk.Label(self.highlight_fr, text=msg).grid()
             return
 
+        # If we have ideas, display them normally as compact cards.
         for idx, idea in enumerate(top5):
             IdeaCard(
                 self.highlight_fr, idea, self.app,
                 compact=True
             ).grid(row=0, column=idx, padx=5, pady=5, sticky="nsew")
+
 
     def _highlight_expand(self, uid: str, expand: bool):
         collapsed_w =  80

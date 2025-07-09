@@ -33,10 +33,11 @@ MC_DEFAULT_RATE = 0.05      # Default simulation rate
 MC_DEFAULT_DAYS = 30        # Default simulation expiry
 
 class StrategyBuilderWindow(tk.Toplevel):
-    def __init__(self, parent, current_theme='light', idea_data: dict | None = None): # MODIFIED LINE
+    def __init__(self, parent, app_controller, idea_data: dict | None = None):
         super().__init__(parent)
         self.parent = parent
-        self.current_theme = current_theme
+        self.app_controller = app_controller # Store the main app instance
+        self.current_theme = self.app_controller.current_theme
 
         self.title("Multi-Option Strategy Builder")
         self.geometry("1100x850") # Wider and taller for more features
@@ -91,6 +92,8 @@ class StrategyBuilderWindow(tk.Toplevel):
 
         # --- Connect Events ---
         self.fig.canvas.mpl_connect("motion_notify_event", self._on_hover)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if idea_data:
             self._prefill_from_idea(idea_data)
@@ -184,8 +187,14 @@ class StrategyBuilderWindow(tk.Toplevel):
 
 
 
-
-
+    def _on_close(self):
+        """Handles the window close event."""
+        # Notify the main app that this window is closing
+        if hasattr(self.app_controller, 'on_strategy_builder_close'):
+            self.app_controller.on_strategy_builder_close()
+        # Destroy the window
+        self.destroy()
+        
     def _setup_ui(self):
         """Creates the main UI layout."""
         # Main Frame splits Left (Controls) and Right (Plot)
@@ -2030,9 +2039,11 @@ class StrategyBuilderWindow(tk.Toplevel):
 
         def run_llm():
             try:
-                from app.llm_helper import LLMHelper  # Import here to avoid circular dependency
-                llm = LLMHelper()
+                # Use the shared LLM helper from the main app
+                llm = self.app_controller.llm
                 self._set_status("Asking LLM for strategy...", "orange")
+                
+                # The llm helper method now handles token checking internally
                 strategy = llm.recommend_strategy_structured(
                     ticker=vars["ticker"].get(),
                     spot=vars["price"].get(),
@@ -2045,15 +2056,16 @@ class StrategyBuilderWindow(tk.Toplevel):
                 )
                 self._apply_llm_strategy(strategy)
                 self._set_status("✅ LLM strategy applied.", "green")
-                
-                # **FIX**: Call the new, scrollable popup for the note
+
                 if "note" in strategy and strategy["note"]:
                     self._show_llm_note_popup("LLM Rationale", strategy["note"])
 
                 window.destroy()
+
+            except (ConnectionError, PermissionError) as e:
+                messagebox.showerror("AI Error", str(e), parent=self)
+                self._set_status("❌ LLM strategy failed.", "red")
             except Exception as e:
-                if hasattr(self, 'app_controller'):
-                    self.app_controller.show_copyable_error("LLM Error", str(e))
-                else:
-                    messagebox.showerror("LLM Error", str(e), parent=self)
-                self._set_status("❌ LLM strategy failed", "red")
+                # Use the app's copyable error for detailed tracebacks
+                self.app_controller.show_copyable_error("LLM Error", f"An unexpected error occurred:\n{traceback.format_exc()}")
+                self._set_status("❌ LLM strategy failed.", "red")

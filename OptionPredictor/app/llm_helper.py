@@ -1,167 +1,177 @@
+# --- REPLACEMENT START ---
 from __future__ import annotations
-import json, re, requests
-from typing import Any, Dict, List
-try:
-    import demjson3
-except ImportError:
-    demjson3 = None # Fallback if library is not installed
+import os
+import re
+import json
+import traceback
+from typing import Any, Dict
+
+import google.generativeai as genai
+from ui.TokenTracker import TokenUsageTracker
 
 class LLMHelper:
-    def __init__(self, model: str = "llama3", temperature: float = 0.7):
-        self.api_url = "http://localhost:11434/api/generate"
-        self.model = model
-        self.temperature = temperature
+    def __init__(self, token_tracker: TokenUsageTracker, model: str = "gemini-1.5-pro-latest"):
+        self.model_name = model
+        self.token_tracker = token_tracker
+        self.api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
+            raise ConnectionError("GOOGLE_API_KEY environment variable not set. The AI features will be disabled.")
+        genai.configure(api_key=self.api_key)
+        self.model = genai.GenerativeModel(self.model_name)
+
+    def _query_gemini(self, prompt: str) -> str:
+        if self.token_tracker.is_limit_reached():
+            usage = self.token_tracker.tokens_used
+            limit = self.token_tracker.daily_limit
+            raise PermissionError(f"Daily token limit reached ({usage:,}/{limit:,}). Please try again tomorrow.")
+        try:
+            response = self.model.generate_content(prompt.strip())
+            self.token_tracker.update_usage(response)
+            return response.text.strip()
+        except Exception as e:
+            print(f"Gemini API Error: {traceback.format_exc()}")
+            raise ConnectionError(f"Failed to communicate with the Gemini API: {e}") from e
 
     def explain_option_strategy(self, **kwargs) -> str:
         prompt = self._build_explanation_prompt(**kwargs)
-        return self._query_llm(prompt)
+        return self._query_gemini(prompt)
 
     def recommend_strategy_structured(self, **kwargs) -> Dict[str, Any]:
-        """
-        Queries the LLM and uses robust REGEX EXTRACTION to build the
-        strategy object, making it immune to most JSON syntax errors.
-        """
         prompt = self._build_structured_prompt(**kwargs)
-        raw_response = self._query_llm(prompt)
-
+        raw_response = self._query_gemini(prompt)
         try:
-            # **FOOLPROOF FIX**: Use regex to find all data points individually
-            actions = re.findall(r'"action"\s*:\s*"(Buy|Sell)"', raw_response, re.IGNORECASE)
-            types = re.findall(r'"type"\s*:\s*"(Call|Put)"', raw_response, re.IGNORECASE)
-            strikes = [float(f) for f in re.findall(r'"strike"\s*:\s*([\d.]+)', raw_response)]
-            quantities = [int(i) for i in re.findall(r'"quantity"\s*:\s*(\d+)', raw_response)]
-            premiums = [float(f) for f in re.findall(r'"premium"\s*:\s*([\d.]+)', raw_response)]
-            
-            note_match = re.search(r'"note"\s*:\s*"(.*?)"', raw_response, re.DOTALL)
-            note = note_match.group(1) if note_match else "No rationale provided."
-
-            # Verify that we found a consistent number of parts for each leg
-            num_legs = len(actions)
-            if not (num_legs == len(types) == len(strikes) == len(quantities) == len(premiums)):
-                raise ValueError("Inconsistent number of leg components found in LLM response.")
-            
-            if num_legs == 0:
-                raise ValueError("No valid legs were found in the LLM response.")
-
-            # Reconstruct the legs list
-            legs = []
-            for i in range(num_legs):
-                legs.append({
-                    "action": actions[i].capitalize(),
-                    "type": types[i].capitalize(),
-                    "strike": strikes[i],
-                    "quantity": quantities[i],
-                    "premium": premiums[i]
-                })
-
-            return {"legs": legs, "note": note}
-
+            match = re.search(r'```json\s*([\s\S]+?)\s*```', raw_response)
+            if match:
+                json_str = match.group(1)
+                return json.loads(json_str)
+            raise ValueError("No JSON block found in the LLM response.")
         except Exception as e:
-            # If regex extraction fails, the format is truly unreadable
-            error_message = (
-                f"LLM response could not be parsed even with robust extraction.\n\n"
-                f"Error: {e}\n\n"
-                f"--- Raw Response ---\n{raw_response}\n"
-                f"--------------------"
-            )
+            error_message = f"LLM response could not be parsed.\n\nError: {e}\n\n--- Raw Response ---\n{raw_response}"
             raise ValueError(error_message)
-        
+
     def answer_query_with_context(self, user_query: str, context: str) -> str:
         prompt = (
-            "You are an AI financial assistant. Answer the user's question "
-            "using ONLY the information in the context below. "
-            "If the answer is not in the context, reply: 'Information not found in current ideas.'\n\n"
-            f"--- CONTEXT START ---\n{context}\n--- CONTEXT END ---\n\n"
-            f"Question: {user_query}\nAnswer:"
+            "You are a helpful AI financial assistant. Your goal is to answer the user's question. "
+            "Use the following list of investment ideas as the primary context for your answer, but you can also use your general financial knowledge. "
+            "Keep your answer concise and to the point.\n\n"
+            "--- CONTEXT: CURRENT INVESTMENT IDEAS ---\n"
+            f"{context}\n"
+            "--- END CONTEXT ---\n\n"
+            f"User Question: {user_query}\n\nAnswer:"
         )
-        return self._query_llm(prompt)
+        return self._query_gemini(prompt)
 
-    def _query_llm(self, prompt: str) -> str:
-        payload = {"model": self.model, "prompt": prompt.strip(), "stream": False}
-        try:
-            r = requests.post(self.api_url, json=payload, timeout=60)
-            r.raise_for_status()
-            return r.json().get("response", "").strip()
-        except requests.exceptions.RequestException as exc:
-            raise ConnectionError(f"Cannot reach LLM service at {self.api_url}. Is Ollama running?") from exc
+    # In class LLMHelper:
 
     def _build_explanation_prompt(self, **kwargs) -> str:
-        """Return a professional, data-rich prompt for the LLM."""
+        # --- REPLACEMENT START ---
+        """
+        Return a professional, data-rich prompt that asks for a cohesive, actionable analysis
+        and gracefully handles missing data.
+        """
         def _f(val, fmt=".2f"):
-            try: return format(float(val), fmt)
-            except: return str(val)
-        def _pct(val):
-            try: return f"{float(val) * 100:.1f}%"
-            except: return str(val)
+            try:
+                if val is None or not isinstance(val, (int, float)): return "N/A"
+                return format(float(val), fmt)
+            except (ValueError, TypeError):
+                return "N/A"
 
-        # **FOOLPROOF FIX**: Intelligently find the premium from different possible data structures.
-        premium = kwargs.get('premium')
-        if not isinstance(premium, (int, float)):
-            # If not found directly, check inside the 'metrics' dictionary
-            metrics = kwargs.get('metrics')
-            if isinstance(metrics, dict):
-                premium = metrics.get('premium')
+        # This block now formats all data safely, returning 'N/A' for missing values.
+        premium_line = f"• Net Premium: ${_f(kwargs.get('premium'))}\n"
+        mc_prob_val = kwargs.get('prob')
+        mc_prob_line = f"• Monte Carlo Probability of touching Barrier (H): {_f(mc_prob_val * 100, '.1f')}%\n" if mc_prob_val is not None else ""
 
-        premium_line = f"• Premium: ${_f(premium)}\n" if isinstance(premium, (int, float)) else ""
+        metrics = kwargs.get('metrics') or {}
+        metrics_block = "\n".join([f"  • {k}: {v}" for k, v in metrics.items()]) or "  • (no extra metrics)"
 
-        metrics_block = "\n".join([f"• {k}: {v}" for k, v in (kwargs.get('metrics') or {}).items()]) or "• (no extra metrics)"
+        # Format Greeks safely
+        greeks = kwargs.get('greek_inputs')
+        greeks_str = ", ".join([f"{k.capitalize()}: {_f(v)}" for k, v in greeks.items()]) if isinstance(greeks, dict) else "N/A"
 
         prompt = (
-            "You are a seasoned options strategist. Provide a clear, data-driven "
-            "explanation of the suggested trade. Structure your answer with "
-            "these sections: 1. Thesis, 2. Risk/Reward, 3. Key Greeks, "
-            "4. Probability, 5. Takeaway.\n\n"
-            "Trade details:\n"
+            "You are a quantitative options analyst. Your task is to synthesize the user's inputs and the model's calculated outputs "
+            "into a cohesive, data-driven analysis of the position. **Focus on the strategic implications of the data provided.**\n\n"
+            "CRITICAL INSTRUCTION: Assume the provided data is for a valid, tradable instrument. **If a specific data point is missing or marked 'N/A', "
+            "simply omit that part of the analysis without mentioning its absence.**\n\n"
+            "--- DATA PROVIDED ---\n"
+            "**User Inputs:**\n"
             f"• Ticker: {kwargs.get('ticker', 'N/A')}\n"
-            f"• Option Type: {kwargs.get('option_type', 'N/A')}\n"
-            f"• Strike: ${_f(kwargs.get('strike', 'N/A'))}\n"
-            f"• Spot Price: ${_f(kwargs.get('S0', 'N/A'))}\n"
-            f"{premium_line}"
+            f"• Strategy: {str(kwargs.get('option_type', 'N/A')).title()} @ ${_f(kwargs.get('strike'))}\n"
+            f"• Premise: {kwargs.get('title', 'N/A')}\n"
             f"• Days to Expiry: {kwargs.get('T_days', 'N/A')}\n"
-            f"• Barrier-hit Probability: {_pct(kwargs.get('prob', 'N/A'))}\n\n"
-            f"Additional Metrics:\n{metrics_block}\n\n"
-            "Respond in crisp, professional language. Avoid filler."
+            f"• Implied Volatility (User's Assumption): {_f(kwargs.get('sigma', 0) * 100, '.1f')}%\n\n"
+            "**Model Calculation Outputs:**\n"
+            f"• Historical Realized Volatility: {_f(kwargs.get('realized_vol', 0) * 100, '.1f')}%\n"
+            f"• Calculated Fair Value (Binomial): ${_f(kwargs.get('fair_price'))}\n"
+            f"{mc_prob_line}"
+            f"• Greeks: {greeks_str}\n"
+            "--- END OF DATA ---\n\n"
+            "Please provide your analysis in the following structure:\n"
+            "1.  **Volatility Analysis:** Compare the Implied vs. Realized Volatility. Is the option theoretically cheap or expensive based on this? How does this affect the trade's outlook?\n"
+            "2.  **Probability & Risk/Reward:** Using the Fair Value, state the break-even price at expiration. Then, comment on the Monte Carlo Probability. What does this percentage imply about the trade's likelihood of success?\n"
+            "3.  **Position Dynamics (Greeks):** Briefly interpret the provided Greeks. What do the Delta, Theta, and Vega values reveal about the primary risks and sensitivities of this position?\n"
+            "4.  **Synthesis & Key Factors:** Synthesize the points above into a concluding thought. What is the most critical factor for this trade's success and what should the trader monitor closely?"
         )
         return prompt
+     
 
     def _build_structured_prompt(self, **kwargs) -> str:
-        """
-        Builds a more explicit structured prompt for the LLM, demanding
-        perfect JSON syntax and providing a multi-leg example.
-        """
-        def _num(x):
-            try: return f"{float(x):.2f}"
-            except (ValueError, TypeError): return "N/A"
-
+        """Builds a more explicit structured prompt for the LLM."""
         ticker = str(kwargs.get('ticker', 'N/A')).upper()
-        spot_price = kwargs.get('spot') or kwargs.get('current_price')
-        # ... (rest of variable extraction is the same)
+        spot_price = kwargs.get('spot') or kwargs.get('current_price', 100)
         direction = str(kwargs.get('direction', 'Neutral'))
-        target = kwargs.get('target') or kwargs.get('target_price')
+        target = kwargs.get('target') or kwargs.get('target_price', spot_price)
         dte = kwargs.get('dte', 30)
         iv = kwargs.get('iv', 25.0) / 100.0
         risk = str(kwargs.get('risk_tolerance', 'Medium'))
-        preference = str(kwargs.get('preference', 'Growth'))
 
-        try:
-            k1, k2 = f"{float(spot_price) * 1.05:.2f}", f"{float(spot_price) * 1.10:.2f}"
-        except (ValueError, TypeError):
-            k1, k2 = "105.00", "110.00"
-
-        # **FIX**: Added critical instructions and a better example for the AI
         return (
-            "You are an options strategy recommender. Return **exactly one** "
-            "<json> block. CRITICAL: The JSON must be perfectly formatted. Pay "
-            "close attention to commas between list and dictionary elements, "
-            "and use double quotes for all keys and string values. The schema is:\n"
-            "{'legs':[{'action':'Buy|Sell','type':'Call|Put','strike':float,'quantity':int,'premium':float}],"
-            "'note':string}\n\n"
-            "Use the inputs below. Choose the single most appropriate strategy. "
-            "You MUST calculate and include a realistic 'premium' for each leg.\n\n"
-            f"Inputs:\nTicker: {ticker}\nSpot: {_num(spot_price)}\nDirection: {direction}\n"
-            f"Target: {_num(target)}\nDTE: {dte}\nIV: {_num(iv)}\n"
-            f"Risk tolerance: {risk}\nPreference: {preference}\n\n"
-            f"Example for a multi-leg strategy: <json>{{\"legs\":[{{\"action\":\"Buy\",\"type\":\"Call\",\"strike\":{k1},\"quantity\":1,\"premium\":2.50}},{{\"action\":\"Sell\",\"type\":\"Call\",\"strike\":{k2},\"quantity\":1,\"premium\":1.20}}], \"note\":\"A Bull Call Spread.\"}}</json>"
+            "You are an options strategy recommender. Your task is to return a single, perfectly formatted JSON object "
+            "representing the most appropriate options strategy based on the user's inputs. "
+            "The JSON response should be enclosed in a markdown code block like ```json ... ```.\n\n"
+            "The JSON schema MUST be:\n"
+            "{'legs':[{'action':'Buy'|'Sell','type':'Call'|'Put','strike':float,'quantity':int,'premium':float}],'note':string}\n\n"
+            "CRITICAL: You must calculate a realistic 'premium' for each leg of the strategy. "
+            "Base the premium on the provided implied volatility (IV), days to expiration (DTE), and the distance of the strike from the spot price.\n\n"
+            "--- User Inputs ---\n"
+            f"Ticker: {ticker}\n"
+            f"Spot Price: {spot_price:.2f}\n"
+            f"Directional View: {direction}\n"
+            f"Target Price: {target:.2f}\n"
+            f"Days to Expiration (DTE): {dte}\n"
+            f"Implied Volatility (IV): {iv*100:.1f}%\n"
+            f"Risk Tolerance: {risk}\n"
+            "--- End Inputs ---\n\n"
+            "Now, provide the JSON response for the best strategy."
         )
 
-    
+
+    def explain_idea_card(self, **kwargs) -> str:
+        """
+        Generates a qualitative, strategic analysis for an Idea Card.
+        """
+        prompt = self._build_idea_card_prompt(**kwargs)
+        return self._query_gemini(prompt)
+
+    def _build_idea_card_prompt(self, **kwargs) -> str:
+        """
+        Builds a prompt that asks for a strategic review of a trading idea,
+        focusing on the concept rather than just the numbers.
+        """
+        prompt = (
+            "You are a seasoned trading strategist and mentor. Your task is to provide concise, strategic commentary "
+            "on the trading idea below. Focus on the **concept** and the **chosen strategy's fit for the premise.** "
+            "Assume the metrics provided are context, but your analysis should be qualitative.\n\n"
+            "--- Trading Idea Details ---\n"
+            f"• Ticker: {kwargs.get('ticker', 'N/A')}\n"
+            f"• Idea Premise: \"{kwargs.get('title', 'N/A')}\"\n"
+            f"• Signal Category: {kwargs.get('category', 'N/A')}\n"
+            f"• Suggested Strategy: {kwargs.get('strategy_name', 'N/A')}\n"
+            f"• Key Metrics: DTE: {kwargs.get('dte', 'N/A')}, Risk: {kwargs.get('risk', 'N/A')}\n"
+            "--- End of Details ---\n\n"
+            "Please provide your commentary in the following structure:\n"
+            "1.  **Strategic Rationale:** Why is the suggested strategy a good or bad fit for the premise? What is the core logic behind this pairing?\n"
+            "2.  **Key Considerations:** What are the most important things a trader should think about before placing this trade (e.g., timing, volatility, market conditions)?\n"
+            "3.  **Alternative Strategy:** Briefly suggest one alternative strategy that could also trade this premise and explain its primary trade-off."
+        )
+        return prompt

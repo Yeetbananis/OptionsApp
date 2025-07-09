@@ -53,6 +53,8 @@ from core.models.idea_models        import Idea
 from ui.idea_suite_view             import IdeaSuiteView
 from app.llm_helper                 import LLMHelper
 from ui.StockChartWindow            import StockChartWindow
+from ui.TokenTracker                import TokenUsageTracker
+
 
 
 
@@ -360,10 +362,15 @@ class OptionAnalyzerApp:
 
         # 3. CORE COMPONENTS INITIALIZATION
         self.data_mgr = HomeDataManager()
-        self.earnings_data_mgr = EarningsDataManager() # NEW: Initialize EarningsDataManager
-        self.llm = LLMHelper(model="deepseek-q4ks")
+        self.earnings_data_mgr = EarningsDataManager()
+        # Create a single token tracker for the entire application session
+        self.token_tracker = TokenUsageTracker()
+        # Pass the tracker to the LLMHelper
+        self.llm = LLMHelper(token_tracker=self.token_tracker)
         self.idea_engine = IdeaEngine()
         self.user_name = self.settings.get("user_name", "Trader")
+
+
 
 
         # --- Debug Console Initialization (NEW) ---
@@ -1074,42 +1081,53 @@ class OptionAnalyzerApp:
     # ─────────────────────────────────────────────────────────────
     from pathlib import Path
 
+    # In class OptionAnalyzerApp:
+
     def launch_chatbot(self):
+        # --- REPLACEMENT START ---
         """
-        Dynamically launches Chatbot.exe if it exists under a folder named OptionsApp.
-        Falls back to ui/Chatbot.py for development environments.
+        Intelligently launches the chatbot.
+        - If the app is a bundled executable, it runs Chatbot.exe.
+        - If running from source code, it runs Chatbot.py.
+        This ensures portability and that the latest code is always used
+        in the appropriate environment.
         """
         try:
-            search_root = Path(__file__).resolve().parents[2]  # Go high enough up
+            # Use getattr(sys, 'frozen', False) to check if running as a bundled .exe
+            is_bundled = getattr(sys, 'frozen', False)
 
-            chatbot_exe_path = None
-            for path in search_root.rglob("Chatbot.exe"):
-                if path.parent.name.lower() == "optionsapp":
-                    chatbot_exe_path = path
-                    break
-
-            fallback_py_path = Path(__file__).resolve().parent.parent / "ui" / "Chatbot.py"
-            python_exe = sys.executable
-
-            if chatbot_exe_path and chatbot_exe_path.exists():
-                cmd = [str(chatbot_exe_path), self.current_theme]
-            elif fallback_py_path.exists():
-                cmd = [python_exe, str(fallback_py_path), self.current_theme]
+            if is_bundled:
+                # --- PRODUCTION MODE (.exe) ---
+                # The base path is the directory of the main executable
+                base_path = Path(sys.executable).parent
+                target_path = base_path / "Chatbot.exe"
+                cmd = [str(target_path)]
             else:
+                # --- DEVELOPMENT MODE (.py) ---
+                # Build a robust relative path to the Python script
+                target_path = Path(__file__).resolve().parent.parent / "ui" / "Chatbot.py"
+                python_exe = sys.executable
+                cmd = [python_exe, str(target_path)]
+
+            # Check if the target file actually exists before trying to run it
+            if not target_path.exists():
                 messagebox.showerror(
                     "File Not Found",
-                    "Could not find Chatbot.exe under any OptionsApp folder,\n"
-                    "nor fallback Chatbot.py in project.",
+                    f"Could not find the required chatbot file at:\n{target_path}",
                     parent=self.root
                 )
                 return
 
+            # Add the current theme as an argument for the chatbot process
+            cmd.append(self.current_theme)
+            
+            # Launch the chatbot as a new, independent process
             subprocess.Popen(cmd)
 
         except Exception as exc:
             logging.exception("Failed to launch chatbot")
             self.show_copyable_error("Chatbot Launch Error", f"Unable to start chatbot:\n{exc}")
-
+       
                     
     def open_input_window(self):
         """Opens a Toplevel window for user inputs."""
@@ -1686,15 +1704,16 @@ class OptionAnalyzerApp:
         if dock_window:
             dock_window.add_plot(plot_type, self.input_data)
 
-    def _prompt_save_analysis(self):
-        """Opens a dialog to get a name and notes for saving the analysis."""
+    def _prompt_save_analysis(self, prefill_notes=""):
+        # --- REPLACEMENT START ---
+        """Opens a dialog to get a name and notes, with optional pre-filled text."""
         if not self.input_data:
             messagebox.showerror("No Data", "There is no analysis data to save.", parent=self.root)
             return
 
         win = tk.Toplevel(self.root)
         win.title("Save Analysis")
-        win.geometry("450x300")
+        win.geometry("450x350") # Increased height for notes
         win.transient(self.root)
         win.grab_set()
         self.apply_theme_to_window(win)
@@ -1702,21 +1721,24 @@ class OptionAnalyzerApp:
         frame = ttk.Frame(win, padding=15)
         frame.pack(expand=True, fill=tk.BOTH)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(3, weight=1)
+        frame.rowconfigure(3, weight=1) # Allow notes Text widget to expand
 
         ttk.Label(frame, text="Analysis Name:", anchor='w').grid(row=0, column=0, sticky='ew', pady=(0, 2))
         name_var = tk.StringVar()
         ttk.Entry(frame, textvariable=name_var).grid(row=1, column=0, sticky='ew')
         
-        # Prefill name suggestion
         ticker = self.input_data.get('ticker', 'TICKER')
         otype = self.input_data.get('option_type', 'option').capitalize()
         strike = self.input_data.get('strike', 'K')
-        name_var.set(f"{ticker} ${strike} {otype}")
+        name_var.set(f"{ticker} ${strike} {otype} Analysis")
 
         ttk.Label(frame, text="Notes:", anchor='w').grid(row=2, column=0, sticky='ew', pady=(10, 2))
-        notes_text = tk.Text(frame, height=5, wrap='word', relief='solid', borderwidth=1)
+        notes_text = tk.Text(frame, height=8, wrap='word', relief='solid', borderwidth=1)
         notes_text.grid(row=3, column=0, sticky='nsew')
+        
+        # Pre-fill the notes with the LLM explanation if provided
+        if prefill_notes:
+            notes_text.insert("1.0", prefill_notes)
         
         btn_frame = ttk.Frame(frame, padding=(0, 15, 0, 0))
         btn_frame.grid(row=4, column=0, sticky="e")
@@ -1733,6 +1755,7 @@ class OptionAnalyzerApp:
 
         ttk.Button(btn_frame, text="Save", style="Accent.TButton", command=on_save).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side=tk.LEFT)
+        # --- REPLACEMENT END ---
         
     def _launch_load_window(self):
         """Launches the window to load saved analyses."""
@@ -2142,24 +2165,41 @@ class OptionAnalyzerApp:
         self.apply_theme_to_window(win)
 
 
+    # In class OptionAnalyzerApp:
+
     def launch_strategy_builder(self, idea_data: dict | None = None):
-        # If we already have a live builder window, just bring it forward (and re-prefill if needed)
+        # --- REPLACEMENT START ---
+        """
+        Launches the Strategy Builder window, ensuring only one instance is active
+        and properly handling window closing and reopening.
+        """
+        # Check if the window reference exists AND the window is actually open
         if getattr(self, "_strat_builder_win", None) and self._strat_builder_win.winfo_exists():
             self._strat_builder_win.deiconify()
             self._strat_builder_win.lift()
             self._strat_builder_win.focus_force()
+            # If called with new idea data, prefill the existing window
             if idea_data:
-                # inject new idea payload into the existing window
                 self._strat_builder_win._prefill_from_idea(idea_data)
             return
 
-        # Otherwise create a fresh one
+        # If the reference is stale or this is the first launch, create a new window
         from core.engine.strategy_builder import StrategyBuilderWindow
-        builder = StrategyBuilderWindow(self.root, self.current_theme, idea_data)
-        # remember it so we can reuse/destroy it next time
+        builder = StrategyBuilderWindow(self.root, self, idea_data)
+        
+        # Store a reference to the new window instance
         self._strat_builder_win = builder
-        self.child_windows.append(builder)
+        
+        if builder not in self.child_windows:
+            self.child_windows.append(builder)
+        
         self.apply_theme_to_window(builder)
+    
+   
+   
+    def on_strategy_builder_close(self):
+        """Callback to nullify the reference when the builder window is closed."""
+        self._strat_builder_win = None
 
     def _toggle_fullscreen(self):
         is_full = self.root.attributes('-fullscreen')
@@ -2232,80 +2272,78 @@ class OptionAnalyzerApp:
 
 
 
+    # In class OptionAnalyzerApp:
+
     def show_llm_explanation(self, idea: Idea | None = None):
+        # --- REPLACEMENT START ---
         """
-        Shows a detailed explanation of a strategy from an LLM, ensuring
-        only valid data is sent.
+        Shows an LLM explanation for the current analysis and provides an
+        option to save it directly into the analysis notes.
         """
-        prompt_data = {}
-        popup_title = "📘 Strategy Explanation (LLM)"
-
-        if idea:
-            # Called from an IdeaCard
-            # **FIX**: Safely get the premium from the idea's metrics,
-            # defaulting to None if it doesn't exist.
-            premium = idea.metrics.get('premium') if isinstance(idea.metrics, dict) else None
-
-            prompt_data = {
-                "ticker": idea.symbol,
-                "option_type": idea.suggested_strategy.get('type', 'strategy'),
-                "strike": idea.metrics.get('Strike', 'N/A'),
-                "S0": idea.metrics.get('last_price', 'N/A'),
-                "premium": premium,
-                "T_days": idea.metrics.get('UpcomingEarnings', {}).get('days_until', 'N/A'),
-                "prob": "N/A",
-                "title": idea.title,
-                "description": idea.description,
-                "metrics": idea.metrics
-            }
-            popup_title = f"📘 LLM on: {idea.symbol} - {idea.title}"
-            
-        elif self.input_data:
-            # Called from the main analysis results
-            prompt_data = {
-                "ticker": self.input_data['ticker'],
-                "option_type": self.input_data['option_type'],
-                "strike": self.input_data['strike'],
-                "S0": self.input_data['S0'],
-                "premium": self.input_data.get('fair_price'),
-                "T_days": self.input_data['T_days'],
-                "prob": self.input_data.get('probability'),
-                "title": "Custom Analysis",
-                "description": f"A {self.input_data['option_type']} option with a strike of ${self.input_data['strike']}"
-            }
-        else:
-            messagebox.showwarning("No Data", "Run an analysis or select an idea first.", parent=self.root)
+        if not self.input_data:
+            messagebox.showwarning("No Data", "Please run an analysis first.", parent=self.root)
             return
 
-        self.set_status("Asking the LLM for an explanation...")
+        # This feature is now specifically for the main analysis data.
+        prompt_data = {
+            "ticker": self.input_data.get('ticker'),
+            "option_type": self.input_data.get('option_type'),
+            "strike": self.input_data.get('strike'),
+            "S0": self.input_data.get('S0'),
+            "premium": self.input_data.get('fair_price'),
+            "T_days": self.input_data.get('T_days'),
+            "prob": self.input_data.get('probability'),
+            "title": "Custom Analysis",
+            "description": f"A {self.input_data.get('option_type')} option with a strike of ${self.input_data.get('strike')}",
+            "sigma": self.input_data.get('sigma'),
+            "realized_vol": self.input_data.get('realized_vol'),
+            "fair_price": self.input_data.get('fair_price'),
+            "greek_inputs": self.input_data.get('greek_inputs')
+        }
+        popup_title = f"📘 LLM Analysis: {prompt_data['ticker']}"
+
+        self.set_status("Asking the LLM for an explanation...", color="orange")
 
         def llm_thread_worker():
             try:
-                # The prompt builder in llm_helper will now correctly handle cases
-                # where premium is None or not a valid number.
                 explanation = self.llm.explain_option_strategy(**prompt_data)
                 self.root.after(0, show_popup, explanation)
+            except (ConnectionError, PermissionError) as e:
+                self.root.after(0, lambda err_msg=str(e): messagebox.showerror("LLM Error", err_msg, parent=self.root))
             except Exception as e:
-                self.root.after(0, lambda err_msg=str(e): messagebox.showerror("LLM Error", f"Failed to get explanation: {err_msg}", parent=self.root))
+                self.root.after(0, lambda: self.show_copyable_error("LLM Error", f"An unexpected error occurred:\n{traceback.format_exc()}"))
             finally:
                 self.root.after(0, self.set_status, "Ready.")
 
         def show_popup(explanation):
             popup = tk.Toplevel(self.root)
             popup.title(popup_title)
-            popup.geometry("700x550")
+            popup.geometry("700x600")
             self.apply_theme_to_window(popup)
 
-            text_box = tk.Text(popup, wrap=tk.WORD, relief="flat", padx=15, pady=15, font=("Segoe UI", 10))
+            text_frame = ttk.Frame(popup, padding=5)
+            text_frame.pack(expand=True, fill=tk.BOTH)
+            text_box = tk.Text(text_frame, wrap=tk.WORD, relief="flat", padx=15, pady=15, font=("Segoe UI", 10))
             text_box.pack(expand=True, fill=tk.BOTH)
             text_box.insert(tk.END, explanation)
             text_box.config(state=tk.DISABLED)
-            
+
             theme_settings = self.theme_settings()
-            text_box.config(background=theme_settings['entry_bg'], foreground=theme_settings['fg'], insertbackground=theme_settings['fg'])
+            text_box.config(background=theme_settings['entry_bg'], foreground=theme_settings['fg'])
+            
+            button_frame = ttk.Frame(popup, padding=(10, 0, 10, 10))
+            button_frame.pack(fill=tk.X)
+            
+            def save_and_close_action():
+                # Call the save dialog, pre-filling it with the explanation
+                self._prompt_save_analysis(prefill_notes=explanation)
+                # Close the explanation popup after opening the save dialog
+                popup.destroy()
+
+            ttk.Button(button_frame, text="💾 Save Analysis w/ Notes", command=save_and_close_action).pack(side=tk.RIGHT)
+            ttk.Button(button_frame, text="Close", command=popup.destroy).pack(side=tk.RIGHT, padx=(0, 10))
 
         threading.Thread(target=llm_thread_worker, daemon=True).start()
-
        
 # --- Main Execution ---
 if __name__ == "__main__":

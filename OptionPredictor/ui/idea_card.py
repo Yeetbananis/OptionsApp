@@ -1,7 +1,10 @@
 # idea_card.py
 from __future__ import annotations
 import io
+import re
+import datetime
 import threading
+import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Callable, TYPE_CHECKING
@@ -312,95 +315,79 @@ class IdeaCard(ttk.Frame):
             self.app.launch_strategy_builder()
 
 
+    # In class IdeaCard:
+
     def _on_ask_llm(self):
-         # 1) show & start the header indicator
-        self.app.llm_status_label.pack(side="left", padx=(0,8))
-        self.app.llm_progress.pack(side="left", padx=(0,8))
-        self.app.llm_status_label.config(text="Fetching LLM…")
-        self.app.llm_progress.start()
+        # --- REPLACEMENT START ---
+        self.app.set_status(f"Asking LLM for analysis on {self.idea.symbol}...", color="orange")
 
-
-
-        # 2) do the work off the UI thread
         def worker():
             try:
-                client = LLMHelper()
-                # explain the suggested option strategy using your idea’s data
-                resp = client.explain_option_strategy(
-                    ticker=self.idea.symbol,
-                    option_type=self.idea.suggested_strategy.get('type', ''),
-                    strike=self.idea.suggested_strategy.get('strike', 0),
-                    S0=self.idea.metrics.get('spot_price', self.idea.metrics.get('spot', 0)),
-                    premium=self.idea.suggested_strategy.get('premium', 0),
-                    T_days=self.idea.metrics.get('dte', 0),
-                    prob=self.idea.metrics.get('barrier_hit_probability', 0),
-                    metrics=self.idea.metrics
-                )
-                # back to UI
-                self.after(0, lambda: self._on_llm_response(resp))
+                client = self.app.llm
+                idea_data = {
+                    "ticker": self.idea.symbol, "title": self.idea.title,
+                    "category": self.idea.category,
+                    "strategy_name": self.idea.suggested_strategy.get('type', 'Unknown Strategy').replace('_', ' ').title(),
+                    "dte": self.idea.metrics.get('dte', 'N/A'), "risk": self.idea.risk,
+                }
+                resp = client.explain_idea_card(**idea_data)
+                
+                # The response is now handled by the main thread in _on_llm_response
+                self.after(0, lambda r=resp: self._on_llm_response(r))
+
+            except (ConnectionError, PermissionError) as e:
+                self.after(0, lambda err_msg=str(e): messagebox.showerror("LLM Error", err_msg, parent=self))
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("LLM Error", str(e), parent=self))
+                self.after(0, lambda err_msg=str(e): self.app.show_copyable_error("LLM Error", f"An unexpected error occurred:\n{err_msg}\n\n{traceback.format_exc()}"))
             finally:
-                # ensure spinner stops even on exception
-                self.after(0, lambda: (
-                    self.app.llm_progress.stop(),
-                    self.app.llm_status_label.config(text="")
-                ))
+                self.after(0, self.app.set_status, "Ready.")
 
         threading.Thread(target=worker, daemon=True).start()
+        # --- REPLACEMENT END ---
 
-    def _on_llm_response(self, resp):
-         # stop & hide the header spinner
-        self.app.llm_progress.stop()
-        self.app.llm_status_label.config(text="")
-        self.app.llm_status_label.pack_forget()
-        self.app.llm_progress.pack_forget()
+    def _on_llm_response(self, explanation: str):
+        # --- REPLACEMENT START ---
+        """Creates a popup to display the LLM's explanation with a save button."""
+        popup = tk.Toplevel(self)
+        popup.title(f"LLM Analysis: {self.idea.symbol}")
+        popup.geometry("700x600")
+        self.app.apply_theme_to_window(popup)
+        popup.transient(self); popup.grab_set()
 
-        # open explanation in its own window
-        win = tk.Toplevel(self)
-        win.title(f"LLM Explanation — {self.idea.symbol}")
-        win.transient(self); win.grab_set()
+        text_frame = ttk.Frame(popup, padding=5)
+        text_frame.pack(expand=True, fill=tk.BOTH)
+        text_box = tk.Text(text_frame, wrap=tk.WORD, relief="flat", padx=15, pady=15, font=("Segoe UI", 10))
+        text_box.pack(expand=True, fill=tk.BOTH)
+        text_box.insert(tk.END, explanation)
+        text_box.config(state=tk.DISABLED)
 
-        txt = tk.Text(win, wrap="word", font=('Segoe UI', 10), padx=10, pady=10)
-        txt.pack(fill="both", expand=True)
-        txt.insert("1.0", resp)
-        txt.config(state="disabled")
+        theme_settings = self.app.theme_settings()
+        text_box.config(background=theme_settings['entry_bg'], foreground=theme_settings['fg'])
+        
+        button_frame = ttk.Frame(popup, padding=(10, 0, 10, 10))
+        button_frame.pack(fill=tk.X)
+        
+        def save_action():
+            # Step 1: Update the notes content
+            current_notes = self.idea.notes or ""
+            header = f"\n\n## LLM ANALYSIS (as of {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')})\n"
+            full_text_to_add = f"{header}{explanation.strip()}\n"
+            llm_section_pattern = re.compile(r"## LLM ANALYSIS \(as of .*?\)", re.DOTALL)
+            match = llm_section_pattern.search(current_notes)
+            new_notes = (current_notes[:match.start()].strip() + full_text_to_add) if match else (current_notes.strip() + full_text_to_add)
+            
+            # Step 2: Save the notes AND ensure the idea is marked as "saved"
+            self.idea.is_saved = True # Mark as saved
+            self._save_notes(notes=new_notes, tags=self.idea.tags, win=None) # Save notes without closing a window
+            self.app.idea_suite_save(self.idea.uid, add=True) # Explicitly save the idea's UID
 
-    def _show_llm_response(self, resp: str):
-        """Render the LLM’s explanation text right below the tags/notes."""
-        # destroy any old response
-        if hasattr(self, "_llm_frame"):
-            self._llm_frame.destroy()
+            # Step 3: Show a clean confirmation and close the popup
+            messagebox.showinfo("Success", f"'{self.idea.title}' saved to your 'Saved Ideas' tab.", parent=popup)
+            popup.destroy()
 
-        # container for the response
-        self._llm_frame = ttk.Frame(self.content_frame, style='Card.TFrame')
-        # place in its own row (after tags row)
-        self._llm_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8,2))
-
-        # header label
-        ttk.Label(
-            self._llm_frame,
-            text="🧠 Explanation:",
-            style="CardDesc.TLabel"
-        ).pack(anchor="w")
-
-        # response text area
-        resp_txt = tk.Text(
-            self._llm_frame,
-            wrap="word",
-            height=4,
-            bg=self.bg,
-            fg=self.fg,
-            relief="flat",
-            borderwidth=0,
-            font=('Segoe UI', 9)
-        )
-        resp_txt.insert("1.0", resp)
-        resp_txt.config(state="disabled")
-        resp_txt.pack(fill="both", expand=True, padx=(0,4), pady=(2,0))
-
-
-  
+        ttk.Button(button_frame, text="💾 Save to Notes", command=save_action).pack(side=tk.RIGHT)
+        ttk.Button(button_frame, text="Close", command=popup.destroy).pack(side=tk.RIGHT, padx=(0, 10))
+        # --- REPLACEMENT END ---
 
     def _toggle_save(self):
         # flip saved state
@@ -473,75 +460,87 @@ class IdeaCard(ttk.Frame):
 
 
 
+   # In class IdeaCard:
+
     def _on_notes(self):
+        # --- REPLACEMENT START ---
         win = tk.Toplevel(self)
         win.title("Notes & Tags")
+        win.geometry("500x450")
         win.transient(self); win.grab_set()
+        self.app.apply_theme_to_window(win)
 
         container = ttk.Frame(win, padding=10)
         container.pack(fill="both", expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
 
-        # — Notes text area —
+        # --- Notes text area ---
         ttk.Label(container, text="Notes:").grid(row=0, column=0, sticky="w")
-        notes_txt = tk.Text(container, height=5, wrap="word")
-        notes_txt.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
-        notes_txt.insert("1.0", self.idea.notes or "")
+        notes_txt = tk.Text(container, height=8, wrap="word")
+        notes_txt.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=5)
+        
+        # If no notes exist, insert the new template.
+        if not self.idea.notes:
+            template = (
+                f"# Trading Notes for {self.idea.symbol}\n"
+                f"Date: {datetime.datetime.now().strftime('%Y-%m-%d')}\n\n"
+                "## Thesis / Rationale\n• \n\n"
+                "## Key Levels & Targets\n• Support: \n• Resistance: \n\n"
+                "## LLM ANALYSIS\n(Click 'Ask LLM' on the card, then 'Save to Notes' to populate this)"
+            )
+            notes_txt.insert("1.0", template)
+        else:
+            notes_txt.insert("1.0", self.idea.notes)
 
-        # — Tags editor —
+        # --- Tags editor ---
         ttk.Label(container, text="Tags:").grid(row=2, column=0, sticky="w", pady=(10,0))
         tags_frame = ttk.Frame(container)
         tags_frame.grid(row=3, column=0, columnspan=2, sticky="w")
 
         def refresh_tags():
-            for w in tags_frame.winfo_children():
-                w.destroy()
+            for w in tags_frame.winfo_children(): w.destroy()
             for t in self.idea.tags:
                 frm = ttk.Frame(tags_frame)
                 frm.pack(side="left", padx=2, pady=2)
-                icon = tk.Label(frm, text=t, bg=self._get_tag_color(t),
-                                fg=self.fg, padx=4, pady=2)
-                icon.pack(side="left")
-                btn = ttk.Button(frm, text="✕", width=2,
-                                 command=lambda tag=t: remove_tag(tag))
-                btn.pack(side="left", padx=(2,0))
+                tk.Label(frm, text=t, bg=self._get_tag_color(t), fg=self.fg, padx=4, pady=2).pack(side="left")
+                ttk.Button(frm, text="✕", width=2, command=lambda tag=t: remove_tag(tag)).pack(side="left", padx=(2,0))
 
         def remove_tag(tag):
-            self.idea.tags.remove(tag)
+            if tag in self.idea.tags:
+                self.idea.tags.remove(tag)
             refresh_tags()
 
         new_tag_var = tk.StringVar()
-        ttk.Entry(container, textvariable=new_tag_var).grid(
-            row=4, column=0, sticky="w", pady=(5,0))
-        ttk.Button(container, text="＋", width=2,
-                   command=lambda: add_tag()
-        ).grid(row=4, column=1, sticky="w", pady=(5,0))
-
+        ttk.Entry(container, textvariable=new_tag_var).grid(row=4, column=0, sticky="w", pady=(5,0))
         def add_tag():
             new = new_tag_var.get().strip()
             if new and new not in self.idea.tags:
                 self.idea.tags.append(new)
                 new_tag_var.set("")
                 refresh_tags()
-
+        ttk.Button(container, text="＋", width=2, command=add_tag).grid(row=4, column=1, sticky="w", pady=(5,0), padx=(5,0))
         refresh_tags()
 
-        # — Save / Cancel —
+        # --- Save / Cancel buttons ---
         btns = ttk.Frame(container)
-        btns.grid(row=5, column=0, columnspan=2, pady=(10,0))
-        ttk.Button(
-            btns,
-            text="Save",
-            command=lambda: self._save_notes(
-                notes=notes_txt.get("1.0","end").strip(),
-                tags=self.idea.tags,
-                win=win
-            )
-        ).pack(side="right")
+        btns.grid(row=5, column=0, columnspan=2, pady=(15,0), sticky='e')
+        ttk.Button(btns, text="Save", command=lambda: self._save_notes(notes=notes_txt.get("1.0","end").strip(), tags=self.idea.tags, win=win)).pack(side="right")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="right", padx=(0,5))
+        # --- REPLACEMENT END ---
 
-    def _save_notes(self, *, notes: str, tags: list[str], win):
+
+    def _save_notes(self, *, notes: str, tags: list[str], win: tk.Toplevel | None):
+        # --- REPLACEMENT START ---
+        """Updates the idea object and tells the main app to persist the notes."""
         self.idea.notes = notes
         self.idea.tags  = tags
-        # persist via controller
-        self.app.idea_suite_save_notes(self.idea.uid, notes, tags)
-        win.destroy()
+        
+        if hasattr(self.app, 'idea_suite_save_notes'):
+            self.app.idea_suite_save_notes(self.idea.uid, notes, tags)
+        
+        # The disruptive _rebuild_ui() call has been removed.
+        
+        if win and win.winfo_exists():
+            win.destroy()
+        # --- REPLACEMENT END ---
