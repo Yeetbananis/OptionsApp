@@ -914,6 +914,7 @@ class FinancialChatbotApp(ctk.CTk):
                             "calls": _prep(chain.calls),
                             "puts": _prep(chain.puts)}}
     
+
     def _cmd_earnings(self, args):
         if not args: return "Usage: earnings TICKER"
         sym = args[0].upper()
@@ -925,7 +926,10 @@ class FinancialChatbotApp(ctk.CTk):
             cal = None
 
         def _parse_next(cal_obj):
-            if cal_obj is None or cal_obj.empty: return None
+            # --- DEFINITIVE FIX: This check now handles both DataFrames and dictionaries ---
+            if cal_obj is None or (isinstance(cal_obj, pd.DataFrame) and cal_obj.empty) or (isinstance(cal_obj, dict) and not cal_obj):
+                return None
+            # --- END FIX ---
             try:
                 # yfinance format can vary
                 if isinstance(cal_obj, pd.DataFrame) and 'Earnings Date' in cal_obj.index:

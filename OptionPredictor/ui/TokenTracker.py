@@ -7,7 +7,7 @@ class TokenUsageTracker:
     """
     Manages daily API token usage, persisting the count to a local file.
     """
-    def __init__(self, daily_limit: int = 500_000):
+    def __init__(self, daily_limit: int = 50_000):
         self.daily_limit = daily_limit
         self.usage_file = Path.home() / ".option_analyzer_token_usage.json"
         self.tokens_used = 0
