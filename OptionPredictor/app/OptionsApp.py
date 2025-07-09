@@ -43,7 +43,8 @@ from ui.DockingPlotWindow         import DockingPlotWindow
 from app.AnalysisPersistence      import AnalysisPersistence
 from ui.LoadAnalysisWindow        import LoadAnalysisWindow
 from ui.LoadingScreen             import LoadingScreen
-from ui.DebugConsoleWindow         import DebugConsoleWindow
+from ui.DebugConsoleWindow        import DebugConsoleWindow
+from core.engine.strategy_builder import StrategyBuilderWindow
 
 # ====================
 # Local Module Imports
@@ -2165,41 +2166,41 @@ class OptionAnalyzerApp:
         self.apply_theme_to_window(win)
 
 
-    # In class OptionAnalyzerApp:
+
+
+    # In OptionsApp.py
+
+    # In OptionsApp.py
 
     def launch_strategy_builder(self, idea_data: dict | None = None):
-        # --- REPLACEMENT START ---
         """
-        Launches the Strategy Builder window, ensuring only one instance is active
-        and properly handling window closing and reopening.
+        Launches the Strategy Builder. This version uses an aggressive cleanup
+        and forced update to prevent any resource conflicts or freezes.
         """
-        # Check if the window reference exists AND the window is actually open
-        if getattr(self, "_strat_builder_win", None) and self._strat_builder_win.winfo_exists():
-            self._strat_builder_win.deiconify()
-            self._strat_builder_win.lift()
-            self._strat_builder_win.focus_force()
-            # If called with new idea data, prefill the existing window
-            if idea_data:
-                self._strat_builder_win._prefill_from_idea(idea_data)
-            return
 
-        # If the reference is stale or this is the first launch, create a new window
-        from core.engine.strategy_builder import StrategyBuilderWindow
+        # 1. AGGRESSIVE CLEANUP: Find and destroy ALL pre-existing instances.
+        for window in self.child_windows[:]:
+            if isinstance(window, StrategyBuilderWindow):
+                try:
+                    # Execute the full close routine to be safe.
+                    window._on_close()
+                except Exception:
+                    # Ignore errors if the window is already dead.
+                    pass
+        
+        # 2. FORCE UPDATE: This is a critical new step. It forces the Tkinter
+        #    event loop to process the `destroy()` commands from the cleanup
+        #    step IMMEDIATELY, before we proceed.
+        self.root.update_idletasks()
+
+        # 3. FRESH CREATION: Now, with a guaranteed clean slate, create the new window.
         builder = StrategyBuilderWindow(self.root, self, idea_data)
         
-        # Store a reference to the new window instance
-        self._strat_builder_win = builder
-        
-        if builder not in self.child_windows:
-            self.child_windows.append(builder)
-        
-        self.apply_theme_to_window(builder)
-    
-   
-   
-    def on_strategy_builder_close(self):
-        """Callback to nullify the reference when the builder window is closed."""
-        self._strat_builder_win = None
+        if builder.winfo_exists():
+            if builder not in self.child_windows:
+                self.child_windows.append(builder)
+            self.apply_theme_to_window(builder)
+        # --- REPLACEMENT END ---
 
     def _toggle_fullscreen(self):
         is_full = self.root.attributes('-fullscreen')

@@ -57,9 +57,21 @@ class EarningsVolPlayDetector(DetectorBase):
             if not (0 <= days <= 60): 
                 return None
 
+            # In class EarningsVolPlayDetector, inside the run method:
+
+            # --- REPLACEMENT START ---
             title = f"Earnings in {days} {'day' if days == 1 else 'days'}"
-            expected_move_str = f"{earnings.get('expected_move_pct', 0.0) * 100:.1f}%"
+
+            # This block safely handles cases where expected move could not be calculated.
+            expected_move_val = earnings.get('expected_move_pct')
+            if expected_move_val is not None and isinstance(expected_move_val, (int, float)):
+                # The provider now returns a percentage, so no *100 is needed.
+                expected_move_str = f"{expected_move_val:.1f}%"
+            else:
+                expected_move_str = "n/a" # Display 'n/a' if data is missing
+
             desc = f"Expected move is {expected_move_str}. Consider a volatility play."
+            # --- REPLACEMENT END ---
 
             try:
                 event_timestamp = int(time.mktime(dt.datetime.strptime(earnings['date'], "%Y-%m-%d").timetuple()))

@@ -191,32 +191,8 @@ class IdeaCard(ttk.Frame):
             )
             self.explored_button.pack(side="left")
 
-        # ── If this idea has notes, show them ────────────────────────────
-        if self.idea.notes:
-            ttk.Label(
-                content_frame,
-                text=f"Notes: {self.idea.notes}",
-                style="CardDesc.TLabel",
-            ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8,2))
-
-        # ── If this idea has tags, render colored pills ─────────────────
-        if self.idea.tags:
-            tags_frame = ttk.Frame(content_frame, style='Card.TFrame')
-            tags_frame.grid(row=6, column=0, columnspan=2, sticky="w")
-            for tag in self.idea.tags:
-                color = self._get_tag_color(tag)
-                tk.Label(
-                    tags_frame,
-                    text=tag,
-                    bg=color,
-                    fg=self.fg,
-                    padx=4,
-                    pady=2,
-                ).pack(side="left", padx=(0,5), pady=(0,4))
-
-        # ensure our save/explored icons/text update correctly
-        self._update_toggle_visuals()
-
+        self.notes_label = None
+        self.tags_frame = None
 
         # ── If this idea has notes, show them ────────────────────────────
         if self.idea.notes:
@@ -287,18 +263,15 @@ class IdeaCard(ttk.Frame):
         self.sparkline_image = ImageTk.PhotoImage(img)
         self.chart_label.config(image=self.sparkline_image)
 
-    # --- Callbacks to App Controller ---
+    # In idea_card.py
+
     def _on_view_strat(self) -> None:
         """
         Open (or refocus) the Strategy-Builder window and preload the
         suggested legs that came with this Idea.
-
-        Works with both legacy signature:
-            launch_strategy_builder()
-        and the newer one that accepts a dict:
-            launch_strategy_builder(suggested_strategy)
         """
-         # Package full idea data for prefill
+        # --- REPLACEMENT START ---
+        # Package full idea data for prefill
         idea_data = {
             "symbol": self.idea.symbol,
             "metrics": {
@@ -307,12 +280,11 @@ class IdeaCard(ttk.Frame):
             },
             "suggested_strategy": self.idea.suggested_strategy or {}
         }
-        # Launch builder with our prefill payload
-        try:
-            self.app.launch_strategy_builder(idea_data)
-        except TypeError:
-            # in case of older signature
-            self.app.launch_strategy_builder()
+        
+        # Launch the builder directly. The faulty try/except block that was
+        # hiding the real error and causing the crash has been removed.
+        self.app.launch_strategy_builder(idea_data)
+     
 
 
     # In class IdeaCard:

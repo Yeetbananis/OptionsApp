@@ -13,7 +13,7 @@ class LLMHelper:
     def __init__(self, token_tracker: TokenUsageTracker, model: str = "gemini-1.5-pro-latest"):
         self.model_name = model
         self.token_tracker = token_tracker
-        self.api_key = os.getenv("GOOGLE_API_KEY")
+        self.api_key = "AIzaSyAt67ZI4vacvCacjzFbrXoeIsKTG__qaCI"  #os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
             raise ConnectionError("GOOGLE_API_KEY environment variable not set. The AI features will be disabled.")
         genai.configure(api_key=self.api_key)

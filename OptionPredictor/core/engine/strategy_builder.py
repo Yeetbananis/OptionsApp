@@ -33,7 +33,30 @@ MC_DEFAULT_RATE = 0.05      # Default simulation rate
 MC_DEFAULT_DAYS = 30        # Default simulation expiry
 
 class StrategyBuilderWindow(tk.Toplevel):
+     # --- DEFINITIVE FIX: ADD THIS LINE ---
+    # Define the class variable that acts as the global lock.
+    # It must be here, outside of any method.
+    _is_open = False
+    # --- END FIX ---
     def __init__(self, parent, app_controller, idea_data: dict | None = None):
+        print("DEBUG: 1. Attempting to create StrategyBuilderWindow...")
+
+        print("DEBUG: 1. Attempting to create StrategyBuilderWindow...")
+
+        # This check will now work because the variable exists.
+        if StrategyBuilderWindow._is_open:
+            print("DEBUG: ERROR! An instance is already open. Aborting creation.")
+            messagebox.showerror("Window Already Open",
+                                 "The Strategy Builder is already open or closing.\n"
+                                 "Please close the existing window and try again.",
+                                 parent=parent)
+            self.after(0, self.destroy)
+            return # Stop initialization
+
+        # If the lock is free, acquire it and proceed.
+        StrategyBuilderWindow._is_open = True
+        print("DEBUG: 2. Lock acquired. Initializing new StrategyBuilderWindow.")
+
         super().__init__(parent)
         self.parent = parent
         self.app_controller = app_controller # Store the main app instance
@@ -141,6 +164,8 @@ class StrategyBuilderWindow(tk.Toplevel):
         except:
             pass
 
+    # In strategy_builder.py
+
     def _prefill_from_idea(self, idea_data: dict):
         """
         Takes data from an Idea object and populates the strategy builder's fields.
@@ -154,29 +179,36 @@ class StrategyBuilderWindow(tk.Toplevel):
 
         # ⚠️ We no longer pre-fill S₀ or DTE—user will enter those manually.
 
-        # Select the right template tab exactly as if the user clicked it
-        base = strategy_type
-        for p in ("Long ", "Short "):
-            if base.startswith(p):
-                base = base[len(p):]
-                break
-        if base.endswith(" Spread"):
-            base = base[:-len(" Spread")]
-
-        method_name = f"_apply_{base.lower().replace(' ', '_')}_template"
+        # --- REPLACEMENT START ---
+        # The previous logic was too complex and failed on simple names like "Long Call".
+        # This new logic directly formats the strategy name into the expected method name format.
+        # e.g., "Long Call" -> "_apply_long_call_template"
+        # e.g., "Iron Condor" -> "_apply_iron_condor_template"
+        method_name_base = strategy_type.lower().replace(' ', '_')
+        method_name = f"_apply_{method_name_base}_template"
+        # --- REPLACEMENT END ---
+        
         tgt = getattr(self, method_name, None)
         if callable(tgt):
-            # invoke the template’s default strikes & premiums
+            # Invoke the template's default settings
             tgt()
-            # then prompt the user to fill in the idea-specific fields
-            msg = (
-                f"Template “{strategy_type}” applied with default strikes/premiums.\n\n"
-                "Please now enter the idea’s specific:\n"
-                f" • Current Price (S₀): {idea_data.get('metrics', {}).get('spot_price', '…')}\n"
-                f" • Days to Expiration (DTE): {idea_data.get('metrics', {}).get('dte', '…')}\n\n"
-                "Then adjust strikes & premiums as needed."
-            )
-            messagebox.showinfo("Enter Idea Parameters", msg, parent=self)
+
+            # --- DEFINITIVE FIX, PART 1 ---
+            # Do NOT show a blocking messagebox here. Instead, schedule it to
+            # appear after the window is fully initialized and drawn.
+            # This prevents the application from freezing.
+            def show_delayed_popup():
+                msg = (
+                    f"Template “{strategy_type}” applied with default strikes/premiums.\n\n"
+                    "Please now enter the idea’s specific:\n"
+                    f" • Current Price (S₀): {idea_data.get('metrics', {}).get('spot_price', '…')}\n"
+                    f" • Days to Expiration (DTE): {idea_data.get('metrics', {}).get('dte', '…')}\n\n"
+                    "Then adjust strikes & premiums as needed."
+                )
+                messagebox.showinfo("Enter Idea Parameters", msg, parent=self)
+
+            self.after(100, show_delayed_popup)
+            # --- END FIX ---
         else:
             messagebox.showwarning(
                 "Template Not Found",
@@ -186,14 +218,32 @@ class StrategyBuilderWindow(tk.Toplevel):
             )
 
 
-
     def _on_close(self):
-        """Handles the window close event."""
-        # Notify the main app that this window is closing
-        if hasattr(self.app_controller, 'on_strategy_builder_close'):
-            self.app_controller.on_strategy_builder_close()
-        # Destroy the window
+        """Handles the window close event with full cleanup and debug."""
+        print("DEBUG: 5. _on_close called. Starting shutdown sequence.")
+
+        # --- DEFINITIVE FIX: Release the lock FIRST ---
+        # This is the most important step. It signals that a new window can now be created.
+        StrategyBuilderWindow._is_open = False
+        print("DEBUG: 6. Global lock released.")
+        # --- END FIX ---
+
+        # Notify the app controller to clean up its child_windows list
+        if hasattr(self.app_controller, 'on_child_window_close'):
+            self.app_controller.on_child_window_close(self)
+
+        # Explicitly close the matplotlib figure to release its resources
+        try:
+            if hasattr(self, 'fig'):
+                import matplotlib.pyplot as plt
+                plt.close(self.fig)
+                print("DEBUG: 7. Matplotlib figure closed.")
+        except Exception as e:
+            print(f"DEBUG: Error closing matplotlib figure: {e}")
+
+        # Finally, destroy the Tkinter window
         self.destroy()
+        print("DEBUG: 8. Window destroyed. Shutdown complete.")
         
     def _setup_ui(self):
         """Creates the main UI layout."""
@@ -772,10 +822,12 @@ class StrategyBuilderWindow(tk.Toplevel):
             self._set_status("All legs cleared.", "orange")
 
     def _close_window(self):
-            try:
-                self.destroy()
-            except Exception as e:
-                print(f"Error closing strategy builder: {e}")
+            # --- REPLACEMENT START ---
+            # This method was only calling self.destroy(), which left a stale
+            # reference in the main app. By calling self._on_close() instead,
+            # we ensure the main app is always notified, preventing the crash.
+            self._on_close()
+            # --- REPLACEMENT END ---
     
     def _recursive_theme(self, widget, bg, fg):
         try:
