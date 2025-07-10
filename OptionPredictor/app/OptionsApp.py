@@ -44,7 +44,6 @@ from app.AnalysisPersistence      import AnalysisPersistence
 from ui.LoadAnalysisWindow        import LoadAnalysisWindow
 from ui.LoadingScreen             import LoadingScreen
 from ui.DebugConsoleWindow        import DebugConsoleWindow
-from core.engine.strategy_builder import StrategyBuilderWindow
 
 # ====================
 # Local Module Imports
@@ -55,8 +54,19 @@ from ui.idea_suite_view             import IdeaSuiteView
 from app.llm_helper                 import LLMHelper
 from ui.StockChartWindow            import StockChartWindow
 from ui.TokenTracker                import TokenUsageTracker
+from core.engine.strategy_builder   import StrategyBuilderWindow 
 
 
+import sys
+from pathlib import Path
+try:
+    # This works when running from source code
+    project_root = Path(__file__).resolve().parent.parent
+except NameError:
+    # This is a fallback for some bundled environments where __file__ is not defined
+    project_root = Path(os.path.abspath(".")).parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 
 
@@ -391,6 +401,7 @@ class OptionAnalyzerApp:
         self.initial_load_tasks = ['indices', 'watchlist', 'news', 'fng', 'earnings'] # NEW: Add 'earnings'
         self.loading_screen = None
         self.loading_complete = False
+        self._strat_builder_win = None
 
         # Earnings fetching queue and state
         self._earnings_fetch_queue = queue.Queue()
@@ -816,6 +827,8 @@ class OptionAnalyzerApp:
             self.settings.data["earnings_data"].pop(removed_ticker, None) # Remove from stored data
             self.dashboard.update_earnings_events() # Update dashboard's calendar
 
+        # In OptionsApp.py
+
         def add_watchlist_chip(ticker=""):
             var = tk.StringVar(value=ticker)
             frame = ttk.Frame(watchlist_frame, style="Card.TFrame")
@@ -827,15 +840,14 @@ class OptionAnalyzerApp:
             entry.pack(side="left", fill='x', expand=True, pady=8)
             ttk.Button(frame, text="✕", width=2, style='Toolbutton', command=lambda f=frame: remove_chip(f)).pack(side="left", padx=(8, 8), pady=8)
 
-            #  Bind to entry change to trigger earnings fetch
             def on_ticker_entry_change(*args):
                 updated_ticker = var.get().strip().upper()
                 if updated_ticker:
                     self._add_to_pending_earnings_fetch(updated_ticker)
             var.trace_add("write", on_ticker_entry_change)
 
+            # --- DEFINITIVE FIX: The first append call was removed from here ---
 
-            chip_frames.append(frame); chips.append(var)
             # If a new empty chip is added, immediately mark for fetch if text is entered later
             if not ticker:
                 self._add_to_pending_earnings_fetch(var.get().strip().upper())
@@ -844,7 +856,9 @@ class OptionAnalyzerApp:
                 handle.bind("<B1-Motion>", lambda e, w=frame: on_drag_motion(e, w))
                 handle.bind("<ButtonRelease-1>", lambda e, w=frame: on_drag_release(e, w))
                 
-                chip_frames.append(frame); chips.append(var)
+            # The append now happens only once, outside the if block.
+            chip_frames.append(frame)
+            chips.append(var)
 
         for t in filter(None, (x.strip() for x in self.settings.get("watchlist", "").split("|"))): add_watchlist_chip(t)
         ttk.Button(watchlist_panel, text="＋ Add Ticker", style="Pill.TButton", command=lambda: add_watchlist_chip()).pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(10, 5))
@@ -2090,7 +2104,8 @@ class OptionAnalyzerApp:
         if should_be_bouncing:
             bounce_overlay.start()
 
-            
+
+
     def _on_close(self) -> None:
         """
         Handles the window close event (the 'X' button).
@@ -2099,29 +2114,32 @@ class OptionAnalyzerApp:
             return  # Shutdown already in progress
         self._is_closing = True
 
-       # 1. Signal all components to stop their work.
+        # --- DEFINITIVE FIX: Reorder the shutdown sequence ---
+        # 1. Stop console redirection FIRST. This ensures any errors from
+        #    thread cleanup are printed to the actual console, not a dead window.
+        if hasattr(self, 'debug_console_window') and self.debug_console_window:
+            self.debug_console_window.stop_redirection()
+
+        # 2. Now, signal all components and threads to stop their work.
         if hasattr(self, "dashboard"):
             self.dashboard.shutdown()
         self._cancel_loading_animation()
 
-        #  Stop the earnings fetch worker thread gracefully
         if self._fetching_earnings:
-            self._earnings_fetch_queue.put(None) # Send sentinel to stop worker
-            # Give it a moment to finish, but don't block main thread indefinitely
+            self._earnings_fetch_queue.put(None)
             self._earnings_fetch_thread.join(timeout=2)
             if self._earnings_fetch_thread.is_alive():
                 logging.warning("Earnings fetch thread did not terminate gracefully.")
 
-        # 2. Terminate any external processes.
+        # 3. Terminate any external processes.
         if hasattr(self, "_chatbot_proc") and self._chatbot_proc.poll() is None:
             self._chatbot_proc.terminate()
 
+        # 4. Destroy the console window after its redirection is stopped.
         if hasattr(self, 'debug_console_window') and self.debug_console_window:
-            self.debug_console_window.stop_redirection() # Stop redirection before closing
-            self.debug_console_window.destroy() # Destroy the console window
+            self.debug_console_window.destroy()
 
-        # 3. Tell the main event loop to exit. This is safer than destroy().
-        #    The script will terminate after this.
+        # 5. Tell the main event loop to exit.
         self.root.quit()
 
     def launch_idea_suite(self):
@@ -2170,37 +2188,30 @@ class OptionAnalyzerApp:
 
     # In OptionsApp.py
 
-    # In OptionsApp.py
-
     def launch_strategy_builder(self, idea_data: dict | None = None):
         """
-        Launches the Strategy Builder. This version uses an aggressive cleanup
-        and forced update to prevent any resource conflicts or freezes.
+        Launches the Strategy Builder window using a singleton pattern.
+        It creates the window once and then hides/shows it to prevent
+        resource-related crashes in the bundled .exe.
         """
+        # Check if the window variable exists and if the window hasn't been destroyed
+        if self._strat_builder_win and self._strat_builder_win.winfo_exists():
+            # If it exists, just show it and bring it to the front
+            self._strat_builder_win.deiconify()
+            self._strat_builder_win.lift()
+            self._strat_builder_win.focus_force()
+        else:
+            # If it doesn't exist or was destroyed, create it for the first time
+            self._strat_builder_win = StrategyBuilderWindow(self.root, self, None) # Create without data first
+            if self._strat_builder_win not in self.child_windows:
+                self.child_windows.append(self._strat_builder_win)
+            self.apply_theme_to_window(self._strat_builder_win)
 
-        # 1. AGGRESSIVE CLEANUP: Find and destroy ALL pre-existing instances.
-        for window in self.child_windows[:]:
-            if isinstance(window, StrategyBuilderWindow):
-                try:
-                    # Execute the full close routine to be safe.
-                    window._on_close()
-                except Exception:
-                    # Ignore errors if the window is already dead.
-                    pass
-        
-        # 2. FORCE UPDATE: This is a critical new step. It forces the Tkinter
-        #    event loop to process the `destroy()` commands from the cleanup
-        #    step IMMEDIATELY, before we proceed.
-        self.root.update_idletasks()
-
-        # 3. FRESH CREATION: Now, with a guaranteed clean slate, create the new window.
-        builder = StrategyBuilderWindow(self.root, self, idea_data)
-        
-        if builder.winfo_exists():
-            if builder not in self.child_windows:
-                self.child_windows.append(builder)
-            self.apply_theme_to_window(builder)
-        # --- REPLACEMENT END ---
+        # Whether showing an old window or creating a new one, if new idea data
+        # is provided, pre-fill the form.
+        if idea_data and self._strat_builder_win.winfo_exists():
+            # Schedule the prefill to run after the window is fully visible and ready.
+            self._strat_builder_win.after(50, lambda: self._strat_builder_win._prefill_from_idea(idea_data))
 
     def _toggle_fullscreen(self):
         is_full = self.root.attributes('-fullscreen')

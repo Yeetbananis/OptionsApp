@@ -219,31 +219,14 @@ class StrategyBuilderWindow(tk.Toplevel):
 
 
     def _on_close(self):
-        """Handles the window close event with full cleanup and debug."""
-        print("DEBUG: 5. _on_close called. Starting shutdown sequence.")
-
-        # --- DEFINITIVE FIX: Release the lock FIRST ---
-        # This is the most important step. It signals that a new window can now be created.
-        StrategyBuilderWindow._is_open = False
-        print("DEBUG: 6. Global lock released.")
-        # --- END FIX ---
-
-        # Notify the app controller to clean up its child_windows list
-        if hasattr(self.app_controller, 'on_child_window_close'):
-            self.app_controller.on_child_window_close(self)
-
-        # Explicitly close the matplotlib figure to release its resources
-        try:
-            if hasattr(self, 'fig'):
-                import matplotlib.pyplot as plt
-                plt.close(self.fig)
-                print("DEBUG: 7. Matplotlib figure closed.")
-        except Exception as e:
-            print(f"DEBUG: Error closing matplotlib figure: {e}")
-
-        # Finally, destroy the Tkinter window
-        self.destroy()
-        print("DEBUG: 8. Window destroyed. Shutdown complete.")
+        """
+        Handles the window close event (title bar 'X').
+        Instead of destroying the window, it now just hides it to be reused later.
+        """
+        # Release the grab so other windows can be used
+        self.grab_release()
+        # Hide the window
+        self.withdraw()
         
     def _setup_ui(self):
         """Creates the main UI layout."""
@@ -822,12 +805,8 @@ class StrategyBuilderWindow(tk.Toplevel):
             self._set_status("All legs cleared.", "orange")
 
     def _close_window(self):
-            # --- REPLACEMENT START ---
-            # This method was only calling self.destroy(), which left a stale
-            # reference in the main app. By calling self._on_close() instead,
-            # we ensure the main app is always notified, preventing the crash.
-            self._on_close()
-            # --- REPLACEMENT END ---
+        """Handles the custom '✖' close button click."""
+        self._on_close() # Call the same hide logic
     
     def _recursive_theme(self, widget, bg, fg):
         try:
