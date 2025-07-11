@@ -14,6 +14,18 @@ import queue
 import datetime as dt
 from pathlib import Path
 
+# Configure logging at the very beginning of the application
+logging.basicConfig(
+    level=logging.INFO, # Or logging.DEBUG for more verbosity
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout), # Log to console
+        # logging.FileHandler("app_errors.log") # Optionally log to a file
+    ]
+)
+# --- END Logging Configuration ---
+
+
 # -----------------------------------------------------------------
 # Ensure the project root (…/OptionPredictor) is on sys.path so that
 # sibling packages like `ui`, `core`, `data` import cleanly even when
@@ -2109,38 +2121,81 @@ class OptionAnalyzerApp:
     def _on_close(self) -> None:
         """
         Handles the window close event (the 'X' button).
+        Ensures all threads and child windows are properly shut down.
         """
         if getattr(self, "_is_closing", False):
             return  # Shutdown already in progress
         self._is_closing = True
 
-        # --- DEFINITIVE FIX: Reorder the shutdown sequence ---
+        print("Initiating application shutdown sequence...")
+
         # 1. Stop console redirection FIRST. This ensures any errors from
         #    thread cleanup are printed to the actual console, not a dead window.
         if hasattr(self, 'debug_console_window') and self.debug_console_window:
-            self.debug_console_window.stop_redirection()
+            try:
+                self.debug_console_window.stop_redirection()
+                print("Debug console redirection stopped.")
+            except Exception as e:
+                print(f"Error stopping debug console redirection: {e}")
 
-        # 2. Now, signal all components and threads to stop their work.
-        if hasattr(self, "dashboard"):
-            self.dashboard.shutdown()
+        # 2. Signal all components and threads to stop their work.
+        if hasattr(self, "dashboard") and self.dashboard:
+            try:
+                self.dashboard.shutdown()
+                print("Dashboard shutdown initiated.")
+            except Exception as e:
+                print(f"Error during dashboard shutdown: {e}")
+
         self._cancel_loading_animation()
+        print("Loading animation cancelled.")
 
-        if self._fetching_earnings:
-            self._earnings_fetch_queue.put(None)
-            self._earnings_fetch_thread.join(timeout=2)
-            if self._earnings_fetch_thread.is_alive():
-                logging.warning("Earnings fetch thread did not terminate gracefully.")
+        # Ensure earnings fetch thread is stopped gracefully
+        if self._fetching_earnings and self._earnings_fetch_thread and self._earnings_fetch_thread.is_alive():
+            try:
+                print("Signaling earnings fetch thread to stop...")
+                self._earnings_fetch_queue.put(None) # Send sentinel to stop the worker
+                self._earnings_fetch_thread.join(timeout=3) # Give it some time to finish
+                if self._earnings_fetch_thread.is_alive():
+                    print("Warning: Earnings fetch thread did not terminate gracefully after 3 seconds.")
+            except Exception as e:
+                print(f"Error during earnings thread shutdown: {e}")
+        self._fetching_earnings = False # Ensure flag is reset
 
-        # 3. Terminate any external processes.
+        # 3. Terminate any external processes (like chatbot if launched via Popen).
         if hasattr(self, "_chatbot_proc") and self._chatbot_proc.poll() is None:
-            self._chatbot_proc.terminate()
+            try:
+                print("Terminating chatbot process...")
+                self._chatbot_proc.terminate()
+                self._chatbot_proc.wait(timeout=2) # Give it a moment to terminate
+                if self._chatbot_proc.poll() is None:
+                    print("Warning: Chatbot process did not terminate gracefully, killing it.")
+                    self._chatbot_proc.kill()
+            except Exception as e:
+                print(f"Error terminating chatbot process: {e}")
 
-        # 4. Destroy the console window after its redirection is stopped.
+        # 4. Destroy child windows explicitly (they should already have protocol handlers, but as a fallback)
+        for win in self.child_windows[:]: # Iterate over a copy as list might be modified
+            if win and win.winfo_exists():
+                try:
+                    win.destroy()
+                    print(f"Destroyed child window: {win.title()}")
+                except Exception as e:
+                    print(f"Error destroying child window {win}: {e}")
+        self.child_windows = [] # Clear the list
+
+        # 5. Destroy the console window after its redirection is stopped.
         if hasattr(self, 'debug_console_window') and self.debug_console_window:
-            self.debug_console_window.destroy()
+            try:
+                self.debug_console_window.destroy()
+                print("Debug console window destroyed.")
+            except Exception as e:
+                print(f"Error destroying debug console window: {e}")
 
-        # 5. Tell the main event loop to exit.
+        print("Application shutdown complete. Exiting mainloop.")
+        # 6. Tell the main event loop to exit.
         self.root.quit()
+        # No need for sys.exit() here, as root.mainloop() will exit after root.quit()
+        # and the __main__ block will handle sys.exit().
 
     def launch_idea_suite(self):
         """

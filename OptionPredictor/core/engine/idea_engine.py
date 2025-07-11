@@ -579,66 +579,76 @@ class IdeaEngine:
         self.cache = cache or IdeaCache(ttl_sec=900)
         self.progress_sink = progress_sink 
 
-    # In idea_engine.py, inside IdeaEngine.generate method
     def generate(self, universe: Iterable[str]) -> list[Idea]:
         ideas: list[Idea] = []
-        total_symbols = len(list(universe))
+        
+        # Convert universe to a list to get total_symbols and allow multiple iterations
+        universe_list = list(universe) 
+        total_symbols = len(universe_list)
         processed_symbols = 0
 
+        # Fetch macro metrics once outside the loop
         try:
             macro_metrics = self.market_data._read("GLOBAL") or {}
-        except Exception:
+            if macro_metrics.get("error"):
+                print(f"Warning: Error fetching global macro metrics: {macro_metrics['error']}")
+                macro_metrics = {} # Reset to empty if there was an error
+        except Exception as e:
+            print(f"Error fetching global macro metrics: {e}")
             macro_metrics = {}
 
-        for sym in universe:
+        for sym in universe_list: # Iterate over the list
             try:
+                # 1. Check Cache First
                 if cached := self.cache.read(sym):
                     ideas.extend(cached)
                     processed_symbols += 1
                     if self.progress_sink:
                         self.progress_sink.put((processed_symbols, total_symbols))
-                    continue
+                    continue # Move to next symbol
 
+                # 2. Fetch Metrics for the Symbol
                 metrics = self.market_data.get_metrics(sym)
                 if metrics.get("error"):
                     print(f"Skipping {sym} due to data error: {metrics['error']}")
                     processed_symbols += 1
                     if self.progress_sink:
                         self.progress_sink.put((processed_symbols, total_symbols))
-                    continue
+                    continue # Move to next symbol
 
-                full = {**metrics, **macro_metrics}
-
-                # --- NEW DEBUG PRINT ---
-                # Print the entire 'full' metrics dictionary for inspection
-                # This will show if '0m' exists in any field *after* ProviderHub.get
-                # print(f"DEBUG: Full metrics for {sym} before detectors: {full}")
-                # --- END NEW DEBUG PRINT ---
+                # Combine symbol-specific metrics with global macro metrics
+                full_metrics = {**metrics, **macro_metrics}
 
                 sym_ideas: list[Idea] = []
+                # 3. Run Detectors
                 for det in DETECTORS:
                     try:
-                        res = det.run(sym, full)
+                        res = det.run(sym, full_metrics)
                         if isinstance(res, list):
                             sym_ideas.extend(res)
-                        elif res:
+                        elif res: # If it's a single Idea object
                             sym_ideas.append(res)
-                    except Exception as de:
-                        print(f"Detector {det.__class__.__name__} failed on {sym}: {de}")
-                        # If the error is still 'could not convert string to float: '0m'',
-                        # this print will show which detector fails.
+                    except Exception as det_e:
+                        # Log detector-specific errors, but allow IdeaEngine to continue
+                        print(f"Error in {det.__class__.__name__} for {sym}: {det_e}")
+                        import traceback
+                        traceback.print_exc() # Print full traceback for detector error
 
+                # 4. Cache and Add Ideas
                 if sym_ideas:
                     self.cache.write(sym, sym_ideas)
                     ideas.extend(sym_ideas)
 
             except Exception as e:
-                print(f"Error processing {sym} in IdeaEngine.generate: {e}")
+                # Catch any unexpected errors at the symbol processing level
+                print(f"Critical error processing {sym} in IdeaEngine.generate: {e}")
                 import traceback
-                traceback.print_exc() # Print full traceback for this high-level error
+                traceback.print_exc() # Print full traceback for high-level error
 
-            processed_symbols += 1
-            if self.progress_sink:
-                self.progress_sink.put((processed_symbols, total_symbols))
+            finally:
+                # Ensure progress is updated even if an error occurs for a symbol
+                processed_symbols += 1
+                if self.progress_sink:
+                    self.progress_sink.put((processed_symbols, total_symbols))
 
         return ideas

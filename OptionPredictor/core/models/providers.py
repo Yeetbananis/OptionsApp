@@ -7,6 +7,7 @@ from __future__ import annotations
 # Standard Library Imports
 # ===========================
 import datetime as dt
+import math
 import random
 import re
 import time
@@ -471,94 +472,88 @@ class YfinanceEarningsProvider(DataProvider):
     def _calculate_expected_move_for_earnings(self, ticker_obj: yf.Ticker, current_price: float, earnings_date_str: str) -> float | None:
         """
         Calculates the estimated expected move (as a decimal) using ATM options around earnings.
+        This version is robust against missing columns and illiquid options data.
         """
         try:
-            # Convert earnings date string to date object
-            target_expiry_date = dt.datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+            print(f"DEBUG: Calculating expected move for {ticker_obj.ticker}. Current price: {current_price}")
+            target_earnings_date = dt.datetime.strptime(earnings_date_str, "%Y-%m-%d").date()
+            print(f"DEBUG: Target earnings date: {target_earnings_date}")
 
-            # Get available options expiry dates
             expiry_dates = ticker_obj.options
             if not expiry_dates:
-                print(f"No options expiry dates found for {ticker_obj.ticker}")
+                print(f"DEBUG: No options expiry dates found for {ticker_obj.ticker}.")
                 return None
+            print(f"DEBUG: Available expiry dates: {expiry_dates}")
 
-            # Find the closest expiry date that is on or immediately after the earnings date
-            closest_expiry = None
-            min_days_after_earnings = float('inf')
-
-            for exp_str in expiry_dates:
-                exp_dt = dt.datetime.strptime(exp_str, "%Y-%m-%d").date()
-
-                # We are looking for an expiry on or after the earnings date
-                if exp_dt >= target_expiry_date:
-                    days_diff = (exp_dt - target_expiry_date).days
-                    if days_diff < min_days_after_earnings:
-                        min_days_after_earnings = days_diff
-                        closest_expiry = exp_str
+            # Find the first expiry date that is on or after the earnings date
+            closest_expiry = next((exp for exp in expiry_dates if dt.datetime.strptime(exp, "%Y-%m-%d").date() >= target_earnings_date), None)
 
             if not closest_expiry:
-                print(f"No suitable options expiry found on or after earnings date {earnings_date_str} for {ticker_obj.ticker}.")
+                print(f"DEBUG: No suitable options expiry found on or after earnings date {earnings_date_str} for {ticker_obj.ticker}.")
                 return None
+            print(f"DEBUG: Closest suitable expiry selected: {closest_expiry}")
 
-            # Fetch options chain for the closest expiry
             options_chain = ticker_obj.option_chain(closest_expiry)
             calls = options_chain.calls
             puts = options_chain.puts
 
             if calls.empty or puts.empty:
-                print(f"No call or put options found for expiry {closest_expiry} for {ticker_obj.ticker}.")
+                print(f"DEBUG: No call or put options found for expiry {closest_expiry} for {ticker_obj.ticker}.")
                 return None
 
-            # Find At-the-Money (ATM) implied volatility
-            # Average the implied volatility of the call and put closest to the current price
+            # --- FIX: Calculate strike_diff BEFORE filtering ---
+            # Ensure the strike difference column is added to the main DataFrames first.
+            calls['strike_diff'] = (calls['strike'] - current_price).abs()
+            puts['strike_diff'] = (puts['strike'] - current_price).abs()
 
-            # Filter for non-zero impliedVolatility to avoid division by zero or bad data
-            calls_filtered = calls[calls['impliedVolatility'] > 0]
-            puts_filtered = puts[puts['impliedVolatility'] > 0]
+            # --- Filter for liquid options with valid IV ---
+            # Implied volatility below 5% is often a sign of data errors or extreme illiquidity.
+            MIN_IV_THRESHOLD = 0.05
+            calls_filtered = calls[calls['impliedVolatility'] > MIN_IV_THRESHOLD].copy()
+            puts_filtered = puts[puts['impliedVolatility'] > MIN_IV_THRESHOLD].copy()
 
             if calls_filtered.empty or puts_filtered.empty:
-                print(f"No valid IV found for ATM options for expiry {closest_expiry} for {ticker_obj.ticker}.")
+                print(f"DEBUG: No liquid options with IV > {MIN_IV_THRESHOLD} found for {ticker_obj.ticker} on {closest_expiry}.")
+                return None
+                
+            # --- Find ATM IV by averaging the IV of the closest strike call and put ---
+            atm_call_iv = calls_filtered.loc[calls_filtered['strike_diff'].idxmin()]['impliedVolatility']
+            atm_put_iv = puts_filtered.loc[puts_filtered['strike_diff'].idxmin()]['impliedVolatility']
+            
+            print(f"DEBUG: Candidate ATM Call IV: {atm_call_iv:.4f}, Put IV: {atm_put_iv:.4f}")
+
+            atm_iv = (atm_call_iv + atm_put_iv) / 2.0
+            print(f"DEBUG: Final ATM IV used for calculation: {atm_iv:.4f}")
+
+            if atm_iv <= 0:
+                print(f"DEBUG: Final ATM IV is zero or negative. Cannot calculate move.")
                 return None
 
-            atm_call = calls_filtered.iloc[(calls_filtered['strike'] - current_price).abs().argsort()[:1]]
-            atm_put = puts_filtered.iloc[(puts_filtered['strike'] - current_price).abs().argsort()[:1]]
-
-            atm_iv = None
-            if not atm_call.empty and not atm_put.empty:
-                call_iv = atm_call['impliedVolatility'].iloc[0]
-                put_iv = atm_put['impliedVolatility'].iloc[0]
-                atm_iv = (call_iv + put_iv) / 2
-            elif not atm_call.empty: # Fallback if only calls available
-                atm_iv = atm_call['impliedVolatility'].iloc[0]
-            elif not atm_put.empty: # Fallback if only puts available
-                atm_iv = atm_put['impliedVolatility'].iloc[0]
-
-            if atm_iv is None or atm_iv <= 0:
-                print(f"ATM implied volatility could not be determined or is zero for {ticker_obj.ticker} on {closest_expiry}.")
+            # --- Calculate the expected move using the standard formula ---
+            expiry_date_dt = dt.datetime.strptime(closest_expiry, "%Y-%m-%d").date()
+            days_to_expiry = (expiry_date_dt - dt.date.today()).days
+            
+            if days_to_expiry <= 0:
+                print(f"DEBUG: Calculated days to expiry is {days_to_expiry}, which is not valid for this calculation.")
                 return None
+            print(f"DEBUG: Days to selected expiry for calculation: {days_to_expiry}")
 
-            # Calculate days from today to the *selected expiry*
-            days_to_expiry_for_calc = (dt.datetime.strptime(closest_expiry, "%Y-%m-%d").date() - dt.date.today()).days
-            if days_to_expiry_for_calc <= 0:
-                print(f"Calculated expiry days is <= 0 for {ticker_obj.ticker} on {closest_expiry}.")
-                return None
+            # Formula: Expected Move = Stock Price * IV * sqrt(Days to Expiry / 365)
+            expected_move_abs = current_price * atm_iv * np.sqrt(days_to_expiry / 365.0)
+            print(f"DEBUG: Calculated Absolute Expected Move: ${expected_move_abs:.2f}")
 
-            # Expected Move Formula: Stock Price * Implied Volatility * sqrt(Days to Expiry / 365)
-            # This gives the expected move in absolute dollars.
-            expected_move_abs = current_price * atm_iv * np.sqrt(days_to_expiry_for_calc / 365.0)
-
-            # Convert to percentage of current price
             expected_move_pct_decimal = expected_move_abs / current_price
-
+            print(f"DEBUG: Calculated Decimal Expected Move (% of price): {expected_move_pct_decimal:.4f}")
+            
             return expected_move_pct_decimal
 
         except Exception as e:
-            print(f"Detailed error calculating expected move for {ticker_obj.ticker} on {earnings_date_str}: {e}")
+            # Add ticker and date to the error for better context during debugging
+            print(f"Detailed ERROR in _calculate_expected_move_for_earnings for {ticker_obj.ticker} on {earnings_date_str}: {e}")
+            # The traceback is useful for development, can be commented out in production
             import traceback
-            traceback.print_exc() # Print full traceback for debugging
+            traceback.print_exc()
             return None
-        
-# In data/providers.py
 
 
 # =============================================================
@@ -568,32 +563,30 @@ class YfinanceEarningsProvider(DataProvider):
 def _to_float(val: Any) -> float | None:
     """
     Robustly converts a value to a float, handling formatted strings
-    like '1.5b', '250m', '75k', etc., and also '0m', '0k', etc.
-    Added explicit string conversion and debug for problematic values.
+    like '1.5b', '250m', '75k', etc., and also '0m', '0k', etc.,
+    along with None, pandas.NA, and numpy.nan values.
     """
+    # Handle explicit NaN/None types first
+    if val is None or pd.isna(val) or (isinstance(val, float) and math.isnan(val)):
+        return None
+
+    # Try direct conversion if it's already a numeric type
     if isinstance(val, (int, float)):
         return float(val)
     
     # Crucial: Ensure the value is treated as a string for parsing
-    if not isinstance(val, str):
-        # If it's not a string and not a number, try converting it to string.
-        # This catches pandas Series, numpy objects, etc.
-        try:
-            val_str = str(val).lower().strip()
-        except Exception:
-            return None # Cannot even convert to string
-    else:
-        val_str = val.lower().strip()
+    val_str = str(val).lower().strip()
 
-    # Handle empty strings or 'nan' strings
-    if not val_str or val_str in ['nan', 'n/a', 'none']:
+    # Handle empty strings or common non-numeric string representations
+    if not val_str or val_str in ['nan', 'n/a', 'none', '-']:
         return None
 
     multipliers = {'t': 1e12, 'b': 1e9, 'm': 1e6, 'k': 1e3}
 
     # Check for a known multiplier suffix
     if val_str and val_str[-1] in multipliers:
-        multiplier = multipliers[val_str[-1]]
+        multiplier_char = val_str[-1]
+        multiplier = multipliers[multiplier_char]
         numeric_part_str = val_str[:-1]
         try:
             # Handle cases like '0m', '0k' gracefully
@@ -601,19 +594,18 @@ def _to_float(val: Any) -> float | None:
                 return 0.0 # Explicitly return 0.0 for "0m", "0k" etc.
             return float(numeric_part_str) * multiplier
         except (ValueError, TypeError):
-            print(f"DEBUG: _to_float failed to convert numeric part '{numeric_part_str}' from '{val}' with multiplier. Returning None.")
+            # Debug why numeric part conversion failed if it was expected to work
+            print(f"DEBUG: _to_float - Failed to convert numeric part '{numeric_part_str}' from original value '{val}' (suffix '{multiplier_char}'). Returning None.")
             return None # Failed to convert the numeric part
     
     # Try direct conversion if no suffix
     try:
         return float(val_str)
     except (ValueError, TypeError):
-        # This is where the '0m' error *might* originate if it bypasses the multiplier check
-        # For example, if val_str was "0m" and the suffix check failed for some reason
-        # or if the string was something truly unparseable.
-        print(f"DEBUG: _to_float failed direct conversion for '{val_str}' (original: '{val}'). Returning None.")
+        # Debug unparseable strings that don't match multipliers
+        print(f"DEBUG: _to_float - Failed direct conversion for string '{val_str}' (original: '{val}'). Returning None.")
         return None
-
+    
 class FundamentalDataProvider(DataProvider):
     """
     Fetches fundamental data and sanitizes formatted numbers (e.g., '1.5b')
