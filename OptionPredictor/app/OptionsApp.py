@@ -5,6 +5,7 @@ import sys
 import os
 import subprocess
 import threading
+import multiprocessing
 import time  # For small delay in animation
 import traceback  # For detailed error logging
 import json
@@ -2240,8 +2241,38 @@ class OptionAnalyzerApp:
 
 
 
+    # In class OptionAnalyzerApp:
 
-    # In OptionsApp.py
+    def launch_portfolio(self):
+        """
+        Launches the professional Portfolio application in a new, separate process
+        to ensure complete UI isolation.
+        """
+        try:
+            # Check if the process object exists and if the process is still running
+            if hasattr(self, 'portfolio_process') and self.portfolio_process.is_alive():
+                print("Portfolio window is already open.")
+                # Note: We can't easily force-focus a window in another process.
+                # This check simply prevents launching a second instance.
+                return
+
+            # This helper function must be in the global scope of your portfolio_view.py
+            from ui.portfolio_view import launch_portfolio_window
+
+            # Create and start the new process
+            self.portfolio_process = multiprocessing.Process(target=launch_portfolio_window, daemon=True)
+            self.portfolio_process.start()
+            print("Launched portfolio window in a new process.")
+
+        except ImportError:
+            messagebox.showerror("File Not Found", "Could not find 'portfolio_view.py'.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open the Portfolio application: {e}")
+            traceback.print_exc()
+
+    # The _on_portfolio_close method is no longer needed.
+    # The separate process handles its own lifecycle.
+
 
     def launch_strategy_builder(self, idea_data: dict | None = None):
         """

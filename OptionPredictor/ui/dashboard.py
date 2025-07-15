@@ -292,6 +292,7 @@ class SideMenu(ttk.Frame):
             "🔬 Stock Research Suite": self.controller.launch_stock_research_suite,
             "📐 Strategy Builder": self.controller.launch_strategy_builder,
             "🧪 Strategy Tester": self.controller.launch_strategy_tester,
+            "💼 Portfolio": self.controller.launch_portfolio,
             "💬 Chatbot": self.controller.launch_chatbot,
         }
         for text, cmd in btn_map.items():
