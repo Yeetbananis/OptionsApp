@@ -27,6 +27,7 @@ logging.basicConfig(
 # --- END Logging Configuration ---
 
 
+
 # -----------------------------------------------------------------
 # Ensure the project root (…/OptionPredictor) is on sys.path so that
 # sibling packages like `ui`, `core`, `data` import cleanly even when
@@ -2241,37 +2242,32 @@ class OptionAnalyzerApp:
 
 
 
-    # In class OptionAnalyzerApp:
-
     def launch_portfolio(self):
         """
         Launches the professional Portfolio application in a new, separate process
-        to ensure complete UI isolation.
+        and passes the current theme to it.
         """
         try:
-            # Check if the process object exists and if the process is still running
             if hasattr(self, 'portfolio_process') and self.portfolio_process.is_alive():
                 print("Portfolio window is already open.")
-                # Note: We can't easily force-focus a window in another process.
-                # This check simply prevents launching a second instance.
                 return
 
-            # This helper function must be in the global scope of your portfolio_view.py
             from ui.portfolio_view import launch_portfolio_window
 
-            # Create and start the new process
-            self.portfolio_process = multiprocessing.Process(target=launch_portfolio_window, daemon=True)
+            # --- FIX IS HERE: We now pass self.current_theme as an argument ---
+            self.portfolio_process = multiprocessing.Process(
+                target=launch_portfolio_window,
+                args=(self.current_theme,), # This sends the theme name ('light' or 'dark')
+                daemon=True
+            )
             self.portfolio_process.start()
-            print("Launched portfolio window in a new process.")
+            print(f"Launched portfolio window in a new process with '{self.current_theme}' theme.")
 
         except ImportError:
             messagebox.showerror("File Not Found", "Could not find 'portfolio_view.py'.")
         except Exception as e:
             messagebox.showerror("Error", f"Could not open the Portfolio application: {e}")
             traceback.print_exc()
-
-    # The _on_portfolio_close method is no longer needed.
-    # The separate process handles its own lifecycle.
 
 
     def launch_strategy_builder(self, idea_data: dict | None = None):
@@ -2445,6 +2441,16 @@ class OptionAnalyzerApp:
        
 # --- Main Execution ---
 if __name__ == "__main__":
+    # --- FIX: Add DPI Awareness setting at the entry point of the main app ---
+    try:
+        import ctypes
+        import sys
+        if sys.platform == "win32":
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    # --- END DPI FIX ---
+
     root = tk.Tk()
     # Hide the main window immediately to prevent the flash
     root.withdraw()

@@ -7,6 +7,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
+from tkinter import TclError
+from io import BytesIO
+from PIL import Image, ImageTk
+
+
 
 # --- Mock Data API for Demonstration ---
 class MockFinancialDataAPI:
@@ -33,22 +38,37 @@ class PortfolioApp(tk.Tk):
     A standalone portfolio application with a professional, modern UI.
     Designed to be isolated from the main app, maintaining all original features with an enhanced look.
     """
-    def __init__(self):
+    def __init__(self, theme_name='dark'):
         super().__init__()
-        # self.controller is no longer needed unless you use multiprocessing queues to communicate
         self.api = MockFinancialDataAPI()
+        # self.is_first_analysis_draw = True # REMOVED: This flag is no longer needed.
 
-        # --- Theme & Styling ---
-        self.BG_COLOR = "#1a1a1a"         # Dark background
-        self.CARD_COLOR = "#252525"       # Card background
-        self.SIDEBAR_COLOR = "#141414"    # Sidebar background
-        self.TEXT_COLOR = "#d9d9d9"       # Primary text
-        self.SECONDARY_TEXT = "#8a8a8a"   # Secondary text
-        self.ACCENT_COLOR = "#00aaff"     # Highlight color
-        self.POSITIVE_COLOR = "#00cc66"   # Green for gains
-        self.NEGATIVE_COLOR = "#ff4444"   # Red for losses
-        self.BORDER_COLOR = "#404040"     # Subtle borders
-
+        # --- DYNAMIC THEME DEFINITION ---
+        self.themes = {
+            "dark": {
+                "bg": "#1a1a1a", "card": "#252525", "sidebar": "#141414",
+                "text": "#d9d9d9", "secondary_text": "#8a8a8a", "accent": "#00aaff",
+                "positive": "#00cc66", "negative": "#ff4444", "border": "#404040"
+            },
+            "light": {
+                "bg": "#f0f0f0", "card": "#ffffff", "sidebar": "#e5e5e5",
+                "text": "#1a1a1a", "secondary_text": "#555555", "accent": "#0078d4",
+                "positive": "#00994d", "negative": "#d32f2f", "border": "#cccccc"
+            }
+        }
+        
+        # Select the active theme colors
+        active_theme = self.themes.get(theme_name, self.themes['dark']) # Default to dark if theme name is invalid
+        self.BG_COLOR = active_theme["bg"]
+        self.CARD_COLOR = active_theme["card"]
+        self.SIDEBAR_COLOR = active_theme["sidebar"]
+        self.TEXT_COLOR = active_theme["text"]
+        self.SECONDARY_TEXT = active_theme["secondary_text"]
+        self.ACCENT_COLOR = active_theme["accent"]
+        self.POSITIVE_COLOR = active_theme["positive"]
+        self.NEGATIVE_COLOR = active_theme["negative"]
+        self.BORDER_COLOR = active_theme["border"]
+        
         # --- Window Configuration ---
         self.title("Portfolio Analytics Pro")
         self.geometry("1600x1000")
@@ -65,6 +85,9 @@ class PortfolioApp(tk.Tk):
         self.pie_wedges = []
         self.pie_annot = None
         self.sector_details = {}
+        self.active_timeframe = "6M"
+        self.goal_simulation_results = {}
+        self.active_analysis_goal = None
 
         # --- Build UI ---
         self._build_styles()
@@ -74,23 +97,23 @@ class PortfolioApp(tk.Tk):
         # --- Initialize Data ---
         self.load_portfolio_data()
         self.start_periodic_updates()
-
+    
     def on_closing(self):
         """Ensure clean shutdown."""
         self.destroy()
 
     def _build_styles(self):
-        """Define consistent, professional styles using generic font families."""
+        """Define consistent, professional styles with smaller, denser fonts."""
         style = ttk.Style(self)
         style.theme_use('clam')
 
-        # --- Fonts (Using common, cross-platform fonts) ---
-        self.FONT_NORMAL = ("Calibri", 12)
-        self.FONT_BOLD = ("Calibri", 12, "bold")
-        self.FONT_HEADER = ("Calibri", 16, "bold")
-        self.FONT_TITLE = ("Calibri", 24, "bold")
-        self.FONT_KPI = ("Calibri", 28, "bold")
-        self.FONT_SIDEBAR = ("Calibri", 14)
+        # --- FIX: Font sizes have been reduced for a more compact UI ---
+        self.FONT_NORMAL = ("Calibri", 10)      # Was 12
+        self.FONT_BOLD = ("Calibri", 10, "bold") # Was 12
+        self.FONT_HEADER = ("Calibri", 14, "bold") # Was 16
+        self.FONT_TITLE = ("Calibri", 20, "bold")  # Was 24
+        self.FONT_KPI = ("Calibri", 24, "bold")    # Was 28
+        self.FONT_SIDEBAR = ("Calibri", 12)      # Was 14
 
         # --- General Styles ---
         style.configure("TFrame", background=self.BG_COLOR)
@@ -105,25 +128,56 @@ class PortfolioApp(tk.Tk):
         style.configure("KPI.TLabel", font=self.FONT_KPI)
 
         # --- Buttons ---
-        style.configure("TButton", font=self.FONT_BOLD, padding=10, background=self.CARD_COLOR, foreground=self.TEXT_COLOR, relief="flat")
+        style.configure("TButton", font=self.FONT_BOLD, padding=8, background=self.CARD_COLOR, foreground=self.TEXT_COLOR, relief="flat") # Reduced padding
         style.map("TButton", background=[('active', '#333333')], foreground=[('active', self.TEXT_COLOR)])
         style.configure("Accent.TButton", background=self.ACCENT_COLOR, foreground="#ffffff")
         style.map("Accent.TButton", background=[('active', '#0088cc')])
 
         # --- Sidebar Buttons ---
-        style.configure("Sidebar.TButton", background=self.SIDEBAR_COLOR, foreground=self.SECONDARY_TEXT, font=self.FONT_SIDEBAR, padding=(15, 10), relief="flat")
+        style.configure("Sidebar.TButton", background=self.SIDEBAR_COLOR, foreground=self.SECONDARY_TEXT, font=self.FONT_SIDEBAR, padding=(15, 8), relief="flat") # Reduced padding
         style.map("Sidebar.TButton", background=[('active', self.BG_COLOR)], foreground=[('active', self.TEXT_COLOR)])
         style.configure("AccentIndicator.TFrame", background=self.ACCENT_COLOR)
 
+        # --- Sliders / Scale ---
+        style.configure("TScale", background=self.CARD_COLOR)
+        style.configure("Horizontal.TScale", background=self.CARD_COLOR)
+        style.map("Horizontal.TScale",
+                  background=[('active', self.CARD_COLOR)],
+                  troughcolor=[('active', self.ACCENT_COLOR)],
+                  highlightcolor=[('focus', self.BG_COLOR)])
+
+        # --- Timeframe Buttons ---
+        style.configure("Timeframe.TButton", font=self.FONT_NORMAL, padding=(8, 4), background=self.CARD_COLOR, foreground=self.SECONDARY_TEXT, relief="flat") # Reduced padding
+        style.map("Timeframe.TButton", background=[('active', '#333333')])
+        
+        style.configure("ActiveTimeframe.TButton", font=self.FONT_BOLD, padding=(8, 4), background=self.BG_COLOR, foreground=self.TEXT_COLOR, relief="flat") # Reduced padding
+
+        # --- Progress Bar ---
+        style.configure("Green.Horizontal.TProgressbar",
+                        background=self.POSITIVE_COLOR,
+                        troughcolor=self.CARD_COLOR,
+                        bordercolor=self.BORDER_COLOR,
+                        lightcolor=self.POSITIVE_COLOR, 
+                        darkcolor=self.POSITIVE_COLOR)
+        
+        # --- Notch Buttons for scrolling ---
+        style.configure("Notch.TButton", font=self.FONT_NORMAL, background=self.BG_COLOR, foreground=self.SECONDARY_TEXT, relief="flat")
+        style.map("Notch.TButton",
+                  foreground=[('active', self.ACCENT_COLOR)],
+                  background=[('active', self.BG_COLOR)])
+        
         # --- Treeview ---
-        style.configure("Treeview", background=self.CARD_COLOR, foreground=self.TEXT_COLOR, fieldbackground=self.CARD_COLOR, font=self.FONT_NORMAL, rowheight=30)
-        style.configure("Treeview.Heading", background=self.BORDER_COLOR, foreground=self.TEXT_COLOR, font=self.FONT_BOLD, padding=8)
+        # FIX: Reduced rowheight to match smaller font
+        style.configure("Treeview", background=self.CARD_COLOR, foreground=self.TEXT_COLOR, fieldbackground=self.CARD_COLOR, font=self.FONT_NORMAL, rowheight=25) # Was 30
+        style.configure("Treeview.Heading", background=self.BORDER_COLOR, foreground=self.TEXT_COLOR, font=self.FONT_BOLD, padding=6) # Reduced padding
         style.map("Treeview", background=[('selected', '#333333')])
         style.layout("Treeview", [('Treeview.treearea', {'sticky': 'nswe'})])
 
         # --- Matplotlib ---
         plt.style.use('dark_background')
         plt.rcParams.update({
+            # *** THE FIX IS HERE: Changed figure.facecolor to CARD_COLOR ***
+            # This ensures the figure background matches the card it sits in.
             "figure.facecolor": self.CARD_COLOR,
             "axes.facecolor": self.CARD_COLOR,
             "axes.edgecolor": self.BORDER_COLOR,
@@ -132,11 +186,12 @@ class PortfolioApp(tk.Tk):
             "ytick.color": self.SECONDARY_TEXT,
             "grid.color": self.BORDER_COLOR,
             "text.color": self.TEXT_COLOR,
-            "font.family": "sans-serif", # Use the most generic family
-            "axes.titlesize": 14,
+            "font.family": "sans-serif",
+            "font.size": 9, # Set a base font size for matplotlib
+            "axes.titlesize": 12, # Was 14
             "axes.titleweight": "bold"
         })
-        
+
     def _build_main_layout(self):
         """Construct the main layout with sidebar and content area."""
         self.grid_columnconfigure(1, weight=1)
@@ -201,68 +256,90 @@ class PortfolioApp(tk.Tk):
 
     # --- View Builders ---
     def _build_dashboard_view(self, parent):
-        """Build a sleek dashboard view."""
+        """Build a completely revamped, professional dashboard view."""
         view = ttk.Frame(parent)
-        view.columnconfigure((0, 1), weight=1)
+        view.columnconfigure(0, weight=3) # Main content area
+        view.columnconfigure(1, weight=2) # Right sidebar area
         view.rowconfigure(1, weight=1)
 
-        # --- Header ---
+        # --- Row 0: Header ---
         header = ttk.Frame(view)
-        header.grid(row=0, column=0, columnspan=2, pady=(0, 20), sticky="ew")
-        ttk.Label(header, text="Dashboard", style="Title.TLabel").pack(side="left")
+        header.grid(row=0, column=0, columnspan=2, pady=(0, 25), sticky="ew")
+        ttk.Label(header, text="Dashboard Overview", style="Title.TLabel").pack(side="left")
         ttk.Button(header, text="+ Add Position", style="Accent.TButton", command=self._open_add_position_dialog).pack(side="right")
 
-        # --- Left Column: KPIs and Chart ---
-        left_frame = ttk.Frame(view)
-        left_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
-        left_frame.rowconfigure(1, weight=1)
-        left_frame.columnconfigure(0, weight=1)
+        # --- Column 0: Main Content (KPIs and History Chart) ---
+        main_content = ttk.Frame(view)
+        main_content.grid(row=1, column=0, sticky="nsew", padx=(0, 15))
+        main_content.rowconfigure(1, weight=1)
+        main_content.columnconfigure(0, weight=1)
 
-        kpi_frame = ttk.Frame(left_frame)
+        # --- KPI Row ---
+        kpi_frame = ttk.Frame(main_content)
         kpi_frame.grid(row=0, column=0, pady=(0, 20), sticky="ew")
         kpi_frame.columnconfigure((0, 1, 2), weight=1)
-        self.kpi_total = self._create_kpi_card(kpi_frame, "Total Value", "$0.00", 0)
-        self.kpi_day = self._create_kpi_card(kpi_frame, "Day's Gain", "$0.00", 1)
-        self.kpi_gain = self._create_kpi_card(kpi_frame, "Total Gain", "$0.00", 2)
+        self.kpi_total = self._create_kpi_card(kpi_frame, "Total Portfolio Value", "$0.00", 0)
+        self.kpi_day = self._create_kpi_card(kpi_frame, "Today's Gain / Loss", "$0.00", 1)
+        self.kpi_gain = self._create_kpi_card(kpi_frame, "Total Unrealized Gain", "$0.00", 2)
 
-        chart_frame = ttk.Frame(left_frame, style="Card.TFrame", padding=15)
-        chart_frame.grid(row=1, column=0, sticky="nsew")
-        chart_frame.rowconfigure(0, weight=1)
-        chart_frame.columnconfigure(0, weight=1)
-        self.fig_dash, self.ax_dash = plt.subplots()
-        self.canvas_dash = FigureCanvasTkAgg(self.fig_dash, chart_frame)
-        self.canvas_dash.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        # --- History Chart Card ---
+        chart_card = ttk.Frame(main_content, style="Card.TFrame", padding=20)
+        chart_card.grid(row=1, column=0, sticky="nsew")
+        chart_card.rowconfigure(1, weight=1)
+        chart_card.columnconfigure(0, weight=1)
+        
+        chart_header = ttk.Frame(chart_card, style="Card.TFrame")
+        chart_header.grid(row=0, column=0, sticky="ew", pady=(0, 15))
+        ttk.Label(chart_header, text="Performance History", style="Header.TLabel", background=self.CARD_COLOR).pack(side="left")
+        
+        # Add the new timeframe selector
+        self.timeframe_selector = self._create_timeframe_selector(chart_header)
+        self.timeframe_selector.pack(side="right")
+
+        self.fig_dash, self.ax_dash = plt.subplots(dpi=100)
+        self.canvas_dash = FigureCanvasTkAgg(self.fig_dash, chart_card)
+        self.canvas_dash.get_tk_widget().grid(row=1, column=0, sticky="nsew")
         self._setup_chart_hover()
 
-        # --- Right Column: Positions and Pie ---
-        right_frame = ttk.Frame(view)
-        right_frame.grid(row=1, column=1, sticky="nsew", padx=(10, 0))
-        right_frame.rowconfigure((0, 1), weight=1)
-        right_frame.columnconfigure(0, weight=1)
+        # --- Column 1: Right Sidebar (Positions and Diversification) ---
+        right_sidebar = ttk.Frame(view)
+        right_sidebar.grid(row=1, column=1, sticky="nsew", padx=(15, 0))
+        right_sidebar.rowconfigure(0, weight=5) # Positions take more space
+        right_sidebar.rowconfigure(1, weight=4) # Pie chart takes less
+        right_sidebar.columnconfigure(0, weight=1)
 
-        pos_frame = ttk.Frame(right_frame, style="Card.TFrame", padding=15)
+        # --- Positions Card ---
+        pos_frame = ttk.Frame(right_sidebar, style="Card.TFrame", padding=20)
         pos_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         pos_frame.rowconfigure(1, weight=1)
         pos_frame.columnconfigure(0, weight=1)
-        ttk.Label(pos_frame, text="Positions", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
+        ttk.Label(pos_frame, text="Current Positions", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 15))
         self.tree = ttk.Treeview(pos_frame, columns=("symbol", "shares", "price", "value", "day_pct", "total_pct"), show="headings")
         self.tree.grid(row=1, column=0, sticky="nsew")
         for col, text in zip(self.tree["columns"], ["Symbol", "Shares", "Price", "Value", "Day %", "Total %"]):
             self.tree.heading(col, text=text)
-            self.tree.column(col, anchor="e" if col != "symbol" else "w", width=100)
+            self.tree.column(col, anchor="e" if col != "symbol" else "w", width=80)
         self.tree.tag_configure("odd", background="#2a2a2a")
 
-        pie_frame = ttk.Frame(right_frame, style="Card.TFrame", padding=15)
-        pie_frame.grid(row=1, column=0, sticky="nsew")
-        pie_frame.rowconfigure(0, weight=1)
+        # --- Create Right-Click Context Menu for Positions ---
+        self.position_context_menu = tk.Menu(self.tree, tearoff=0, background=self.CARD_COLOR, foreground=self.TEXT_COLOR)
+        self.position_context_menu.add_command(label="Edit Position", command=self._edit_position)
+        self.position_context_menu.add_command(label="Remove Position", command=self._remove_position)
+        
+        self.tree.bind("<Button-3>", self._on_position_right_click) # Button-3 is the right mouse button
+
+        # --- Diversification Card ---
+        pie_frame = ttk.Frame(right_sidebar, style="Card.TFrame", padding=20)
+        pie_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        pie_frame.rowconfigure(1, weight=1)
         pie_frame.columnconfigure(0, weight=1)
-        ttk.Label(pie_frame, text="Diversification", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
-        self.fig_pie, self.ax_pie = plt.subplots()
+        ttk.Label(pie_frame, text="Sector Allocation", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 15))
+        self.fig_pie, self.ax_pie = plt.subplots(dpi=100)
         self.canvas_pie = FigureCanvasTkAgg(self.fig_pie, pie_frame)
         self.canvas_pie.get_tk_widget().grid(row=1, column=0, sticky="nsew")
 
         return view
-
+    
     def _create_kpi_card(self, parent, title, value, col):
         """Create a professional KPI card."""
         card = ttk.Frame(parent, style="Card.TFrame", padding=15)
@@ -273,27 +350,53 @@ class PortfolioApp(tk.Tk):
         return value_lbl
 
     def _build_goals_view(self, parent):
-        """Build a goals view with scrollable cards."""
+        """Builds a goals view with a fixed-width list and a flexible analysis area."""
         view = ttk.Frame(parent)
-        view.columnconfigure(0, weight=1)
+        # --- FIX: Define a 2-column grid layout ---
+        # Col 0 is for the goals list, with a fixed width.
+        # Col 1 is for the analysis, and it will expand to fill the rest of the space.
+        view.columnconfigure(0, minsize=570) # Locked width for the goals list adjut this to change ratio
+        view.columnconfigure(1, weight=1)   # Flexible width for the analysis
         view.rowconfigure(1, weight=1)
 
+        # --- Header (now spans both columns) ---
         header = ttk.Frame(view)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 20))
         ttk.Label(header, text="Financial Goals", style="Title.TLabel").pack(side="left")
         ttk.Button(header, text="+ Add Goal", style="Accent.TButton", command=self._open_add_goal_dialog).pack(side="right")
 
-        canvas = tk.Canvas(view, bg=self.BG_COLOR, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(view, orient="vertical", command=canvas.yview)
+        # --- Left Pane: Scrollable Goal Cards (placed in column 0) ---
+        goals_list_frame = ttk.Frame(view)
+        goals_list_frame.grid(row=1, column=0, sticky="nsew")
+        
+        canvas = tk.Canvas(goals_list_frame, bg=self.BG_COLOR, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(goals_list_frame, orient="vertical", command=canvas.yview)
         self.goals_container = ttk.Frame(canvas)
         canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.create_window((0, 0), window=self.goals_container, anchor="nw", width=canvas.winfo_reqwidth())
-        canvas.grid(row=1, column=0, sticky="nsew")
-        scrollbar.grid(row=1, column=1, sticky="ns")
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas.create_window((0, 0), window=self.goals_container, anchor="nw")
+        
+        # This binding ensures the scrollable area resizes correctly with its content
         self.goals_container.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # Bind the mouse wheel scroll event to the canvas and the container
+        canvas.bind_all("<MouseWheel>", lambda e, c=canvas: self._on_mousewheel(e, c))
+        canvas.bind_all("<Button-4>", lambda e, c=canvas: self._on_mousewheel(e, c))
+        canvas.bind_all("<Button-5>", lambda e, c=canvas: self._on_mousewheel(e, c))
 
+        # --- Right Pane: Goal Analysis Area (placed in column 1) ---
+        self.analysis_frame = ttk.Frame(view, style="Card.TFrame")
+        self.analysis_frame.grid(row=1, column=1, sticky="nsew", padx=(20, 0)) # Add left padding for separation
+        
+        self.analysis_frame.columnconfigure(0, weight=1)
+        self.analysis_frame.rowconfigure(1, weight=1)
+        self.analysis_placeholder = ttk.Label(self.analysis_frame, text="Run a simulation to view its analysis here.", style="Header.TLabel", justify="center", background=self.CARD_COLOR)
+        self.analysis_placeholder.pack(expand=True)
+        
         return view
-
+    
     def _build_analysis_view(self, parent):
         """Build an analysis view with tabs."""
         view = ttk.Frame(parent)
@@ -386,6 +489,103 @@ class PortfolioApp(tk.Tk):
         self.tax_result.pack(pady=10)
 
         return view
+    
+    def _create_timeframe_selector(self, parent):
+        """Creates the timeframe button group for the history chart."""
+        frame = ttk.Frame(parent, style="Card.TFrame")
+        self.timeframe_buttons = {}
+        timeframes = ["1M", "6M", "1Y", "5Y", "ALL"]
+
+        for i, tf in enumerate(timeframes):
+            btn = ttk.Button(
+                frame,
+                text=tf,
+                style="ActiveTimeframe.TButton" if tf == self.active_timeframe else "Timeframe.TButton",
+                command=lambda t=tf: self._set_timeframe(t)
+            )
+            btn.grid(row=0, column=i, padx=(2, 0))
+            self.timeframe_buttons[tf] = btn
+            
+        return frame
+
+    def _set_timeframe(self, timeframe):
+        """Callback to set the active timeframe and replot the chart."""
+        self.active_timeframe = timeframe
+        print(f"Timeframe changed to: {self.active_timeframe}") # For debugging
+        
+        # Update button styles
+        for tf, btn in self.timeframe_buttons.items():
+            style = "ActiveTimeframe.TButton" if tf == timeframe else "Timeframe.TButton"
+            btn.configure(style=style)
+            
+        # Re-plot the history chart with the new timeframe
+        self._plot_history(timeframe)
+
+    def _on_position_right_click(self, event):
+        """Handle right-click event on the positions treeview."""
+        # Identify the item clicked
+        item_id = self.tree.identify_row(event.y)
+        if item_id:
+            # Select the clicked item
+            self.tree.selection_set(item_id)
+            # Post the context menu at the cursor's location
+            self.position_context_menu.post(event.x_root, event.y_root)
+
+    def _remove_position(self):
+        """Remove the selected position from the portfolio."""
+        selected_item = self.tree.selection()
+        if not selected_item:
+            return
+
+        # Get symbol from the selected treeview row
+        symbol_to_remove = self.tree.item(selected_item[0])["values"][0]
+        
+        # Ask for confirmation
+        confirm = messagebox.askyesno(
+            "Confirm Removal",
+            f"Are you sure you want to remove {symbol_to_remove} from your portfolio?",
+            parent=self
+        )
+
+        if confirm:
+            # Filter out the position to be removed
+            self.portfolio["positions"] = [
+                pos for pos in self.portfolio["positions"] if pos["symbol"] != symbol_to_remove
+            ]
+            print(f"Removed position: {symbol_to_remove}")
+            self._update_all_views() # Refresh the UI
+
+    def _edit_position(self):
+        """Open a dialog to edit the selected position."""
+        selected_item = self.tree.selection()
+        if not selected_item:
+            return
+            
+        symbol_to_edit = self.tree.item(selected_item[0])["values"][0]
+        
+        # Find the full data for the position
+        position_data = next((pos for pos in self.portfolio["positions"] if pos["symbol"] == symbol_to_edit), None)
+        
+        if position_data:
+            dialog = PositionDialog(self, title=f"Edit {symbol_to_edit}", initial_data=position_data)
+            
+            if dialog.result:
+                # Find the index and update the position data in the list
+                for i, pos in enumerate(self.portfolio["positions"]):
+                    if pos["symbol"] == symbol_to_edit:
+                        self.portfolio["positions"][i] = dialog.result
+                        break
+                print(f"Edited position: {symbol_to_edit}")
+                self._update_all_views() # Refresh the UI
+
+    def _on_mousewheel(self, event, canvas):
+        """Handle mouse wheel and trackpad scrolling for a canvas."""
+        # For Windows/macOS, event.delta is used.
+        # For Linux, event.num 4 is scroll up, 5 is scroll down.
+        if event.num == 4 or event.delta > 0:
+            canvas.yview_scroll(-1, "units")
+        elif event.num == 5 or event.delta < 0:
+            canvas.yview_scroll(1, "units")
 
     # --- Data Management ---
     def load_portfolio_data(self):
@@ -422,7 +622,7 @@ class PortfolioApp(tk.Tk):
         if self.active_view_key == "dashboard":
             if hasattr(self, "kpi_total"): self._update_dashboard_kpis()
             if hasattr(self, "tree"): self._update_positions()
-            if hasattr(self, "canvas_dash"): self._plot_history()
+            if hasattr(self, "canvas_dash"): self._plot_history(self.active_timeframe)
             if hasattr(self, "canvas_pie"): self._plot_pie()
         elif self.active_view_key == "goals" and hasattr(self, "goals_container"):
             self._update_goals()
@@ -455,33 +655,32 @@ class PortfolioApp(tk.Tk):
             tags = ("odd",) if i % 2 else ()
             self.tree.insert("", "end", values=(pos["symbol"], f"{pos['shares']:.2f}", f"${price:,.2f}", f"${value:,.2f}", f"{day_pct:+.2f}%", f"{total_pct:+.2f}%"), tags=tags)
 
-    def _plot_history(self):
-        """Plot portfolio value history with improved layout and padding."""
+    def _plot_history(self, timeframe="6M"):
+        """Plot portfolio value history based on the selected timeframe."""
         self.ax_dash.clear()
         
-        # --- Generate mock data ---
-        dates = [datetime.now() - timedelta(days=x) for x in range(180)][::-1]
-        values = np.cumsum(np.random.randn(180)) * 1000 + 100000
+        # --- Generate mock data based on timeframe ---
+        days_map = {"1M": 30, "6M": 180, "1Y": 365, "5Y": 365*5, "ALL": 365*10}
+        num_days = days_map.get(timeframe, 180)
+        
+        dates = [datetime.now() - timedelta(days=x) for x in range(num_days)][::-1]
+        values = np.cumsum(np.random.randn(num_days)) * (1000 / (num_days/30)) + 100000
         
         # --- Plotting ---
         self.ax_dash.plot(dates, values, color=self.ACCENT_COLOR, linewidth=2)
         self.ax_dash.fill_between(dates, values, alpha=0.1, color=self.ACCENT_COLOR)
         
         # --- Formatting ---
-        self.ax_dash.set_title("Portfolio Value Over 180 Days", fontsize=14, weight='bold')
         self.ax_dash.set_ylabel("Portfolio Value ($)")
         
-        # Add padding to the y-axis to prevent the line from touching the top/bottom
         min_val, max_val = self.ax_dash.get_ylim()
         self.ax_dash.set_ylim(min_val * 0.98, max_val * 1.02)
         
-        # Format x-axis to show month and year
-        self.ax_dash.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+        self.ax_dash.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
         self.ax_dash.spines["top"].set_visible(False)
         self.ax_dash.spines["right"].set_visible(False)
         
-        # Use tight_layout with padding to ensure nothing is cut off
-        self.fig_dash.tight_layout(pad=2.0)
+        self.fig_dash.tight_layout(pad=1.5)
         self.canvas_dash.draw()
 
     def _plot_pie(self):
@@ -584,31 +783,73 @@ class PortfolioApp(tk.Tk):
         self.canvas_pie.draw_idle()
 
     def _update_goals(self):
-        """Update goals display."""
+        """Final update to goals display with a robust layout and Monte Carlo integration."""
         for widget in self.goals_container.winfo_children():
             widget.destroy()
-        if not self.portfolio["goals"]:
-            ttk.Label(self.goals_container, text="No goals set.", style="Secondary.TLabel").pack(pady=20)
-            return
-        for goal in self.portfolio["goals"]:
-            card = ttk.Frame(self.goals_container, style="Card.TFrame", padding=15)
-            card.pack(fill="x", pady=5)
-            ttk.Label(card, text=goal["name"], style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w")
-            ttk.Label(card, text=f"Target: ${goal['target_amount']:,.2f} by {goal['target_date']}", style="Secondary.TLabel", background=self.CARD_COLOR).pack(anchor="w")
-            progress = (goal["current_amount"] / goal["target_amount"]) * 100 if goal["target_amount"] > 0 else 0
-            ttk.Progressbar(card, value=progress, length=300).pack(pady=5)
-            sim_btn = ttk.Button(card, text="Run Simulation", command=lambda g=goal, c=card: self._run_goal_simulation(g, c))
-            sim_btn.pack(side="left", pady=5)
-            card.result = ttk.Label(card, text="", style="Secondary.TLabel", background=self.CARD_COLOR)
-            card.result.pack(side="left", padx=10)
 
-    def _run_goal_simulation(self, goal, card):
-        """Simulate goal success probability."""
-        def worker():
-            time.sleep(1)
-            prob = np.random.uniform(40, 90)
-            self.after(0, lambda: card.result.config(text=f"Success: {prob:.1f}%", foreground=self.POSITIVE_COLOR if prob > 70 else self.NEGATIVE_COLOR))
-        threading.Thread(target=worker, daemon=True).start()
+        if not self.portfolio["goals"]:
+            ttk.Label(self.goals_container, text="No goals set. Click '+ Add Goal' to start.", style="Secondary.TLabel").pack(pady=20, padx=20)
+            return
+
+        for goal in self.portfolio["goals"]:
+            # The change is in the line below: padx=10 has been removed.
+            card = ttk.Frame(self.goals_container, style="Card.TFrame", padding=(20, 15))
+            card.pack(fill="x", pady=8) # FIX: Removed padx=10
+            card.columnconfigure(0, weight=1)
+
+            # --- Header, Progress Bar, etc. (as before) ---
+            header_frame = ttk.Frame(card, style="Card.TFrame")
+            header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            header_frame.columnconfigure(0, weight=1)
+            ttk.Label(header_frame, text=goal["name"], style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
+            button_frame = ttk.Frame(header_frame, style="Card.TFrame")
+            button_frame.grid(row=0, column=1, sticky="e")
+            ttk.Button(button_frame, text="⚙ Edit", style="Timeframe.TButton", command=lambda g=goal: self._edit_goal(g)).pack(side="left", padx=5)
+            ttk.Button(button_frame, text="🗑 Delete", style="Timeframe.TButton", command=lambda g=goal: self._remove_goal(g)).pack(side="left")
+            sugg_btn = ttk.Button(button_frame, text="💡 Suggestions", style="Timeframe.TButton", command=lambda g=goal, b=button_frame: self._show_suggestion_menu(g, b))
+            sugg_btn.pack(side="left", padx=5)
+
+            target_text = f"Target: ${goal['target_amount']:,.2f} by {goal['target_date']}"
+            ttk.Label(card, text=target_text, style="Secondary.TLabel").grid(row=1, column=0, sticky="w")
+            progress = (goal["current_amount"] / goal["target_amount"]) * 100 if goal["target_amount"] > 0 else 0
+            ttk.Progressbar(card, value=progress, style="Green.Horizontal.TProgressbar").grid(row=2, column=0, sticky="ew", pady=(5, 15))
+
+            metrics_container = ttk.Frame(card, style="Card.TFrame")
+            metrics_container.grid(row=3, column=0, sticky="ew")
+
+            prob_value_widget = self._create_metric_display(metrics_container, "Success Probability", "Not Run Yet", 0, 0)
+            status_value_widget = self._create_metric_display(metrics_container, "Status", "Run Simulation", 0, 1)
+
+            card_widgets = {'prob_value': prob_value_widget, 'status_value': status_value_widget}
+
+            # --- DYNAMIC BUTTON LOGIC (FIXED) ---
+            goal_id = goal['name'] + goal['target_date']
+            if goal_id in self.goal_simulation_results:
+                # If results exist, create the "View Analysis" button
+                sim_button = ttk.Button(card, text="View Analysis", style="Accent.TButton", command=lambda g=goal: self._show_goal_analysis(g))
+                # *** FIX IS HERE: Add the button to the dictionary BEFORE calling the update function ***
+                card_widgets['sim_button'] = sim_button
+                # And immediately update the status from stored results
+                self._update_simulation_result(goal, card_widgets, self.goal_simulation_results[goal_id])
+            else:
+                # Otherwise, create the "Run Simulation" button
+                sim_button = ttk.Button(card, text="Run Monte Carlo Simulation", style="Accent.TButton", command=lambda g=goal, w=card_widgets: self._start_goal_simulation_thread(g, w))
+                # Add the button to the dictionary
+                card_widgets['sim_button'] = sim_button
+
+            sim_button.grid(row=4, column=0, sticky="ew", pady=(15, 0))
+
+    def _clear_analysis_pane(self):
+        """Clears the analysis pane and shows the placeholder text."""
+        for widget in self.analysis_frame.winfo_children():
+            widget.destroy()
+        
+        # Re-create the placeholder
+        self.analysis_placeholder = ttk.Label(self.analysis_frame, text="Run a simulation to view its analysis here.", style="Header.TLabel", justify="center", background=self.CARD_COLOR)
+        self.analysis_placeholder.pack(expand=True)
+        self.active_analysis_goal = None
+
+  
 
     def _run_performance_attribution(self):
         """Plot performance attribution."""
@@ -660,6 +901,18 @@ class PortfolioApp(tk.Tk):
         except (ValueError, StopIteration):
             messagebox.showerror("Error", "Invalid input or position not found.")
 
+    def _create_metric_display(self, parent, title, value, row, col, align="w"):
+        """Creates a consistent frame for displaying a title and a value."""
+        frame = ttk.Frame(parent, style="Card.TFrame")
+        frame.grid(row=row, column=col, sticky=align, pady=(10, 0))
+        
+        ttk.Label(frame, text=title, style="Secondary.TLabel", background=self.CARD_COLOR).pack(anchor=align)
+        value_label = ttk.Label(frame, text=value, font=self.FONT_HEADER, background=self.CARD_COLOR)
+        value_label.pack(anchor=align)
+        return value_label # Return the label for further configuration if needed
+
+    
+
     # --- Dialogs ---
     def _open_add_position_dialog(self):
         """Open dialog to add a position."""
@@ -669,12 +922,23 @@ class PortfolioApp(tk.Tk):
             self._fetch_market_data()
 
     def _open_add_goal_dialog(self):
-        """Open dialog to add a goal."""
-        dialog = GoalDialog(self)
+        """Open the custom dialog to add a new goal, pre-filled with default data."""
+        
+        # --- Create a set of default data for auto-filling ---
+        default_goal_data = {
+            "name": f"New Goal - {np.random.randint(100, 999)}",
+            "target_amount": round(np.random.uniform(25000, 100000), -3),
+            "current_amount": round(np.random.uniform(1000, 5000), -2),
+            "monthly_contribution": round(np.random.uniform(200, 1000), -2),
+            "target_date": (datetime.now() + timedelta(days=np.random.randint(365*3, 365*10))).strftime('%Y-%m-%d'),
+            "annual_return": 7.0,
+            "volatility": 15.0
+        }
+
+        dialog = GoalDialog(self, title="Add New Financial Goal", initial_data=default_goal_data)
         if dialog.result:
             self.portfolio["goals"].append(dialog.result)
             self._update_all_views()
-
     # --- Chart Interaction ---
     def _setup_chart_hover(self):
         """Setup hover interaction for dashboard chart."""
@@ -706,20 +970,617 @@ class PortfolioApp(tk.Tk):
         self.chart_hover_elements["text"].set_visible(False)
         self.canvas_dash.draw_idle()
 
+    def _calculate_required_contribution(self, goal):
+        """Calculates the monthly contribution required to meet a goal."""
+        try:
+            today = datetime.now()
+            target_date = datetime.strptime(goal["target_date"], '%Y-%m-%d')
+            months_remaining = (target_date.year - today.year) * 12 + (target_date.month - today.month)
+            if months_remaining <= 0: return 0
+
+            annual_return_rate = goal["annual_return"] / 100
+            monthly_rate = (1 + annual_return_rate)**(1/12) - 1
+
+            # Required future value from contributions
+            fv_needed = goal["target_amount"] - (goal["current_amount"] * ((1 + monthly_rate) ** months_remaining))
+            if fv_needed <= 0: return 0 # Goal already met
+
+            # Annuity payment formula to find the required contribution
+            if monthly_rate > 0:
+                required_pmt = fv_needed / ((((1 + monthly_rate) ** months_remaining) - 1) / monthly_rate)
+            else: # No interest rate
+                required_pmt = fv_needed / months_remaining
+            return required_pmt
+        except (ValueError, ZeroDivisionError, KeyError):
+            return 0
+
+    def _edit_goal(self, goal_to_edit):
+        """Opens the custom dialog to edit an existing goal and resets its state."""
+        dialog = GoalDialog(self, title=f"Edit {goal_to_edit['name']}", initial_data=goal_to_edit)
+        
+        if dialog.result:
+            goal_id = goal_to_edit['name'] + goal_to_edit['target_date']
+            if goal_id in self.goal_simulation_results:
+                del self.goal_simulation_results[goal_id]
+
+            if self.active_analysis_goal and (self.active_analysis_goal['name'] == goal_to_edit['name']):
+                self._clear_analysis_pane()
+
+            for i, goal in enumerate(self.portfolio["goals"]):
+                if goal["name"] == goal_to_edit["name"] and goal["target_date"] == goal_to_edit["target_date"]:
+                    self.portfolio["goals"][i] = dialog.result
+                    break
+                    
+            self._update_all_views()
+
+    def _remove_goal(self, goal_to_remove):
+        """Removes a specified goal after confirmation."""
+        confirm = messagebox.askyesno(
+            "Confirm Removal",
+            f"Are you sure you want to remove the goal '{goal_to_remove['name']}'?",
+            parent=self
+        )
+        if confirm:
+            self.portfolio["goals"] = [
+                g for g in self.portfolio["goals"] if not (g["name"] == goal_to_remove["name"] and g["target_date"] == goal_to_remove["target_date"])
+            ]
+            self._update_all_views()
+            
+    def _run_monte_carlo_simulation(self, goal, card_widgets, num_simulations=200):
+        """
+        Runs an advanced Monte Carlo simulation to generate a "data cube" of pre-calculated
+        results for various contributions and time horizons, enabling real-time "what-if" analysis.
+        """
+        try:
+            today = datetime.now()
+            target_date = datetime.strptime(goal["target_date"], '%Y-%m-%d')
+            base_months = (target_date.year - today.year) * 12 + (target_date.month - today.month)
+
+            # Define the range for our "what-if" parameters
+            contrib_step = max(50, int(goal['monthly_contribution'] * 0.1))
+            contrib_range = np.arange(max(0, goal['monthly_contribution'] - 5 * contrib_step), goal['monthly_contribution'] + 10 * contrib_step, contrib_step)
+            
+            # Time horizon range: from 2 years less to 5 years more
+            horizon_range = np.arange(max(12, base_months - 24), base_months + 61, 12)
+
+            data_cube = {} # To store results: {(contrib, horizon): [final_values]}
+            
+            mean_monthly_return = (goal["annual_return"] / 100) / 12
+            monthly_volatility = (goal["volatility"] / 100) / np.sqrt(12)
+
+            # Pre-calculate all scenarios
+            for contrib in contrib_range:
+                for horizon_months in horizon_range:
+                    final_values = []
+                    for _ in range(num_simulations):
+                        val = goal["current_amount"]
+                        for _ in range(horizon_months):
+                            ret = np.random.normal(mean_monthly_return, monthly_volatility)
+                            val = (val + contrib) * (1 + ret)
+                        final_values.append(val)
+                    data_cube[(contrib, horizon_months)] = final_values
+            
+            # Find the success rate for the base case (the user's actual inputs)
+            base_final_values = data_cube.get((goal['monthly_contribution'], base_months), data_cube.get(min(data_cube.keys(), key=lambda k: abs(k[0]-goal['monthly_contribution'])+abs(k[1]-base_months))))
+            success_rate = (np.sum(np.array(base_final_values) >= goal["target_amount"]) / num_simulations) * 100
+
+            result = {
+                "success_rate": success_rate, "data_cube": data_cube, "contrib_range": contrib_range,
+                "horizon_range": horizon_range, "base_months": base_months
+            }
+            self.after(0, lambda: self._update_simulation_result(goal, card_widgets, result))
+
+        except Exception as e:
+            print(f"Monte Carlo Error: {e}")
+            self.after(0, lambda: self._update_simulation_result(goal, card_widgets, {"success_rate": -1}))
+
+    def _start_goal_simulation_thread(self, goal, card_widgets):
+        """Starts the Monte Carlo simulation for a goal in a separate thread."""
+        card_widgets['sim_button'].config(state="disabled", text="Running Simulation...")
+        card_widgets['prob_value'].config(text="Running...", foreground=self.SECONDARY_TEXT)
+        card_widgets['status_value'].config(text="Simulating...", foreground=self.SECONDARY_TEXT)
+        
+        thread = threading.Thread(target=self._run_monte_carlo_simulation, args=(goal, card_widgets), daemon=True)
+        thread.start()
+
+    def _update_simulation_result(self, goal, card_widgets, result):
+        """Updates the goal card and stores the full simulation result."""
+        goal_id = goal['name'] + goal['target_date']
+        self.goal_simulation_results[goal_id] = result
+        success_rate = result.get("success_rate", -1)
+
+        if card_widgets['sim_button'].winfo_exists():
+            card_widgets['sim_button'].config(state="normal", text="View Analysis", command=lambda g=goal: self._show_goal_analysis(g))
+
+        if success_rate == -1:
+            prob_text, status_text, color = "Error", "Calculation Error", self.NEGATIVE_COLOR
+        else:
+            prob_text = f"{success_rate:.1f}%"
+            if success_rate > 85: status_text, color = "High Confidence", self.POSITIVE_COLOR
+            elif success_rate > 60: status_text, color = "On Track", self.POSITIVE_COLOR
+            elif success_rate > 40: status_text, color = "Uncertain", "#f0c420"
+            else: status_text, color = "Needs Attention", self.NEGATIVE_COLOR
+        
+        if card_widgets['prob_value'].winfo_exists():
+            card_widgets['prob_value'].config(text=prob_text, foreground=color)
+        if card_widgets['status_value'].winfo_exists():
+            card_widgets['status_value'].config(text=status_text, foreground=color)
+
+    def _show_goal_analysis(self, goal):
+        """
+        REWRITTEN: Display an interactive analysis for a goal with a robust,
+        foolproof chart embedding and update mechanism.
+        """
+        self.active_analysis_goal = goal
+        goal_id = goal['name'] + goal['target_date']
+        self.analysis_data = self.goal_simulation_results.get(goal_id)
+        if not self.analysis_data or 'data_cube' not in self.analysis_data:
+            messagebox.showerror("Analysis Error", "Simulation data is missing or corrupt. Please run the simulation again.", parent=self)
+            return
+
+        # --- 1. Clear previous content ---
+        for widget in self.analysis_frame.winfo_children():
+            widget.destroy()
+
+        # --- 2. Configure main layout ---
+        self.analysis_frame.rowconfigure(0, weight=1)    # Notebook area expands
+        self.analysis_frame.rowconfigure(1, weight=0)    # Controls area is fixed
+        self.analysis_frame.columnconfigure(0, weight=1)
+
+        # --- 3. Create Notebook for chart tabs ---
+        notebook = ttk.Notebook(self.analysis_frame)
+        notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 5))
+
+        # Create tab frames
+        proj_tab = ttk.Frame(notebook, padding=5)
+        breakdown_tab = ttk.Frame(notebook, padding=5)
+        dist_tab = ttk.Frame(notebook, padding=5)
+        
+        notebook.add(proj_tab, text="Growth Projection")
+        notebook.add(breakdown_tab, text="Contribution Breakdown")
+        notebook.add(dist_tab, text="Outcomes Distribution")
+
+        # --- 4. FOOLPROOF CHART EMBEDDING ---
+        # Create figures and canvases, and embed them directly.
+        # Tkinter's layout manager will handle sizing and resizing automatically.
+
+        # --- Growth Projection Chart ---
+        self.fig_interactive, self.ax_interactive = plt.subplots(dpi=100)
+        # ADD THIS LINE:
+        self.fig_interactive.subplots_adjust(left=0.15, bottom=0.18, right=0.95, top=0.90)
+        self.canvas_interactive = FigureCanvasTkAgg(self.fig_interactive, master=proj_tab)
+        self.canvas_interactive.get_tk_widget().pack(fill="both", expand=True)
+
+        # --- Contribution Breakdown Chart ---
+        self.fig_breakdown, self.ax_breakdown = plt.subplots(dpi=100)
+        # ADD THIS LINE:
+        self.fig_breakdown.subplots_adjust(left=0.15, bottom=0.18, right=0.95, top=0.90)
+        self.canvas_breakdown = FigureCanvasTkAgg(self.fig_breakdown, master=breakdown_tab)
+        self.canvas_breakdown.get_tk_widget().pack(fill="both", expand=True)
+
+        # --- Outcomes Distribution Chart ---
+        self.fig_dist, self.ax_dist = plt.subplots(dpi=100)
+        # ADD THIS LINE:
+        self.fig_dist.subplots_adjust(left=0.15, bottom=0.18, right=0.95, top=0.90)
+        self.canvas_dist = FigureCanvasTkAgg(self.fig_dist, master=dist_tab)
+        self.canvas_dist.get_tk_widget().pack(fill="both", expand=True)
+        
+
+
+        # --- 5. Build Controls Panel ---
+        controls_card = ttk.Frame(self.analysis_frame, style="Card.TFrame", padding=15)
+        controls_card.grid(row=1, column=0, sticky="ew", pady=(5, 10), padx=10)
+        controls_card.columnconfigure(0, weight=1)
+        controls_card.columnconfigure(1, weight=1)
+        
+        # Left controls (sliders)
+        left_controls = ttk.Frame(controls_card, style="Card.TFrame")
+        left_controls.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        left_controls.columnconfigure(0, weight=1)
+        
+        c_range = self.analysis_data['contrib_range']
+        self.contrib_slider = self._create_slider(left_controls, "Monthly Contribution", c_range[0], c_range[-1], goal['monthly_contribution'], 0)
+        h_range = self.analysis_data['horizon_range']
+        self.horizon_slider = self._create_slider(left_controls, "Time Horizon (Years)", h_range[0]/12, h_range[-1]/12, self.analysis_data['base_months']/12, 1)
+
+        # Right controls (metrics and actions)
+        right_controls = ttk.Frame(controls_card, style="Card.TFrame")
+        right_controls.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        right_controls.columnconfigure(0, weight=1)
+
+        # Lump sum input
+        lump_sum_frame = ttk.Frame(right_controls, style="Card.TFrame")
+        lump_sum_frame.grid(row=0, column=0, sticky="ew", pady=(0,5))
+        ttk.Label(lump_sum_frame, text="Add Lump Sum ($):", background=self.CARD_COLOR).pack(side="left", padx=(0,5))
+        self.lump_sum_var = tk.StringVar(value="0")
+        lump_sum_entry = ttk.Entry(lump_sum_frame, textvariable=self.lump_sum_var)
+        lump_sum_entry.pack(side="left", fill="x", expand=True)
+        lump_sum_entry.bind("<KeyRelease>", self._on_what_if_update)
+
+        # Metrics display
+        stats_frame = ttk.Frame(right_controls, style="Card.TFrame")
+        stats_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        stats_frame.columnconfigure((0,1), weight=1)
+        self.analysis_prob_lbl = self._create_metric_display(stats_frame, "Success Probability", "", 0, 0, "w")
+        self.analysis_median_lbl = self._create_metric_display(stats_frame, "Median Outcome", "", 0, 1, "w")
+
+        # Apply button
+        apply_btn = ttk.Button(right_controls, text="Apply These Parameters to Goal", style="Accent.TButton", command=self._apply_what_if_parameters)
+        apply_btn.grid(row=2, column=0, sticky="ew", pady=(10,0))
+        
+        # --- 6. Trigger the first draw ---
+        # Force the entire application to process all pending events, including
+        # the final geometry calculations. This is the programmatic equivalent
+        # of a manual resize, ensuring a stable layout.
+        self.update()
+        
+        # Now that the layout is guaranteed to be stable, draw the charts directly.
+        self._on_what_if_update()
+
+
+    def _on_what_if_update(self, *args):
+        """
+        REVISED: The single, robust handler for updating all 'What-If' analysis.
+        It calculates data, then calls the stateless plotting functions, and finally draws.
+        """
+        if not all([self.active_analysis_goal, self.analysis_data, hasattr(self, 'contrib_slider')]):
+            return
+
+        try:
+            # --- 1. Get current values from controls ---
+            goal = self.active_analysis_goal
+            contrib_val = self.contrib_slider.get()
+            horizon_years = self.horizon_slider.get()
+            horizon_months = int(horizon_years * 12)
+            lump_sum = float(self.lump_sum_var.get() or "0")
+
+            # --- 2. Find the closest pre-calculated data ---
+            closest_contrib = min(self.analysis_data['contrib_range'], key=lambda x: abs(x - contrib_val))
+            closest_horizon = min(self.analysis_data['horizon_range'], key=lambda x: abs(x - horizon_months))
+            final_values = np.array(self.analysis_data['data_cube'][(closest_contrib, closest_horizon)]) + lump_sum
+
+            # --- 3. Update text-based metrics ---
+            success_rate = (np.sum(final_values >= goal["target_amount"]) / len(final_values)) * 100
+            median_outcome = np.median(final_values)
+            self.analysis_prob_lbl.config(text=f"{success_rate:.1f}%")
+            self.analysis_median_lbl.config(text=f"${median_outcome:,.2f}")
+
+            # --- 4. Call stateless plotting functions to update charts ---
+            self._plot_interactive_projection(goal, final_values, horizon_months, lump_sum)
+            self._plot_contribution_breakdown(goal, final_values, horizon_months, lump_sum, contrib_val)
+            self._plot_outcomes_histogram(final_values, goal)
+
+        except (ValueError, TclError, KeyError) as e:
+            # This can happen if the view is destroyed while an update is pending.
+            print(f"What-if update error (can be ignored if closing view): {e}")
+
+
+    def _plot_interactive_projection(self, goal, final_values, horizon_months, lump_sum):
+        """REWRITTEN: Stateless function to draw the growth projection chart."""
+        ax = self.ax_interactive
+        ax.clear()
+
+        median = np.median(final_values)
+        p10 = np.percentile(final_values, 10)
+        p90 = np.percentile(final_values, 90)
+        x_axis = np.arange(horizon_months + 1) / 12 if horizon_months > 0 else np.array([0])
+        initial_value = goal['current_amount'] + lump_sum
+
+        # Plot data
+        ax.plot(x_axis, np.linspace(initial_value, median, len(x_axis)), color="#ffcc00", label="Median Path")
+        ax.fill_between(x_axis, 
+                        np.linspace(initial_value, p10, len(x_axis)), 
+                        np.linspace(initial_value, p90, len(x_axis)), 
+                        color=self.ACCENT_COLOR, alpha=0.2, label="10th-90th Percentile")
+        ax.axhline(y=goal['target_amount'], color="white", linestyle=":", label=f"Target: ${goal['target_amount']:,.0f}")
+
+        # Formatting
+        ax.set_title("Growth Projection")
+        ax.set_xlabel("Years")
+        ax.set_ylabel("Portfolio Value ($)")
+        ax.legend(loc="upper left")
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.3)
+        ax.set_xlim(0, max(1, x_axis[-1]) if len(x_axis) > 1 else 1) 
+        ax.set_ylim(bottom=0) 
+        
+        self.canvas_interactive.draw()
+
+
+    def _plot_contribution_breakdown(self, goal, final_values, horizon_months, lump_sum, contrib_val):
+        """REWRITTEN: Stateless function to draw the contribution breakdown chart."""
+        ax = self.ax_breakdown
+        ax.clear()
+
+        initial_value = goal['current_amount'] + lump_sum
+        median_path = np.linspace(initial_value, np.median(final_values), horizon_months + 1)
+        x_axis = np.arange(horizon_months + 1) / 12 if horizon_months > 0 else np.array([0])
+        
+        contributions_path = [initial_value + (contrib_val * m) for m in range(horizon_months + 1)]
+        growth_path = median_path - contributions_path
+
+        # Plot data
+        ax.stackplot(x_axis, contributions_path, growth_path, 
+                     labels=['Principal & Contributions', 'Simulated Growth'], 
+                     colors=[self.ACCENT_COLOR, self.POSITIVE_COLOR], 
+                     alpha=0.8)
+
+        # Formatting
+        ax.set_title("Source of Final Value (Median)")
+        ax.set_xlabel("Years")
+        ax.set_ylabel("Portfolio Value ($)")
+        ax.legend(loc="upper left")
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.3)
+        ax.set_xlim(0, max(1, x_axis[-1]) if len(x_axis) > 1 else 1)
+        ax.set_ylim(bottom=0)
+
+        self.canvas_breakdown.draw()
+
+
+    def _plot_outcomes_histogram(self, final_values, goal):
+        """REWRITTEN: Stateless function to draw the outcomes distribution chart."""
+        ax = self.ax_dist
+        ax.clear()
+
+        # Plot data
+        ax.hist(final_values, bins=50, color=self.ACCENT_COLOR, alpha=0.75, density=True)
+        
+        median = np.median(final_values)
+        ax.axvline(median, color="#ffcc00", lw=2, label=f"Median: ${median:,.0f}")
+        ax.axvline(goal['target_amount'], color="white", linestyle=":", lw=2, label=f"Target: ${goal['target_amount']:,.0f}")
+
+        # Formatting
+        ax.set_title("Distribution of Final Portfolio Values")
+        ax.set_xlabel("Final Value ($)")
+        ax.set_ylabel("Probability Density")
+        ax.legend(loc="upper right")
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.3)
+        ax.set_yticklabels([]) 
+        ax.set_ylim(bottom=0)
+
+        self.canvas_dist.draw()
+        
+    def _force_widget_configure_event(self, widget):
+        """Force a <Configure> event to make Tkinter propagate geometry properly."""
+        widget.event_generate("<Configure>")
+        widget.update_idletasks()
+
+    def _force_chart_draw(self, canvas, fig):
+        """Redraws the canvas with tight layout after geometry is finalized."""
+        def redraw():
+            try:
+                fig.tight_layout(pad=1.2)
+                canvas.draw()
+            except Exception as e:
+                print(f"Chart draw error: {e}")
+        self.after(100, redraw)
+
+
+    def _embed_matplotlib_canvas(self, fig, parent):
+        """Embed a Matplotlib figure in a Tkinter frame with proper resizing."""
+        canvas = FigureCanvasTkAgg(fig, master=parent)
+        widget = canvas.get_tk_widget()
+        widget.pack(fill="both", expand=True)
+
+        # Set initial size based on widget dimensions after layout
+        def set_initial_size():
+            widget.update_idletasks()
+            width = max(widget.winfo_width(), 100)  # Minimum size to avoid zero
+            height = max(widget.winfo_height(), 100)
+            fig.set_size_inches(width / fig.dpi, height / fig.dpi)
+
+        self.after(50, set_initial_size)
+
+        # Resize handler
+        def on_resize(event):
+            if event.width > 10 and event.height > 10:  # Avoid invalid sizes
+                fig.set_size_inches(event.width / fig.dpi, event.height / fig.dpi)
+                canvas.draw()
+
+        widget.bind("<Configure>", on_resize)
+        return canvas
+
+    def _find_required_contribution_for_target(self, goal, target_prob, dialog):
+        """
+        Worker function (run in a thread) to find the monthly contribution
+        needed to hit a target success probability.
+        """
+        try:
+            current_contrib = goal['monthly_contribution']
+            test_contrib = current_contrib
+            increment = max(50, current_contrib * 0.1) # Start with a reasonable increment
+            
+            # Use a simplified, non-UI version of the Monte Carlo logic
+            today = datetime.now()
+            target_date = datetime.strptime(goal["target_date"], '%Y-%m-%d')
+            months = (target_date.year - today.year) * 12 + (target_date.month - today.month)
+            mean_monthly_return = (goal["annual_return"] / 100) / 12
+            monthly_volatility = (goal["volatility"] / 100) / np.sqrt(12)
+
+            for i in range(20): # Limit to 20 iterations to prevent infinite loops
+                test_goal = goal.copy()
+                test_goal['monthly_contribution'] = test_contrib
+                
+                final_values = []
+                for _ in range(500): # Number of simulations
+                    val = test_goal["current_amount"]
+                    for _ in range(months):
+                        ret = np.random.normal(mean_monthly_return, monthly_volatility)
+                        val = (val + test_goal['monthly_contribution']) * (1 + ret)
+                    final_values.append(val)
+                
+                success_rate = (np.sum(np.array(final_values) >= goal["target_amount"]) / 500) * 100
+                
+                # Update dialog with progress
+                self.after(0, lambda r=success_rate: dialog.status_label.config(text=f"Calculating... ({r:.0f}%)"))
+
+                if success_rate >= target_prob:
+                    increase = test_contrib - current_contrib
+                    result_text = (f"Required Monthly Contribution: ${test_contrib:,.2f}\n"
+                                   f"(An increase of ${increase:,.2f} from your current ${current_contrib:,.2f})")
+                    self.after(0, lambda: dialog.result_label.config(text=result_text))
+                    self.after(0, lambda: dialog.status_label.config(text=f"Suggestion for {target_prob}% Success:"))
+                    return
+                
+                test_contrib += increment
+            
+            # If loop finishes without reaching target
+            self.after(0, lambda: dialog.result_label.config(text="Goal may be unreachable within a reasonable contribution increase."))
+
+        except Exception as e:
+            print(f"Suggestion calculation error: {e}")
+            self.after(0, lambda: dialog.result_label.config(text="An error occurred during calculation."))
+
+    def _start_suggestion_thread(self, goal, target_prob):
+        """Creates the suggestion dialog and starts the calculation thread."""
+        dialog = SuggestionDialog(self, title="Goal Suggestion")
+        thread = threading.Thread(
+            target=self._find_required_contribution_for_target,
+            args=(goal, target_prob, dialog),
+            daemon=True
+        )
+        thread.start()
+
+    def _show_suggestion_menu(self, goal, button_widget):
+        """Creates and displays a menu with suggestion options."""
+        goal_id = goal['name'] + goal['target_date']
+        results = self.goal_simulation_results.get(goal_id)
+        if not results or results['success_rate'] == -1:
+            messagebox.showinfo("No Data", "Please run a simulation for this goal first.", parent=self)
+            return
+
+        current_prob = results['success_rate']
+        
+        menu = tk.Menu(self, tearoff=0, background=self.CARD_COLOR, foreground=self.TEXT_COLOR, font=self.FONT_NORMAL)
+        
+        targets = {"On Track": 60, "High Confidence": 85}
+        
+        added_option = False
+        for name, prob in targets.items():
+            if current_prob < prob:
+                menu.add_command(label=f"How to get '{name}' ({prob}%)", command=lambda p=prob: self._start_suggestion_thread(goal, p))
+                added_option = True
+        
+        if not added_option:
+            menu.add_command(label="Already on track for all targets!", state="disabled")
+
+        # Position the menu below the button
+        x = button_widget.winfo_rootx()
+        y = button_widget.winfo_rooty() + button_widget.winfo_height()
+        menu.post(x, y)
+
+    def _create_slider(self, parent, label, from_, to, initial_val, row):
+        """
+        REVISED: Creates a labeled slider (Scale) widget with a simplified, more direct command.
+        """
+        frame = ttk.Frame(parent, style="Card.TFrame")
+        frame.grid(row=row, column=0, sticky="ew", pady=(5,0))
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Label(frame, text=label, background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
+        var = tk.DoubleVar(value=initial_val)
+        
+        # The command now directly calls the update function without extra lambda layers.
+        slider = ttk.Scale(frame, from_=from_, to=to, orient="horizontal", variable=var, style="Horizontal.TScale",
+                           command=self._on_what_if_update)
+                           
+        slider.grid(row=0, column=1, sticky="ew", padx=10)
+        
+        value_lbl = ttk.Label(frame, text=f"{initial_val:.2f}", background=self.CARD_COLOR, font=self.FONT_BOLD, width=7)
+        value_lbl.grid(row=0, column=2, sticky="e", padx=5)
+        var.trace_add("write", lambda *args, v=var, l=value_lbl: l.config(text=f"{v.get():.2f}"))
+        
+        return var
+
+    def _initial_goal_chart_draw(self, event):
+        """
+        A one-time event handler for the <Map> event. This robustly ensures
+        the initial draw happens only after the UI is visible and has its
+        correct final size, preventing the "zoomed-in" bug.
+        """
+        # Unbind immediately to ensure this only ever runs once.
+        self.analysis_frame.unbind("<Map>")
+        
+        # Now that the frame is guaranteed to be mapped with its final size,
+        # trigger the first and only the first draw. Subsequent draws are
+        # handled by the sliders directly.
+        self._on_what_if_update()
+
+    def _apply_what_if_parameters(self):
+        """Saves the current values from the 'What-If' controls to the active goal."""
+        if not self.active_analysis_goal:
+            return
+
+        # Get the original goal to find it in the list later
+        original_goal = self.active_analysis_goal
+
+        # Confirm with the user before making permanent changes
+        confirm = messagebox.askyesno(
+            "Apply Changes",
+            f"This will permanently update the goal '{original_goal['name']}' with the new parameters from the sliders. The current analysis will be reset.\n\nAre you sure you want to continue?",
+            parent=self
+        )
+        if not confirm:
+            return
+
+        # Read the current values from the interactive controls
+        new_contrib = self.contrib_slider.get()
+        new_horizon_years = self.horizon_slider.get()
+        lump_sum = float(self.lump_sum_var.get() if self.lump_sum_var.get() else 0)
+
+        # Calculate the new target date based on the new time horizon
+        new_target_date = (datetime.now() + timedelta(days=new_horizon_years * 365.25)).strftime('%Y-%m-%d')
+        
+        # Add the lump sum to the goal's current amount
+        new_current_amount = original_goal['current_amount'] + lump_sum
+
+        # Find the goal in the main portfolio list and update it
+        for i, goal in enumerate(self.portfolio["goals"]):
+            if goal["name"] == original_goal["name"] and goal["target_date"] == original_goal["target_date"]:
+                self.portfolio["goals"][i]['monthly_contribution'] = new_contrib
+                self.portfolio["goals"][i]['target_date'] = new_target_date
+                self.portfolio["goals"][i]['current_amount'] = new_current_amount
+                break
+        
+        # Clear the old simulation result for this goal
+        goal_id = original_goal['name'] + original_goal['target_date']
+        if goal_id in self.goal_simulation_results:
+            del self.goal_simulation_results[goal_id]
+            
+        # Clear the analysis pane and refresh the main goals list
+        self._clear_analysis_pane()
+        self._update_all_views()
+
+
+   
 # --- Dialog Classes ---
 class PositionDialog(simpledialog.Dialog):
-    """Dialog for adding positions."""
+    """Dialog for adding or editing positions."""
+    def __init__(self, parent, title="Add Position", initial_data=None):
+        self.initial_data = initial_data
+        super().__init__(parent, title=title)
+
     def body(self, master):
         master.configure(bg=self.master.BG_COLOR)
-        ttk.Label(master, text="Symbol:").grid(row=0, column=0, pady=5)
+        
+        ttk.Label(master, text="Symbol:").grid(row=0, column=0, pady=5, sticky="w")
         self.symbol = ttk.Entry(master)
         self.symbol.grid(row=0, column=1, pady=5)
-        ttk.Label(master, text="Shares:").grid(row=1, column=0, pady=5)
+        
+        ttk.Label(master, text="Shares:").grid(row=1, column=0, pady=5, sticky="w")
         self.shares = ttk.Entry(master)
         self.shares.grid(row=1, column=1, pady=5)
-        ttk.Label(master, text="Entry Price:").grid(row=2, column=0, pady=5)
+        
+        ttk.Label(master, text="Entry Price:").grid(row=2, column=0, pady=5, sticky="w")
         self.price = ttk.Entry(master)
         self.price.grid(row=2, column=1, pady=5)
+        
+        # If editing, populate fields and disable symbol editing
+        if self.initial_data:
+            self.symbol.insert(0, self.initial_data["symbol"])
+            self.symbol.config(state="readonly")
+            self.shares.insert(0, self.initial_data["shares"])
+            self.price.insert(0, self.initial_data["entry_price"])
+            
         return self.symbol
 
     def apply(self):
@@ -729,39 +1590,162 @@ class PositionDialog(simpledialog.Dialog):
                 "shares": float(self.shares.get()),
                 "entry_price": float(self.price.get())
             }
-        except ValueError:
-            messagebox.showerror("Error", "Invalid input.")
+        except (ValueError, TypeError):
+            messagebox.showerror("Error", "Invalid input. Please check the values.", parent=self)
+            self.result = None
 
-class GoalDialog(simpledialog.Dialog):
-    """Dialog for adding goals."""
-    def body(self, master):
-        master.configure(bg=self.master.BG_COLOR)
-        ttk.Label(master, text="Name:").grid(row=0, column=0, pady=5)
-        self.name = ttk.Entry(master)
-        self.name.grid(row=0, column=1, pady=5)
-        ttk.Label(master, text="Target Amount:").grid(row=1, column=0, pady=5)
-        self.amount = ttk.Entry(master)
-        self.amount.grid(row=1, column=1, pady=5)
-        ttk.Label(master, text="Target Date (YYYY-MM-DD):").grid(row=2, column=0, pady=5)
-        self.date = ttk.Entry(master)
-        self.date.grid(row=2, column=1, pady=5)
-        return self.name
+class GoalDialog(tk.Toplevel):
+    """A custom, professionally styled dialog for adding or editing goals."""
+    def __init__(self, parent, title="Add Financial Goal", initial_data=None):
+        super().__init__(parent)
+        self.transient(parent)
+        self.title(title)
+        self.parent = parent
+        self.initial_data = initial_data if initial_data else {}
+        self.result = None
 
-    def apply(self):
+        # --- Window Configuration ---
+        self.configure(bg=parent.CARD_COLOR, padx=20, pady=20)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        # --- Build UI ---
+        self.entries = {}
+        self.contrib_var = tk.BooleanVar(value=bool(self.initial_data.get("monthly_contribution", 0) > 0))
+        
+        self._create_widgets()
+        self._layout_widgets()
+        self._populate_initial_data()
+        self._toggle_contribution_entry() # Set initial state
+
+        # --- Make Modal ---
+        self.grab_set()
+        self.wait_window(self)
+
+    def _create_widgets(self):
+        """Create all the input widgets for the dialog."""
+        fields = {
+            "Goal Name:": "name", "Target Amount ($):": "target_amount", "Current Amount ($):": "current_amount",
+            "Target Date (YYYY-MM-DD):": "target_date", "Expected Annual Return (%):": "annual_return",
+            "Annual Volatility (Std. Dev. %):": "volatility"
+        }
+        
+        self.main_frame = ttk.Frame(self, style="Card.TFrame")
+        
+        for i, (label_text, key) in enumerate(fields.items()):
+            label = ttk.Label(self.main_frame, text=label_text, style="Secondary.TLabel", background=self.parent.CARD_COLOR)
+            label.grid(row=i, column=0, pady=8, padx=5, sticky="w")
+            entry = ttk.Entry(self.main_frame, font=self.parent.FONT_NORMAL)
+            entry.grid(row=i, column=1, pady=8, sticky="ew")
+            self.entries[key] = entry
+            
+        # --- Conditional Contribution Section ---
+        self.contrib_check = ttk.Checkbutton(self.main_frame, text="Add monthly contributions?", variable=self.contrib_var, style="TCheckbutton", command=self._toggle_contribution_entry)
+        
+        self.contrib_label = ttk.Label(self.main_frame, text="Monthly Contribution ($):", style="Secondary.TLabel", background=self.parent.CARD_COLOR)
+        self.entries["monthly_contribution"] = ttk.Entry(self.main_frame, font=self.parent.FONT_NORMAL)
+
+        # --- Buttons ---
+        self.button_frame = ttk.Frame(self, style="Card.TFrame")
+        self.ok_button = ttk.Button(self.button_frame, text="Save Goal", style="Accent.TButton", command=self._on_ok)
+        self.cancel_button = ttk.Button(self.button_frame, text="Cancel", style="TButton", command=self._on_cancel)
+
+    def _layout_widgets(self):
+        """Position all widgets in the dialog."""
+        self.main_frame.pack(fill="x", expand=True)
+        self.main_frame.columnconfigure(1, weight=1)
+
+        # Position contribution widgets
+        self.contrib_check.grid(row=6, column=0, columnspan=2, sticky="w", pady=(15, 5))
+        self.contrib_label.grid(row=7, column=0, pady=8, padx=5, sticky="w")
+        self.entries["monthly_contribution"].grid(row=7, column=1, pady=8, sticky="ew")
+
+        # Position buttons
+        self.button_frame.pack(fill="x", expand=True, pady=(20, 0))
+        self.button_frame.columnconfigure(0, weight=1)
+        self.cancel_button.pack(side="right", padx=(10, 0))
+        self.ok_button.pack(side="right")
+        
+    def _populate_initial_data(self):
+        """Fill fields with data if editing an existing goal."""
+        for key, entry in self.entries.items():
+            if self.initial_data.get(key) is not None:
+                entry.insert(0, self.initial_data[key])
+
+        # Set sensible defaults for new goals
+        if not self.initial_data:
+            self.entries["annual_return"].insert(0, "7")
+            self.entries["volatility"].insert(0, "15")
+            self.entries["monthly_contribution"].insert(0, "0")
+
+    def _toggle_contribution_entry(self):
+        """Enable or disable the monthly contribution entry based on the checkbox."""
+        if self.contrib_var.get():
+            self.entries["monthly_contribution"].config(state="normal")
+            self.contrib_label.config(foreground=self.parent.TEXT_COLOR)
+        else:
+            self.entries["monthly_contribution"].config(state="disabled")
+            self.entries["monthly_contribution"].delete(0, tk.END)
+            self.entries["monthly_contribution"].insert(0, "0")
+            self.contrib_label.config(foreground=self.parent.SECONDARY_TEXT)
+
+    def _on_ok(self, event=None):
+        """Handle the OK button click, validate, and close."""
         try:
-            self.result = {
-                "name": self.name.get(),
-                "target_amount": float(self.amount.get()),
-                "target_date": self.date.get(),
-                "current_amount": 0
-            }
-        except ValueError:
-            messagebox.showerror("Error", "Invalid input.")
+            self.result = {key: entry.get() for key, entry in self.entries.items()}
+            for key in ["target_amount", "current_amount", "monthly_contribution", "annual_return", "volatility"]:
+                self.result[key] = float(self.result[key])
+            datetime.strptime(self.result["target_date"], '%Y-%m-%d')
+            self.grab_release()
+            self.destroy()
+        except (ValueError, TypeError):
+            messagebox.showerror("Invalid Input", "Please check all values and ensure the date is in YYYY-MM-DD format.", parent=self)
 
-def launch_portfolio_window():
-    """Initializes and runs the PortfolioApp in a separate process."""
-    app = PortfolioApp()
+    def _on_cancel(self, event=None):
+        """Handle the Cancel button click and close."""
+        self.result = None
+        self.grab_release()
+        self.destroy()
+   
+def launch_portfolio_window(theme_name='dark'):
+    """Initializes and runs the PortfolioApp in a separate process with a specified theme."""
+    
+    # --- FIX: Add DPI Awareness setting at the entry point of this new process ---
+    try:
+        import ctypes
+        import sys
+        if sys.platform == "win32":
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    # --- END DPI FIX ---
+
+    app = PortfolioApp(theme_name=theme_name)
     app.mainloop()
+class SuggestionDialog(tk.Toplevel):
+    """A custom dialog to display goal-seeking calculation results."""
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.transient(parent)
+        self.title(title)
+        self.parent = parent
+        self.resizable(False, False)
+        self.configure(bg=parent.CARD_COLOR, padx=25, pady=20)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        self.status_label = ttk.Label(self, text="Calculating, please wait...", style="Header.TLabel", background=self.parent.CARD_COLOR, justify="center")
+        self.status_label.pack(pady=(0, 15))
+
+        self.result_label = ttk.Label(self, text="", style="Secondary.TLabel", background=self.parent.CARD_COLOR, justify="center")
+        self.result_label.pack()
+        
+        # Center the window
+        self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() // 2) - (self.winfo_width() // 2)
+        y = parent.winfo_y() + (parent.winfo_height() // 2) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+        
+        self.grab_set()
 
 # --- Main Execution (for launching) ---
 if __name__ == "__main__":
