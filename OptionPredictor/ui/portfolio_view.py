@@ -4,21 +4,27 @@ import threading
 import time
 from datetime import datetime, timedelta
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
 from tkinter import TclError
 from io import BytesIO
 from PIL import Image, ImageTk
+import squarify
 
 
 
-# --- Mock Data API for Demonstration ---
 class MockFinancialDataAPI:
-    """A mock API to simulate fetching financial data."""
+    """A mock API to simulate fetching financial data with more detail."""
     def get_stock_details(self, ticker):
         price = np.random.uniform(50, 500)
         prev_close = price * (1 + np.random.uniform(-0.05, 0.05))
+        # Mock factor exposures (should sum to 1)
+        factors = {"Value": np.random.uniform(0,1), "Growth": np.random.uniform(0,1), "Quality": np.random.uniform(0,1)}
+        total_factor = sum(factors.values())
+        factors = {k: v/total_factor for k,v in factors.items()}
+
         return {
             "symbol": ticker,
             "shortName": f"{ticker.capitalize()} Inc.",
@@ -26,8 +32,19 @@ class MockFinancialDataAPI:
             "previousClose": prev_close,
             "marketCap": np.random.randint(1e9, 2e12, dtype=np.int64),
             "trailingPE": np.random.uniform(10, 30),
+            "dividendYield": np.random.uniform(0.005, 0.03),
             "sector": np.random.choice(["Technology", "Healthcare", "Financials", "Industrials", "Consumer Discretionary"]),
-            "beta": np.random.uniform(0.5, 1.8)
+            "beta": np.random.uniform(0.5, 1.8),
+            "interest_rate_sensitivity": np.random.uniform(-0.5, 0.2), # Mock sensitivity to rate changes
+            "factor_exposures": factors
+        }
+
+    def get_benchmark_details(self, ticker="SPY"):
+        """Returns data for a benchmark ETF."""
+        return {
+            "symbol": ticker,
+            "trailingPE": 21.5, # Realistic P/E for S&P 500
+            "dividendYield": 0.015 # Realistic yield for S&P 500
         }
 
 import multiprocessing
@@ -88,6 +105,7 @@ class PortfolioApp(tk.Tk):
         self.active_timeframe = "6M"
         self.goal_simulation_results = {}
         self.active_analysis_goal = None
+        self.analysis_data = {}
 
         # --- Build UI ---
         self._build_styles()
@@ -381,10 +399,12 @@ class PortfolioApp(tk.Tk):
         
         # This binding ensures the scrollable area resizes correctly with its content
         self.goals_container.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        # Bind the mouse wheel scroll event to the canvas and the container
-        canvas.bind_all("<MouseWheel>", lambda e, c=canvas: self._on_mousewheel(e, c))
-        canvas.bind_all("<Button-4>", lambda e, c=canvas: self._on_mousewheel(e, c))
-        canvas.bind_all("<Button-5>", lambda e, c=canvas: self._on_mousewheel(e, c))
+        
+        # FIX: Bind scroll events locally to the canvas, not globally to the app.
+        # This prevents the "invalid command name" error when switching views.
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._on_mousewheel(e, c))
+        canvas.bind("<Button-4>", lambda e, c=canvas: self._on_mousewheel(e, c))
+        canvas.bind("<Button-5>", lambda e, c=canvas: self._on_mousewheel(e, c))
 
         # --- Right Pane: Goal Analysis Area (placed in column 1) ---
         self.analysis_frame = ttk.Frame(view, style="Card.TFrame")
@@ -397,50 +417,651 @@ class PortfolioApp(tk.Tk):
         
         return view
     
+        # --- Analysis Lab: Final Enhanced Methods ---
+    # Replace the entire block of analysis methods in your file with this one.
+    # This includes _build_analysis_view and all its helpers.
+
     def _build_analysis_view(self, parent):
-        """Build an analysis view with tabs."""
+        """
+        Builds a completely revamped and professional Analysis Lab with advanced tools.
+        """
         view = ttk.Frame(parent)
         view.columnconfigure(0, weight=1)
         view.rowconfigure(1, weight=1)
 
+        # --- Header ---
         header = ttk.Frame(view)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
         ttk.Label(header, text="Analysis Lab", style="Title.TLabel").pack(side="left")
 
+        # --- Notebook for different analysis tools ---
         notebook = ttk.Notebook(view)
         notebook.grid(row=1, column=0, sticky="nsew")
         style = ttk.Style()
-        style.configure("TNotebook", background=self.BG_COLOR)
-        style.configure("TNotebook.Tab", background=self.CARD_COLOR, padding=(10, 5), font=self.FONT_BOLD)
-        style.map("TNotebook.Tab", background=[("selected", self.BG_COLOR)], foreground=[("selected", self.ACCENT_COLOR)])
+        style.configure("TNotebook", background=self.BG_COLOR, borderwidth=0)
+        style.configure("TNotebook.Tab", background=self.CARD_COLOR, padding=(12, 6), font=self.FONT_BOLD, borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", self.BG_COLOR)],
+                  foreground=[("selected", self.ACCENT_COLOR)],
+                  expand=[("selected", [1, 1, 1, 0])])
 
-        # --- Attribution Tab ---
-        attr_frame = ttk.Frame(notebook, padding=15)
-        notebook.add(attr_frame, text="Performance Attribution")
-        attr_frame.rowconfigure(1, weight=1)
-        attr_frame.columnconfigure(0, weight=1)
-        ttk.Label(attr_frame, text="Performance Breakdown", style="Header.TLabel").grid(row=0, column=0, sticky="w")
-        self.fig_attr, self.ax_attr = plt.subplots()
-        self.canvas_attr = FigureCanvasTkAgg(self.fig_attr, attr_frame)
-        self.canvas_attr.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+        # --- Create and add the tabs ---
+        self.drivers_tab = self._create_key_drivers_tab(notebook)
+        self.risk_tab = self._create_risk_volatility_tab(notebook)
+        self.correlation_tab = self._create_correlation_tab(notebook)
+        self.attribution_tab = self._create_attribution_tab(notebook)
+        self.stress_test_tab = self._create_stress_test_tab(notebook)
 
-        # --- Stress Test Tab ---
-        stress_frame = ttk.Frame(notebook, padding=15)
-        notebook.add(stress_frame, text="Stress Testing")
-        stress_frame.rowconfigure(1, weight=1)
-        stress_frame.columnconfigure(0, weight=1)
-        stress_header = ttk.Frame(stress_frame)
-        stress_header.grid(row=0, column=0, sticky="ew")
-        ttk.Label(stress_header, text="Stress Test", style="Header.TLabel").pack(side="left")
-        ttk.Label(stress_header, text="Scenario:", style="Secondary.TLabel").pack(side="left", padx=10)
-        self.scenario_var = tk.StringVar(value="2008 Financial Crisis")
-        ttk.Combobox(stress_header, textvariable=self.scenario_var, values=["2008 Financial Crisis", "2020 COVID Crash", "Dot-com Burst"], state="readonly").pack(side="left", padx=5)
-        self.scenario_var.trace("w", lambda *args: self._run_stress_test(self.scenario_var.get()))
-        self.fig_stress, self.ax_stress = plt.subplots()
-        self.canvas_stress = FigureCanvasTkAgg(self.fig_stress, stress_frame)
-        self.canvas_stress.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+        notebook.add(self.drivers_tab, text="Key Drivers")
+        notebook.add(self.risk_tab, text="Risk & Volatility")
+        notebook.add(self.correlation_tab, text="Correlation")
+        notebook.add(self.attribution_tab, text="Attribution")
+        notebook.add(self.stress_test_tab, text="Stress Tests")
+        
+        self.after(50, self._update_analysis_view_data)
 
         return view
+
+    def _create_key_drivers_tab(self, parent_notebook):
+        """Creates the UI for the Key Drivers tab with benchmark comparisons and a treemap."""
+        tab = ttk.Frame(parent_notebook, padding=15)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+
+        kpi_frame = ttk.Frame(tab)
+        kpi_frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        kpi_frame.columnconfigure((0, 1, 2), weight=1)
+        
+        self.drivers_kpi_pe, self.drivers_kpi_pe_bench = self._create_kpi_card_with_benchmark(kpi_frame, "Portfolio P/E Ratio", "...", 0)
+        self.drivers_kpi_yield, self.drivers_kpi_yield_bench = self._create_kpi_card_with_benchmark(kpi_frame, "Portfolio Dividend Yield", "...", 1)
+        self.drivers_kpi_beta = self._create_kpi_card(kpi_frame, "Portfolio Beta", "...", 2)
+
+        chart_card = ttk.Frame(tab, style="Card.TFrame", padding=20)
+        chart_card.grid(row=1, column=0, sticky="nsew")
+        chart_card.columnconfigure(0, weight=1)
+        chart_card.rowconfigure(1, weight=1)
+        
+        ttk.Label(chart_card, text="Factor Exposure", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        
+        self.fig_factors, self.ax_factors = plt.subplots()
+        self.canvas_factors = FigureCanvasTkAgg(self.fig_factors, chart_card)
+        self.canvas_factors.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+
+        return tab
+
+    def _create_risk_volatility_tab(self, parent_notebook):
+        """Creates the UI for the Risk & Volatility tab with VaR."""
+        tab = ttk.Frame(parent_notebook, padding=15)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        
+        kpi_frame = ttk.Frame(tab)
+        kpi_frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        kpi_frame.columnconfigure((0, 1, 2), weight=1)
+        self.risk_kpi_vol = self._create_kpi_card(kpi_frame, "Annualized Volatility", "...", 0)
+        self.risk_kpi_sharpe = self._create_kpi_card(kpi_frame, "Sharpe Ratio", "...", 1)
+        self.risk_kpi_var = self._create_kpi_card(kpi_frame, "Value at Risk (95%, 1-day)", "...", 2)
+
+        chart_card = ttk.Frame(tab, style="Card.TFrame", padding=20)
+        chart_card.grid(row=1, column=0, sticky="nsew", pady=(0, 15))
+        chart_card.columnconfigure(0, weight=1)
+        chart_card.rowconfigure(1, weight=1)
+        ttk.Label(chart_card, text="1-Year Rolling Volatility vs. Benchmark (S&P 500)", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        self.fig_risk, self.ax_risk = plt.subplots()
+        self.canvas_risk = FigureCanvasTkAgg(self.fig_risk, chart_card)
+        self.canvas_risk.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+        
+        return tab
+
+    def _create_correlation_tab(self, parent_notebook):
+        """Creates the UI for the Correlation Matrix tab with Diversification Score."""
+        tab = ttk.Frame(parent_notebook, padding=15)
+        tab.columnconfigure(0, weight=2)
+        tab.columnconfigure(1, weight=1)
+        tab.rowconfigure(1, weight=1)
+
+        kpi_frame = ttk.Frame(tab)
+        kpi_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 15))
+        kpi_frame.columnconfigure(0, weight=1)
+        self.corr_kpi_score = self._create_kpi_card(kpi_frame, "Portfolio Diversification Score", "...", 0)
+
+        chart_card = ttk.Frame(tab, style="Card.TFrame", padding=20)
+        chart_card.grid(row=1, column=0, sticky="nsew", padx=(0, 15))
+        chart_card.columnconfigure(0, weight=1)
+        chart_card.rowconfigure(0, weight=1)
+        self.fig_corr, self.ax_corr = plt.subplots()
+        self.canvas_corr = FigureCanvasTkAgg(self.fig_corr, chart_card)
+        self.canvas_corr.get_tk_widget().pack(fill="both", expand=True)
+        self.cbar_corr = None
+
+        summary_card = ttk.Frame(tab, style="Card.TFrame", padding=20)
+        summary_card.grid(row=1, column=1, sticky="nsew")
+        ttk.Label(summary_card, text="Correlation Insights", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w")
+        self.corr_summary_text = tk.Text(summary_card, wrap="word", height=10, bg=self.CARD_COLOR, fg=self.TEXT_COLOR, font=self.FONT_NORMAL, relief="flat", highlightthickness=0, borderwidth=0)
+        self.corr_summary_text.pack(fill="both", expand=True, pady=(10, 0))
+        self.corr_summary_text.tag_configure("bold", font=self.FONT_BOLD)
+        self.corr_summary_text.tag_configure("good", foreground=self.POSITIVE_COLOR)
+        self.corr_summary_text.tag_configure("bad", foreground=self.NEGATIVE_COLOR)
+        self.corr_summary_text.tag_configure("heading", font=self.FONT_BOLD, foreground=self.ACCENT_COLOR)
+
+        return tab
+
+    def _create_stress_test_tab(self, parent_notebook):
+        """Creates the UI for the Stress Testing tab with corrected slider ranges."""
+        tab = ttk.Frame(parent_notebook, padding=15)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(3, weight=1)
+
+        # --- Historical Scenarios (No changes here) ---
+        hist_frame = ttk.Frame(tab, style="Card.TFrame", padding=15)
+        hist_frame.grid(row=0, column=0, sticky="ew", pady=(0, 15))
+        ttk.Label(hist_frame, text="Historical Scenarios", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w", pady=(0, 10))
+        
+        hist_controls = ttk.Frame(hist_frame, style="Card.TFrame")
+        hist_controls.pack(fill="x")
+        ttk.Label(hist_controls, text="Select Scenario:", style="Secondary.TLabel", background=self.CARD_COLOR).pack(side="left", padx=(0, 10))
+        self.scenario_var = tk.StringVar(value="2008 Financial Crisis")
+        scenario_menu = ttk.Combobox(hist_controls, textvariable=self.scenario_var,
+                                     values=["2008 Financial Crisis", "2020 COVID Crash", "Dot-com Burst"],
+                                     state="readonly", font=self.FONT_NORMAL)
+        scenario_menu.pack(side="left", fill="x", expand=True)
+        scenario_menu.bind("<<ComboboxSelected>>", self._update_stress_test_view)
+
+        # --- Custom Scenarios with Corrected Sliders ---
+        custom_frame = ttk.Frame(tab, style="Card.TFrame", padding=15)
+        custom_frame.grid(row=1, column=0, sticky="ew", pady=(0, 20))
+        ttk.Label(custom_frame, text="Custom Scenario Builder", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w", pady=(0, 15))
+        
+        custom_controls = ttk.Frame(custom_frame, style="Card.TFrame")
+        custom_controls.pack(fill="x", expand=True)
+        custom_controls.columnconfigure((0, 1), weight=1)
+        custom_controls.columnconfigure(2, weight=0)
+
+        # Create the sliders with the new, corrected ranges
+        self.custom_shock_var = self._create_custom_scenario_slider(custom_controls, "Market Shock", -100.0, 0.0, -15.0, 0, format_str="{:.1f}%")
+        self.custom_rate_var = self._create_custom_scenario_slider(custom_controls, "Rate Shock", -5.0, 5.0, 0.5, 1, format_str="{:+.1f}%")
+
+        run_btn = ttk.Button(custom_controls, text="Run Custom", style="Accent.TButton", command=self._run_custom_stress_test)
+        run_btn.grid(row=0, column=2, sticky="e", padx=(20,0))
+        
+        # --- KPI Cards and Chart (No changes here) ---
+        kpi_frame = ttk.Frame(tab)
+        kpi_frame.grid(row=2, column=0, sticky="ew", pady=(0, 20))
+        kpi_frame.columnconfigure((0, 1, 2), weight=1)
+        self.stress_kpi_loss_usd = self._create_kpi_card(kpi_frame, "Estimated Max Loss ($)", "...", 0)
+        self.stress_kpi_loss_pct = self._create_kpi_card(kpi_frame, "Estimated Max Loss (%)", "...", 1)
+        self.stress_kpi_recovery = self._create_kpi_card(kpi_frame, "Est. Recovery Time", "...", 2)
+
+        chart_card = ttk.Frame(tab, style="Card.TFrame", padding=20)
+        chart_card.grid(row=3, column=0, sticky="nsew")
+        chart_card.columnconfigure(0, weight=1)
+        chart_card.rowconfigure(0, weight=1)
+        self.fig_stress, self.ax_stress = plt.subplots()
+        self.canvas_stress = FigureCanvasTkAgg(self.fig_stress, chart_card)
+        self.canvas_stress.get_tk_widget().pack(fill="both", expand=True)
+
+        return tab
+
+
+    def _create_attribution_tab(self, parent_notebook):
+        """Creates the UI for the enhanced Performance Attribution tab."""
+        tab = ttk.Frame(parent_notebook, padding=15)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+
+        ttk.Label(tab, text="Contribution to 1-Year Return", style="Header.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 10))
+        
+        chart_card = ttk.Frame(tab, style="Card.TFrame", padding=20)
+        chart_card.grid(row=1, column=0, sticky="nsew")
+        chart_card.columnconfigure(0, weight=1)
+        chart_card.rowconfigure(0, weight=1)
+        self.fig_attr, self.ax_attr = plt.subplots()
+        self.canvas_attr = FigureCanvasTkAgg(self.fig_attr, chart_card)
+        self.canvas_attr.get_tk_widget().pack(fill="both", expand=True)
+        
+        return tab
+
+
+    def _update_stress_test_view(self, event=None):
+        """Handles running a HISTORICAL stress test scenario."""
+        if not self.portfolio["positions"]: return
+
+        scenario_name = self.scenario_var.get()
+        scenarios = {
+            "2008 Financial Crisis": {"shock": -0.55, "rebound_annual": 0.12},
+            "2020 COVID Crash":      {"shock": -0.34, "rebound_annual": 0.30},
+            "Dot-com Burst":         {"shock": -0.49, "rebound_annual": 0.18}
+        }
+        
+        market_shock = scenarios[scenario_name]["shock"]
+        rebound_rate = scenarios[scenario_name]["rebound_annual"]
+        
+        # Rate shock is 0 for historical scenarios
+        self._execute_and_plot_stress_test(market_shock, 0, rebound_rate, scenario_name)
+
+    def _run_custom_stress_test(self):
+        """Handles running a CUSTOM stress test scenario from the new slider inputs."""
+        if not self.portfolio["positions"]:
+            messagebox.showwarning("No Positions", "Please add positions to your portfolio before running a scenario.", parent=self)
+            return
+        
+        try:
+            # Read the values directly from the DoubleVar associated with each slider
+            market_shock = self.custom_shock_var.get() / 100.0
+            rate_shock = self.custom_rate_var.get() / 100.0
+        except (ValueError, TclError):
+            # TclError can happen if the view is destroyed while trying to get the value
+            messagebox.showerror("Invalid Input", "Could not read slider values.", parent=self)
+            return
+
+        # For custom scenarios, use a generic strong rebound rate
+        rebound_rate = 0.18 
+        scenario_name = "Custom Scenario"
+        
+        self._execute_and_plot_stress_test(market_shock, rate_shock, rebound_rate, scenario_name)
+
+    def _execute_and_plot_stress_test(self, market_shock, rate_shock, rebound_annual_rate, scenario_name):
+        """
+        The shared engine for calculating and plotting any stress test scenario.
+        This version fixes the calculation for the pre-crash value to ensure
+        the recovery line and annotation are perfectly accurate.
+        """
+        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in self.portfolio["positions"])
+        if total_value == 0: return
+
+        # Calculate total shock from market and rates
+        portfolio_beta = self.analysis_data.get('analytics', {}).get('beta', 1.0)
+        market_impact = total_value * portfolio_beta * market_shock
+        
+        rate_impact = sum(
+            pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) *
+            self.market_data_cache.get(pos["symbol"], {}).get("interest_rate_sensitivity", 0) *
+            rate_shock
+            for pos in self.portfolio["positions"]
+        )
+        
+        total_shock_usd = market_impact + rate_impact
+        total_shock_pct = total_shock_usd / total_value if total_value > 0 else 0
+        
+        # --- Recovery Calculation ---
+        weights = {pos["symbol"]: (pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0)) / total_value for pos in self.portfolio["positions"]}
+        portfolio_returns = (self.analysis_data['returns'][list(weights.keys())] * pd.Series(weights)).sum(axis=1)
+        
+        # --- CALCULATION FIX: The pre-crash value is the portfolio's current total value ---
+        last_val = total_value
+        trough_val = last_val + total_shock_usd
+        
+        scenario_daily_rebound_rate = (1 + rebound_annual_rate)**(1/252) - 1
+        portfolio_avg_daily_return = portfolio_returns.mean()
+        recovery_growth_rate = max(portfolio_avg_daily_return, scenario_daily_rebound_rate)
+        
+        estimated_recovery_days = -1
+        if trough_val > 0 and last_val > trough_val:
+            log_growth_rate = np.log(1 + recovery_growth_rate)
+            log_value_ratio = np.log(last_val / trough_val)
+            if log_growth_rate > 0:
+                estimated_recovery_days = int(log_value_ratio / log_growth_rate)
+
+        if estimated_recovery_days > 0:
+            if estimated_recovery_days > 5 * 365: recovery_text = "5+ Years"
+            elif estimated_recovery_days > 365: recovery_text = f"~{estimated_recovery_days / 365.25:.1f} Years"
+            else: recovery_text = f"~{max(1, estimated_recovery_days / (365.25/12)):.0f} Months"
+        else: recovery_text = "N/A"
+
+        self.stress_kpi_loss_usd.config(text=f"${total_shock_usd:,.2f}", foreground=self.NEGATIVE_COLOR)
+        self.stress_kpi_loss_pct.config(text=f"{total_shock_pct:.2%}", foreground=self.NEGATIVE_COLOR)
+        self.stress_kpi_recovery.config(text=recovery_text)
+
+        # --- Plotting ---
+        self.ax_stress.clear()
+        
+        # --- PLOTTING FIX: Accurately generate the historical path leading up to the crash ---
+        # 1. Get the historical returns for the 180 days leading up to the event.
+        historical_returns = portfolio_returns.iloc[-180:]
+        # 2. Create the growth factors for this period.
+        growth_factors = (1 + historical_returns).cumprod()
+        # 3. Normalize the factors so the last day equals 1. This ensures the path ends exactly at the pre-crash value.
+        normalized_factors = growth_factors / growth_factors.iloc[-1]
+        # 4. Generate the historical path by multiplying with the actual pre-crash value (last_val).
+        pre_shock_path = last_val * normalized_factors
+        
+        path = list(pre_shock_path.values)
+        path.append(trough_val)
+        
+        recovery_days = estimated_recovery_days if estimated_recovery_days > 0 else 22
+        if recovery_days > 0:
+            daily_std_dev = portfolio_returns.std()
+            random_returns = np.random.normal(recovery_growth_rate, daily_std_dev, recovery_days)
+            unadjusted_path = [trough_val]
+            for r in random_returns:
+                unadjusted_path.append(unadjusted_path[-1] * (1 + r))
+            error = last_val - unadjusted_path[-1]
+            adjustment = np.linspace(0, error, len(unadjusted_path))
+            recovery_path = np.array(unadjusted_path) + adjustment
+            path.extend(list(recovery_path))
+        
+        x_axis = np.arange(-180, len(path) - 180)
+
+        # The plotting enhancements will now be perfectly aligned with the data
+        self.ax_stress.plot(x_axis, path, color=self.ACCENT_COLOR, lw=1.5, zorder=10)
+        self.ax_stress.axvline(x=0, color=self.NEGATIVE_COLOR, linestyle='--', label=f"Event: {scenario_name}", zorder=5)
+        self.ax_stress.axhline(y=last_val, color=self.SECONDARY_TEXT, linestyle=':', label='Pre-Crash Value', zorder=5)
+
+        recovery_point_x = None
+        for i in range(181, len(path)):
+            if path[i] >= last_val:
+                recovery_point_x = x_axis[i] 
+                break
+        
+        if recovery_point_x is not None:
+            self.ax_stress.plot(recovery_point_x, last_val, 'o', color=self.POSITIVE_COLOR, markersize=8, zorder=20, label="Recovery Point")
+            self.ax_stress.annotate(
+                f'Recovered\nDay {recovery_point_x}',
+                xy=(recovery_point_x, last_val),
+                xytext=(recovery_point_x + 30, last_val + (self.ax_stress.get_ylim()[1] - self.ax_stress.get_ylim()[0]) * 0.05),
+                arrowprops=dict(facecolor=self.TEXT_COLOR, shrink=0.05, width=1, headwidth=4),
+                ha='center', va='bottom',
+                bbox=dict(boxstyle="round,pad=0.3", fc=self.CARD_COLOR, ec=self.TEXT_COLOR, lw=0.5, alpha=0.9),
+                zorder=30
+            )
+        
+        self.ax_stress.set_title(f"Simulated Impact of {scenario_name}", fontsize=14, pad=20)
+        self.fig_stress.suptitle("Simulated path showing the shock and a projected recovery.", fontsize=9, color=self.SECONDARY_TEXT, y=0.92)
+        self.ax_stress.set_ylabel("Portfolio Value ($)")
+        self.ax_stress.set_xlabel("Trading Days From Event")
+        self.ax_stress.legend()
+        self.ax_stress.grid(True, linestyle='--', alpha=0.5)
+        self.fig_stress.tight_layout(rect=[0, 0, 1, 0.9])
+        self.canvas_stress.draw()
+
+    def _update_analysis_view_data(self):
+        """Master function to generate mock data and update all analysis tabs."""
+        if not self.portfolio["positions"]:
+            # Handle empty portfolio case
+            for ax in [self.ax_drivers, self.ax_risk, self.ax_corr, self.ax_attr, self.ax_stress]:
+                if ax.figure.canvas.get_tk_widget().winfo_exists():
+                    ax.clear()
+                    ax.text(0.5, 0.5, "Add positions to see analysis", ha='center', va='center', transform=ax.transAxes, fontsize=12)
+                    ax.figure.canvas.draw()
+            return
+
+        self.analysis_data['returns'] = self._generate_mock_historical_returns()
+        self.analysis_data['analytics'] = self._calculate_portfolio_analytics(self.analysis_data['returns'])
+
+        self._update_key_drivers_view()
+        self._update_risk_volatility_view()
+        self._update_correlation_view()
+        self._update_attribution_view()
+        self._update_stress_test_view()
+
+    def _generate_mock_historical_returns(self, days=252):
+        """Generates a DataFrame of mock daily returns for all assets and a benchmark."""
+        dates = pd.date_range(end=datetime.now(), periods=days)
+        returns_df = pd.DataFrame(index=dates)
+        returns_df['SPY'] = np.random.normal(loc=0.0005, scale=0.01, size=days)
+
+        for pos in self.portfolio["positions"]:
+            symbol = pos["symbol"]
+            mock_beta = self.market_data_cache.get(symbol, {}).get("beta", 1.0)
+            mock_vol = np.random.uniform(0.01, 0.03)
+            asset_returns = returns_df['SPY'] * mock_beta + np.random.normal(loc=0, scale=mock_vol, size=days)
+            returns_df[symbol] = asset_returns
+            
+        return returns_df
+
+    def _calculate_portfolio_analytics(self, returns_df):
+        """Calculates all key risk, performance, and fundamental metrics."""
+        analytics = {'positions': {}, 'fundamentals': {}}
+        
+        positions = self.portfolio["positions"]
+        if not positions: return analytics
+
+        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in positions)
+        if total_value == 0: return analytics
+
+        weights = {pos["symbol"]: (pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0)) / total_value for pos in positions}
+        portfolio_symbols = list(weights.keys())
+        portfolio_returns = (returns_df[portfolio_symbols] * pd.Series(weights)).sum(axis=1)
+
+        # --- Risk Metrics ---
+        covariance = portfolio_returns.cov(returns_df['SPY'])
+        market_variance = returns_df['SPY'].var()
+        analytics['beta'] = covariance / market_variance if market_variance != 0 else 0
+        analytics['volatility'] = portfolio_returns.std() * np.sqrt(252)
+        risk_free_rate = 0.01
+        excess_returns = portfolio_returns.mean() * 252 - risk_free_rate
+        analytics['sharpe_ratio'] = excess_returns / analytics['volatility'] if analytics['volatility'] != 0 else 0
+        
+        # --- Value at Risk (VaR) at 95% confidence for 1 day ---
+        # VaR = Portfolio Value * (Portfolio Volatility / sqrt(252)) * Z-score
+        # Z-score for 95% confidence is 1.645
+        daily_volatility = portfolio_returns.std()
+        analytics['var_95'] = total_value * daily_volatility * 1.645
+
+        # --- Diversification Score ---
+        # Score = (1 - Average Correlation) * 100. Higher is better.
+        corr_matrix = returns_df[portfolio_symbols].corr()
+        if len(portfolio_symbols) > 1:
+            avg_corr = corr_matrix.unstack().drop_duplicates().mean()
+            analytics['diversification_score'] = (1 - avg_corr) * 100
+        else:
+            analytics['diversification_score'] = 0 # Not applicable for 1 stock
+
+        # --- Fundamental Metrics ---
+        # Portfolio fundamentals
+        analytics['fundamentals']['pe_ratio'] = sum(self.market_data_cache.get(s, {}).get("trailingPE", 0) * w for s, w in weights.items())
+        analytics['fundamentals']['dividend_yield'] = sum(self.market_data_cache.get(s, {}).get("dividendYield", 0) * w for s, w in weights.items())
+        
+        # Benchmark fundamentals
+        benchmark_data = self.api.get_benchmark_details()
+        analytics['fundamentals']['benchmark_pe'] = benchmark_data.get('trailingPE')
+        analytics['fundamentals']['benchmark_yield'] = benchmark_data.get('dividendYield')
+
+        # Factor Exposures
+        weighted_factors = {"Value": 0, "Growth": 0, "Quality": 0}
+        for s, w in weights.items():
+            factors = self.market_data_cache.get(s, {}).get("factor_exposures", {})
+            for factor, exposure in factors.items():
+                weighted_factors[factor] += w * exposure
+        analytics['fundamentals']['factor_exposures'] = weighted_factors
+        
+        return analytics
+
+
+    def _update_key_drivers_view(self):
+        """Populates the Key Drivers tab with the new treemap and benchmark KPIs."""
+        analytics = self.analysis_data.get('analytics', {})
+        fundamentals = analytics.get('fundamentals', {})
+        
+        # Update KPIs
+        self.drivers_kpi_pe.config(text=f"{fundamentals.get('pe_ratio', 0):.2f}x")
+        self.drivers_kpi_pe_bench.config(text=f"vs SPY: {fundamentals.get('benchmark_pe', 0):.2f}x")
+        self.drivers_kpi_yield.config(text=f"{fundamentals.get('dividend_yield', 0):.2%}")
+        self.drivers_kpi_yield_bench.config(text=f"vs SPY: {fundamentals.get('benchmark_yield', 0):.2%}")
+        self.drivers_kpi_beta.config(text=f"{analytics.get('beta', 0):.2f}")
+
+        # Plot Factor Exposure Treemap
+        self.ax_factors.clear()
+        factors = fundamentals.get('factor_exposures', {})
+        labels = [f"{k}\n({v:.1%})" for k, v in factors.items()]
+        sizes = list(factors.values())
+        
+        if not any(s > 0 for s in sizes):
+            self.ax_factors.text(0.5, 0.5, "Data not available", ha='center', va='center')
+        else:
+            squarify.plot(sizes=sizes, label=labels, ax=self.ax_factors,
+                          color=plt.cm.viridis(np.linspace(0.3, 0.9, len(labels))),
+                          text_kwargs={'color': 'white', 'fontsize': 12, 'fontweight': 'bold'})
+        
+        self.ax_factors.set_title("Portfolio Factor Exposure", fontsize=12)
+        self.ax_factors.axis('off')
+        self.fig_factors.tight_layout()
+        self.canvas_factors.draw()
+
+    def _update_risk_volatility_view(self):
+        """Populates the Risk & Volatility tab with calculated data, including VaR."""
+        analytics = self.analysis_data.get('analytics', {})
+        
+        self.risk_kpi_vol.config(text=f"{analytics.get('volatility', 0):.2%}")
+        self.risk_kpi_sharpe.config(text=f"{analytics.get('sharpe_ratio', 0):.2f}")
+        self.risk_kpi_var.config(text=f"${analytics.get('var_95', 0):,.2f}")
+
+        # Plot rolling volatility (no changes here)
+        self.ax_risk.clear()
+        returns_df = self.analysis_data.get('returns')
+        if returns_df is not None:
+            total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in self.portfolio["positions"])
+            if total_value > 0:
+                weights = {pos["symbol"]: (pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0)) / total_value for pos in self.portfolio["positions"]}
+                portfolio_returns = (returns_df[list(weights.keys())] * pd.Series(weights)).sum(axis=1)
+                rolling_vol = portfolio_returns.rolling(window=22).std() * np.sqrt(252)
+                benchmark_rolling_vol = returns_df['SPY'].rolling(window=22).std() * np.sqrt(252)
+                rolling_vol.plot(ax=self.ax_risk, label="Portfolio", color=self.ACCENT_COLOR, lw=2)
+                benchmark_rolling_vol.plot(ax=self.ax_risk, label="S&P 500", color=self.SECONDARY_TEXT, ls="--")
+        
+        self.ax_risk.set_title("1-Year Rolling Volatility", fontsize=12)
+        self.ax_risk.set_ylabel("Annualized Volatility")
+        self.ax_risk.legend()
+        self.ax_risk.grid(True, axis='y', linestyle='--', alpha=0.5)
+        self.fig_risk.tight_layout()
+        self.canvas_risk.draw()
+
+    def _update_correlation_view(self):
+        """
+        Populates the Correlation tab, including the Diversification Score
+        and the detailed text insights.
+        """
+        analytics = self.analysis_data.get('analytics', {})
+        score = analytics.get('diversification_score', 0)
+        self.corr_kpi_score.config(text=f"{score:.1f} / 100")
+        
+        # Determine color based on score
+        if score > 75: color = self.POSITIVE_COLOR
+        elif score > 50: color = "#f0c420" # Warning yellow
+        else: color = self.NEGATIVE_COLOR
+        self.corr_kpi_score.config(foreground=color)
+
+        # --- Plot Heatmap ---
+        returns = self.analysis_data.get('returns')
+        if returns is None: return
+        
+        portfolio_symbols = [pos['symbol'] for pos in self.portfolio['positions']]
+        if len(portfolio_symbols) < 2:
+            self.ax_corr.clear()
+            self.ax_corr.text(0.5, 0.5, "Add more positions\nto see correlations", ha='center', va='center')
+            self.canvas_corr.draw()
+            self.corr_summary_text.config(state="normal")
+            self.corr_summary_text.delete("1.0", tk.END)
+            self.corr_summary_text.insert("1.0", "Add at least two positions to calculate correlations.")
+            self.corr_summary_text.config(state="disabled")
+            return
+            
+        corr_matrix = returns[portfolio_symbols].corr()
+        self.fig_corr.clear()
+        self.ax_corr = self.fig_corr.add_subplot(111)
+        im = self.ax_corr.imshow(corr_matrix, cmap='coolwarm', interpolation='nearest', vmin=-1, vmax=1)
+        self.fig_corr.colorbar(im, ax=self.ax_corr, label="Correlation Coefficient")
+        self.ax_corr.set_xticks(np.arange(len(portfolio_symbols)))
+        self.ax_corr.set_yticks(np.arange(len(portfolio_symbols)))
+        self.ax_corr.set_xticklabels(portfolio_symbols, rotation=45, ha="right")
+        self.ax_corr.set_yticklabels(portfolio_symbols)
+        self.ax_corr.set_title("Asset Correlation Matrix", fontsize=12)
+        self.fig_corr.tight_layout(pad=2.0)
+        self.canvas_corr.draw()
+
+        # --- Restore Detailed Text Insights ---
+        summary = self.corr_summary_text
+        summary.config(state="normal")
+        summary.delete("1.0", tk.END)
+        summary.insert(tk.END, "What is Correlation?\n", "heading")
+        summary.insert(tk.END, "It measures how two assets move in relation to each other. Values range from -1 to +1.\n\n")
+        
+        summary.insert(tk.END, "Low/Negative (Good for Diversification)\n", ("heading", "good"))
+        summary.insert(tk.END, "Assets with low correlation (close to 0 or negative) tend to move independently. This is desirable as it reduces overall portfolio volatility.\n\n", "good")
+
+        summary.insert(tk.END, "High/Positive (Bad for Diversification)\n", ("heading", "bad"))
+        summary.insert(tk.END, "Assets with high correlation (close to +1) tend to move in the same direction. A portfolio of highly correlated assets is riskier.\n\n", "bad")
+
+        if len(portfolio_symbols) > 1:
+            corr_unstacked = corr_matrix.unstack()
+            corr_unstacked = corr_unstacked[corr_unstacked != 1.0] # Remove self-correlations
+            max_corr = corr_unstacked.idxmax()
+            min_corr = corr_unstacked.idxmin()
+            summary.insert(tk.END, "Highest Correlation (Risk Concentrator):\n", "bold")
+            summary.insert(tk.END, f"{max_corr[0]} & {max_corr[1]}: {corr_unstacked[max_corr]:.2f}\n\n", "bad")
+            summary.insert(tk.END, "Lowest Correlation (Best Diversifier):\n", "bold")
+            summary.insert(tk.END, f"{min_corr[0]} & {min_corr[1]}: {corr_unstacked[min_corr]:.2f}", "good")
+        
+        summary.config(state="disabled")
+
+
+    def _update_attribution_view(self):
+        """Calculates and plots contribution to return with correct colors."""
+        returns = self.analysis_data.get('returns')
+        if returns is None or returns.empty: return
+
+        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in self.portfolio["positions"])
+        if total_value == 0: return
+        weights = {pos["symbol"]: (pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0)) / total_value for pos in self.portfolio["positions"]}
+
+        total_returns = (1 + returns).prod() - 1
+        contributions = total_returns * pd.Series(weights)
+        contributions_usd = contributions * total_value
+        
+        # FIX: Sort the values first, then generate colors based on the sorted data
+        sorted_contributions = contributions_usd.sort_values()
+        colors = [self.POSITIVE_COLOR if v >= 0 else self.NEGATIVE_COLOR for v in sorted_contributions]
+
+        self.ax_attr.clear()
+        sorted_contributions.plot(kind='barh', ax=self.ax_attr, color=colors)
+        self.ax_attr.set_title("Contribution to Return ($)", fontsize=12)
+        self.ax_attr.set_xlabel("Dollar Contribution")
+        self.ax_attr.grid(True, axis='x', linestyle='--', alpha=0.5)
+        self.fig_attr.tight_layout()
+        self.canvas_attr.draw()
+
+
+    def _create_kpi_card_with_benchmark(self, parent, title, value, col):
+        """Creates a KPI card that includes a smaller line for benchmark comparison."""
+        card = ttk.Frame(parent, style="Card.TFrame", padding=15)
+        card.grid(row=0, column=col, sticky="nsew", padx=5)
+        
+        ttk.Label(card, text=title, style="Secondary.TLabel", background=self.CARD_COLOR).pack(anchor="w")
+        
+        value_lbl = ttk.Label(card, text=value, style="KPI.TLabel", background=self.CARD_COLOR)
+        value_lbl.pack(anchor="w", pady=(5,0))
+        
+        benchmark_lbl = ttk.Label(card, text="vs SPY: ...", font=self.FONT_NORMAL, foreground=self.SECONDARY_TEXT, background=self.CARD_COLOR)
+        benchmark_lbl.pack(anchor="w")
+        
+        return value_lbl, benchmark_lbl
+
+    def _create_custom_scenario_slider(self, parent, label_text, from_, to, initial_value, col, format_str="{:+.1f}%"):
+        """
+        Creates a labeled slider with a live value display.
+        This version fixes the bug where the text label did not update on slide.
+        """
+        frame = ttk.Frame(parent, style="Card.TFrame")
+        frame.grid(row=0, column=col, sticky="ew", padx=(10, 5))
+        frame.columnconfigure(0, weight=1)
+
+        label_frame = ttk.Frame(frame, style="Card.TFrame")
+        label_frame.pack(fill="x")
+        
+        ttk.Label(label_frame, text=label_text, style="Secondary.TLabel", background=self.CARD_COLOR).pack(side="left")
+        value_lbl = ttk.Label(label_frame, text=format_str.format(initial_value), font=self.FONT_BOLD, background=self.CARD_COLOR)
+        value_lbl.pack(side="right")
+
+        var = tk.DoubleVar(value=initial_value)
+        slider = ttk.Scale(frame, from_=from_, to=to, orient="horizontal", variable=var, style="Horizontal.TScale")
+        slider.pack(fill="x", expand=True, pady=(5,0))
+        
+        # This trace is now correctly configured to update the label.
+        var.trace_add("write", lambda name, index, mode, v=var, l=value_lbl, f=format_str: l.config(text=f.format(v.get())))
+        
+        return var
+
+
 
     def _build_tax_view(self, parent):
         """Build a tax view with three sections."""
@@ -580,6 +1201,11 @@ class PortfolioApp(tk.Tk):
 
     def _on_mousewheel(self, event, canvas):
         """Handle mouse wheel and trackpad scrolling for a canvas."""
+        # FIX: Add a safety check to ensure the canvas widget still exists before
+        # trying to scroll it. This prevents errors during view transitions.
+        if not canvas.winfo_exists():
+            return
+            
         # For Windows/macOS, event.delta is used.
         # For Linux, event.num 4 is scroll up, 5 is scroll down.
         if event.num == 4 or event.delta > 0:
@@ -627,8 +1253,7 @@ class PortfolioApp(tk.Tk):
         elif self.active_view_key == "goals" and hasattr(self, "goals_container"):
             self._update_goals()
         elif self.active_view_key == "analysis":
-            if hasattr(self, "canvas_attr"): self._run_performance_attribution()
-            if hasattr(self, "canvas_stress") and self.scenario_var.get(): self._run_stress_test(self.scenario_var.get())
+            self._update_analysis_view_data()
         elif self.active_view_key == "tax":
             if hasattr(self, "tlh_label"): self._scan_tax_losses()
             if hasattr(self, "tax_menu"): self._update_tax_dropdown()
@@ -849,31 +1474,6 @@ class PortfolioApp(tk.Tk):
         self.analysis_placeholder.pack(expand=True)
         self.active_analysis_goal = None
 
-  
-
-    def _run_performance_attribution(self):
-        """Plot performance attribution."""
-        self.ax_attr.clear()
-        factors = {"Market": np.random.uniform(5, 10), "Sector": np.random.uniform(-2, 2), "Selection": np.random.uniform(-1, 3)}
-        colors = [self.POSITIVE_COLOR if v >= 0 else self.NEGATIVE_COLOR for v in factors.values()]
-        self.ax_attr.bar(factors.keys(), factors.values(), color=colors)
-        self.ax_attr.set_title("Performance Attribution")
-        self.ax_attr.spines["top"].set_visible(False)
-        self.ax_attr.spines["right"].set_visible(False)
-        self.fig_attr.tight_layout()
-        self.canvas_attr.draw()
-
-    def _run_stress_test(self, scenario):
-        """Plot stress test results."""
-        self.ax_stress.clear()
-        impacts = {"2008 Financial Crisis": -40, "2020 COVID Crash": -30, "Dot-com Burst": -50}
-        impact = impacts.get(scenario, 0) + np.random.uniform(-5, 5)
-        self.ax_stress.barh(["Portfolio"], [impact], color=self.NEGATIVE_COLOR)
-        self.ax_stress.set_title(f"{scenario} Impact")
-        self.ax_stress.spines["top"].set_visible(False)
-        self.ax_stress.spines["right"].set_visible(False)
-        self.fig_stress.tight_layout()
-        self.canvas_stress.draw()
 
     def _scan_tax_losses(self):
         """Scan for tax-loss opportunities."""
@@ -1272,7 +1872,7 @@ class PortfolioApp(tk.Tk):
                         np.linspace(initial_value, p10, len(x_axis)), 
                         np.linspace(initial_value, p90, len(x_axis)), 
                         color=self.ACCENT_COLOR, alpha=0.2, label="10th-90th Percentile")
-        ax.axhline(y=goal['target_amount'], color="white", linestyle=":", label=f"Target: ${goal['target_amount']:,.0f}")
+        ax.axhline(y=goal['target_amount'], color="red", linestyle=":", label=f"Target: ${goal['target_amount']:,.0f}")
 
         # Formatting
         ax.set_title("Growth Projection")
