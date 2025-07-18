@@ -101,6 +101,8 @@ class PortfolioApp(tk.Tk):
         # --- Data Storage ---
         self.portfolio = {"positions": [], "goals": []}
         self.market_data_cache = {}
+        self.analysis_data = {} 
+        self.logo_cache = {} 
         self.active_view_key = None
         self.sidebar_buttons = {}
         self.chart_hover_elements = {}
@@ -109,28 +111,32 @@ class PortfolioApp(tk.Tk):
         self.sector_details = {}
         self.active_timeframe = "6M"
         self.goal_simulation_results = {}
-        self.active_analysis_goal = None
-        self.analysis_data = {}
-        self.logo_cache = {} # NEW: Cache for PhotoImage objects to prevent garbage collection
-        self.active_timeframe = "6M" # NEW: Default timeframe
-        self.radar_annot = None # Annotation for radar chart hover
-        self.radar_fig = None # Reference to the radar chart figure
-        self.radar_data = {} # To store data for hover events
-        self.radar_plot_data = {}
-        self.radar_fig_dash, self.radar_ax_dash = None, None # For the new dashboard radar
+        
+        # --- Dashboard Radar Chart State ---
+        self.radar_fig_dash, self.radar_ax_dash = None, None
         self.radar_canvas_dash = None
         self.radar_annot_dash = None
         self.radar_data_dash = {}
         self.radar_plot_data_dash = {}
+
+        # --- Analysis Radar Chart State ---
+        self.radar_fig_analysis, self.radar_ax_analysis = None, None
+        self.radar_canvas_analysis = None
+        self.radar_annot_analysis = None
+        self.radar_data_analysis = {}
+        self.radar_plot_data_analysis = {}
+
         self.is_initial_dashboard_draw_pending = True
         self.has_built_analysis_tab = False
         self.update_job_id = None
+        self.goal_analysis_data = {}
 
 
 
         self.fig_dash, self.ax_dash = plt.subplots()
         self.fig_pie, self.ax_pie = plt.subplots()
-        self.fig_factors, self.ax_factors = plt.subplots()
+        # This is the key change: self.fig_factors is now self.radar_fig_analysis
+        self.radar_fig_analysis, self.radar_ax_analysis = plt.subplots()
         self.fig_risk, self.ax_risk = plt.subplots()
         self.fig_corr, self.ax_corr = plt.subplots()
         self.fig_attr, self.ax_attr = plt.subplots()
@@ -139,7 +145,6 @@ class PortfolioApp(tk.Tk):
         self.fig_breakdown, self.ax_breakdown = plt.subplots()
         self.fig_dist, self.ax_dist = plt.subplots()
         self.radar_fig_dash, self.radar_ax_dash = plt.subplots() # For the dashboard radar
-        # --- End of new block ---
 
         # --- Build UI ---
         self._build_styles()
@@ -198,7 +203,7 @@ class PortfolioApp(tk.Tk):
         style.configure("Card.TFrame", background=self.CARD_COLOR, relief="flat", borderwidth=1, bordercolor=self.BORDER_COLOR)
         style.configure("Sidebar.TFrame", background=self.SIDEBAR_COLOR)
         style.configure("Green.Horizontal.TProgressbar", background=self.POSITIVE_COLOR)
-        
+
         # --- Labels ---
         style.configure("TLabel", background=self.BG_COLOR, foreground=self.TEXT_COLOR, font=self.FONT_NORMAL)
         style.configure("Header.TLabel", font=self.FONT_HEADER, foreground=self.TEXT_COLOR)
@@ -265,11 +270,48 @@ class PortfolioApp(tk.Tk):
         self.content_frame.rowconfigure(0, weight=1)
 
     def show_view(self, view_key):
-        """Switch between views and update sidebar."""
+        """
+        REWRITTEN: Switches views and cleans up all Matplotlib figures AND their
+        associated annotation objects from the old view before destroying it. This
+        is the foolproof fix to prevent state corruption and tooltip failures by
+        eliminating "dangling references" to destroyed objects.
+        """
+        # --- 1. Clean up resources from the PREVIOUS view ---
+        if self.active_view_key:
+            # Clean up Dashboard-specific resources
+            if self.active_view_key == "dashboard":
+                if self.fig_dash: plt.close(self.fig_dash)
+                if self.fig_pie: plt.close(self.fig_pie)
+                if self.radar_fig_dash: plt.close(self.radar_fig_dash)
+                # THIS IS THE CRITICAL FIX: Reset the dangling reference
+                self.radar_annot_dash = None
+
+            # Clean up Analysis-specific resources
+            elif self.active_view_key == "analysis":
+                if self.radar_fig_analysis: plt.close(self.radar_fig_analysis)
+                if self.fig_risk: plt.close(self.fig_risk)
+                if self.fig_corr: plt.close(self.fig_corr)
+                if self.fig_attr: plt.close(self.fig_attr)
+                if self.fig_stress: plt.close(self.fig_stress)
+                # THIS IS THE CRITICAL FIX: Reset the dangling reference
+                self.radar_annot_analysis = None
+
+            # Clean up Goals-specific resources
+            elif self.active_view_key == "goals":
+                if self.fig_interactive: plt.close(self.fig_interactive)
+                if self.fig_breakdown: plt.close(self.fig_breakdown)
+                if self.fig_dist: plt.close(self.fig_dist)
+
+        # --- 2. Destroy the old Tkinter view frame ---
         if hasattr(self, 'active_view') and self.active_view:
-            self.active_view.destroy()
+            try:
+                self.active_view.destroy()
+            except TclError:
+                pass # Can happen on shutdown, safe to ignore.
+
         self.active_view_key = view_key
 
+        # --- 3. Update the sidebar UI ---
         for key, btn in self.sidebar_buttons.items():
             is_active = key == view_key
             btn["frame"].configure(style="TFrame" if is_active else "Sidebar.TFrame")
@@ -280,6 +322,7 @@ class PortfolioApp(tk.Tk):
             else:
                 btn["indicator"].pack_forget()
 
+        # --- 4. Build the NEW view ---
         views = {
             "dashboard": self._build_dashboard_view,
             "goals": self._build_goals_view,
@@ -289,8 +332,8 @@ class PortfolioApp(tk.Tk):
         self.active_view = views[view_key](self.content_frame)
         self.active_view.grid(row=0, column=0, sticky="nsew")
 
+        # --- 5. Trigger an update for the newly created view ---
         self.after(50, self._update_all_views)
-
 
     # --- View Builders ---
     def _build_dashboard_view(self, parent):
@@ -512,10 +555,9 @@ class PortfolioApp(tk.Tk):
         notebook.add(self.attribution_tab, text="Attribution")
         notebook.add(self.stress_test_tab, text="Stress Tests")
 
-        # --- ADD THESE TWO LINES ---
-        self.canvas_factors.mpl_connect('motion_notify_event', self._on_radar_hover)
-        self.canvas_factors.mpl_connect('axes_leave_event', self._on_radar_leave)
-        # --- END OF ADDED BLOCK ---
+         # --- FIX: Connect events to the dedicated 'analysis' canvas ---
+        self.radar_canvas_analysis.mpl_connect('motion_notify_event', self._on_radar_hover)
+        self.radar_canvas_analysis.mpl_connect('axes_leave_event', self._on_radar_leave)
         
         self.after(50, self._update_analysis_view_data)
 
@@ -541,9 +583,10 @@ class PortfolioApp(tk.Tk):
         chart_card.rowconfigure(1, weight=1)
         
         ttk.Label(chart_card, text="Factor Exposure", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 10))
-        
-        self.canvas_factors = FigureCanvasTkAgg(self.fig_factors, chart_card)
-        self.canvas_factors.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+
+        # --- FIX: Use the dedicated 'analysis' canvas and figure ---
+        self.radar_canvas_analysis = FigureCanvasTkAgg(self.radar_fig_analysis, chart_card)
+        self.radar_canvas_analysis.get_tk_widget().grid(row=1, column=0, sticky="nsew")
 
         return tab
     
@@ -750,13 +793,14 @@ class PortfolioApp(tk.Tk):
 
     def _update_key_drivers_view(self):
         """
-        REWRITTEN: Creates a visually striking and interactive 'Portfolio DNA' Radar Chart.
+        REWRITTEN: Creates the 'Portfolio DNA' Radar Chart for the Analysis tab
+        using its own dedicated state variables to prevent conflicts with the dashboard.
         """
-        if not hasattr(self, 'fig_factors') or not self.fig_factors:
+        # Check for the dedicated 'analysis' objects
+        if not hasattr(self, 'radar_fig_analysis') or not self.radar_fig_analysis or not hasattr(self, 'radar_canvas_analysis'):
             return
 
-        self.radar_fig = self.fig_factors
-        self.radar_fig.clear() # Clear the whole figure for polar projection
+        self.radar_fig_analysis.clear()
 
         analytics = self.analysis_data.get('analytics', {})
         fundamentals = analytics.get('fundamentals', {})
@@ -767,14 +811,15 @@ class PortfolioApp(tk.Tk):
         self.drivers_kpi_beta.config(text=f"{analytics.get('beta', 0):.2f}")
 
         if not self.portfolio["positions"] or not analytics:
-            ax = self.radar_fig.add_subplot(111)
-            self._setup_matplotlib_style(self.radar_fig, ax)
+            ax = self.radar_fig_analysis.add_subplot(111)
+            self._setup_matplotlib_style(self.radar_fig_analysis, ax)
             ax.text(0.5, 0.5, "Add positions to build Portfolio DNA", ha='center', va='center', transform=ax.transAxes)
             ax.axis('off')
-            self.canvas_factors.draw()
+            # Draw on the correct canvas
+            self.radar_canvas_analysis.draw()
             return
 
-        # --- Data Prep (No Changes Here) ---
+        # --- Data Prep ---
         total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in self.portfolio["positions"])
         pos_values = {p["symbol"]: p["shares"] * self.market_data_cache.get(p["symbol"], {}).get("regularMarketPrice", 0) for p in self.portfolio["positions"]}
         top_holding_pct = max(pos_values.values()) / total_value if total_value else 0
@@ -792,29 +837,30 @@ class PortfolioApp(tk.Tk):
             'Market Risk (Beta)': analytics.get('beta', 0)
         }
         benchmark_dna_raw = {'Concentration': 0.18, 'Growth': 0.4, 'Value': 0.4, 'Quality': 0.5, 'Market Risk (Beta)': 1.0}
+        
+        # Store data in dedicated 'analysis' variables
         labels = list(portfolio_dna_raw.keys())
-        self.radar_data = {'labels': labels, 'portfolio': portfolio_dna_raw, 'benchmark': benchmark_dna_raw}
+        self.radar_data_analysis = {'labels': labels, 'portfolio': portfolio_dna_raw, 'benchmark': benchmark_dna_raw}
         def normalize(raw_val, min_val, max_val):
             return np.clip((raw_val - min_val) / (max_val - min_val), 0, 1)
         portfolio_dna_norm = [normalize(v, 0.5 if k == 'Market Risk (Beta)' else 0, 2.0 if k == 'Market Risk (Beta)' else 1) for k, v in portfolio_dna_raw.items()]
         benchmark_dna_norm = [normalize(v, 0.5 if k == 'Market Risk (Beta)' else 0, 2.0 if k == 'Market Risk (Beta)' else 1) for k, v in benchmark_dna_raw.items()]
         num_vars = len(labels)
         angles = np.linspace(0, 2 * np.pi, num_vars, endpoint=False).tolist()
-        self.radar_plot_data = {'angles': angles, 'portfolio': portfolio_dna_norm, 'benchmark': benchmark_dna_norm}
+        self.radar_plot_data_analysis = {'angles': angles, 'portfolio': portfolio_dna_norm, 'benchmark': benchmark_dna_norm}
         portfolio_dna_norm_closed = portfolio_dna_norm + portfolio_dna_norm[:1]
         benchmark_dna_norm_closed = benchmark_dna_norm + benchmark_dna_norm[:1]
         angles_closed = angles + angles[:1]
 
         # --- Plotting & Theming ---
-        ax = self.radar_fig.add_subplot(111, polar=True)
-        self._setup_matplotlib_style(self.radar_fig, ax) # Apply theme AFTER creating polar axes
+        ax = self.radar_fig_analysis.add_subplot(111, polar=True)
+        self._setup_matplotlib_style(self.radar_fig_analysis, ax)
 
         ax.fill(angles_closed, portfolio_dna_norm_closed, color=self.ACCENT_COLOR, alpha=0.4)
         ax.plot(angles_closed, portfolio_dna_norm_closed, color=self.ACCENT_COLOR, linewidth=2, label='Your Portfolio')
         ax.plot(angles_closed, benchmark_dna_norm_closed, color=self.POSITIVE_COLOR, linewidth=2, linestyle='--', label='S&P 500 (Benchmark)')
 
         ax.set_rlabel_position(0)
-        # THEME FIX: Set the color of the labels on the spokes
         ax.set_thetagrids(np.degrees(angles), labels, color=self.SECONDARY_TEXT)
         ax.set_yticklabels([])
         ax.grid(color=self.BORDER_COLOR, linestyle='--', linewidth=0.5)
@@ -823,20 +869,21 @@ class PortfolioApp(tk.Tk):
         for text in legend.get_texts():
             text.set_color(self.TEXT_COLOR)
 
-        self.radar_fig.suptitle("Portfolio DNA vs. Benchmark", fontsize=16, y=0.98, color=self.TEXT_COLOR, fontweight='bold')
+        self.radar_fig_analysis.suptitle("Portfolio DNA vs. Benchmark", fontsize=16, y=0.98, color=self.TEXT_COLOR, fontweight='bold')
         ax.set_title("Hover over a point to see detailed values.", fontsize=9, color=self.SECONDARY_TEXT, pad=20)
 
-        self.canvas_factors.draw()
+        # Draw the dedicated 'analysis' canvas
+        self.radar_canvas_analysis.draw()
 
+    
     def _on_radar_hover(self, event):
         """
-        REWRITTEN: Handles hover events with a robust, distance-based detection system.
-        The hover now only triggers if the cursor is within a specific pixel radius
-        of an actual data point on the chart, making it feel accurate and foolproof.
+        Handles hover events for the ANALYSIS chart with a robust,
+        distance-based detection system using isolated state variables.
         """
-        # --- Initial Safety Checks ---
-        if not self.radar_fig or not event.inaxes or not self.radar_plot_data:
-            self._on_radar_leave(event) # Hide annotation if we leave the axes
+        # Use dedicated 'analysis' variables throughout
+        if not self.radar_fig_analysis or not event.inaxes or not self.radar_plot_data_analysis:
+            self._on_radar_leave(event)
             return
 
         ax = event.inaxes
@@ -844,37 +891,21 @@ class PortfolioApp(tk.Tk):
             self._on_radar_leave(event)
             return
 
-        # --- 1. Define Hover Activation Radius (in pixels) ---
-        # This is the "area around the tip" that activates the hover.
         hover_radius = 20
-
-        # --- 2. Get Mouse Position in Pixels ---
         mouse_pos_pixels = (event.x, event.y)
-
-        # --- 3. Find The Closest Data Point to the Mouse ---
         min_dist = float('inf')
         closest_point_info = None
 
-        # Get the normalized data we stored when plotting
-        plot_data = self.radar_plot_data
+        plot_data = self.radar_plot_data_analysis
         angles = plot_data['angles']
         portfolio_points = plot_data['portfolio']
         benchmark_points = plot_data['benchmark']
 
-        # Loop through each axis (spoke) of the radar chart
         for i in range(len(angles)):
-            # For each axis, check both the portfolio and benchmark points
             for series_type, data_points in [('portfolio', portfolio_points), ('benchmark', benchmark_points)]:
-                # Get the point's data coordinates (angle, radius)
                 point_data_coords = (angles[i], data_points[i])
-                
-                # Convert data coordinates to display (pixel) coordinates
                 point_pixel_coords = ax.transData.transform([point_data_coords])[0]
-                
-                # Calculate the pixel distance from the mouse to this data point
                 dist = np.sqrt((mouse_pos_pixels[0] - point_pixel_coords[0])**2 + (mouse_pos_pixels[1] - point_pixel_coords[1])**2)
-                
-                # If this is the closest point we've found so far, store its info
                 if dist < min_dist:
                     min_dist = dist
                     closest_point_info = {
@@ -882,52 +913,50 @@ class PortfolioApp(tk.Tk):
                         'series_type': series_type,
                         'data_coords': point_data_coords
                     }
-        
-        # --- 4. Activate or Deactivate Annotation ---
-        # If the closest point is within our hover radius, show the annotation.
+
         if closest_point_info and min_dist < hover_radius:
             idx = closest_point_info['axis_idx']
-            
-            # Get the raw (un-normalized) data for the annotation text
-            label = self.radar_data['labels'][idx]
-            portfolio_val = self.radar_data['portfolio'][label]
-            benchmark_val = self.radar_data['benchmark'][label]
-            
-            # Format the display text (same as before)
+
+            # Get raw data from the 'analysis' dictionary
+            label = self.radar_data_analysis['labels'][idx]
+            portfolio_val = self.radar_data_analysis['portfolio'][label]
+            benchmark_val = self.radar_data_analysis['benchmark'][label]
+
             if label == 'Market Risk (Beta)':
                 text = f"{label}\nPortfolio: {portfolio_val:.2f}\nBenchmark: {benchmark_val:.2f}"
             else:
                 text = f"{label}\nPortfolio: {portfolio_val:.1%}\nBenchmark: {benchmark_val:.1%}"
-            
-            # Create annotation if it doesn't exist
-            if not self.radar_annot:
-                self.radar_annot = ax.annotate("", xy=(0,0), xytext=(15, 15),
-                                               textcoords='offset points', # Use pixel offset
+
+            # Use the dedicated 'analysis' annotation object
+            if not self.radar_annot_analysis:
+                self.radar_annot_analysis = ax.annotate("", xy=(0,0), xytext=(15, 15),
+                                               textcoords='offset points',
                                                bbox=dict(boxstyle="round,pad=0.4", fc=self.CARD_COLOR, ec=self.BORDER_COLOR, lw=1),
                                                arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.1", color=self.ACCENT_COLOR),
                                                ha='left', va='bottom',
                                                color=self.TEXT_COLOR,
                                                fontweight='bold')
-            
-            # Update annotation with new text and position
-            self.radar_annot.set_text(text)
-            # THIS IS KEY: The arrow now points to the *exact data point* you hovered over
-            self.radar_annot.xy = closest_point_info['data_coords']
-            self.radar_annot.set_visible(True)
-            
-        # Otherwise, if we're not close enough to any point, hide the annotation.
+
+            self.radar_annot_analysis.set_text(text)
+            self.radar_annot_analysis.xy = closest_point_info['data_coords']
+            self.radar_annot_analysis.set_visible(True)
+
         else:
-            if self.radar_annot:
-                self.radar_annot.set_visible(False)
-        
-        # Redraw the canvas to show/hide the changes
-        self.canvas_factors.draw_idle()
+            if self.radar_annot_analysis:
+                self.radar_annot_analysis.set_visible(False)
+
+        # Draw the dedicated 'analysis' canvas
+        if hasattr(self, 'radar_canvas_analysis'):
+            self.radar_canvas_analysis.draw_idle()
 
     def _on_radar_leave(self, event):
-        """Hides the annotation when the mouse leaves the chart."""
-        if self.radar_annot:
-            self.radar_annot.set_visible(False)
-            self.canvas_factors.draw_idle()
+        """Hides the ANALYSIS annotation when the mouse leaves the chart."""
+        # Use the dedicated 'analysis' annotation object
+        if self.radar_annot_analysis:
+            self.radar_annot_analysis.set_visible(False)
+            if hasattr(self, 'radar_canvas_analysis'):
+                self.radar_canvas_analysis.draw_idle()
+
 
     def _on_radar_hover_dash(self, event):
         """Handles hover events specifically for the DASHBOARD radar chart."""
@@ -987,6 +1016,7 @@ class PortfolioApp(tk.Tk):
         if self.radar_annot_dash:
             self.radar_annot_dash.set_visible(False)
             self.radar_canvas_dash.draw_idle()
+
 
     
     def _update_stress_test_view(self, event=None):
@@ -2098,8 +2128,8 @@ class PortfolioApp(tk.Tk):
         """
         self.active_analysis_goal = goal
         goal_id = goal['name'] + goal['target_date']
-        self.analysis_data = self.goal_simulation_results.get(goal_id)
-        if not self.analysis_data or 'data_cube' not in self.analysis_data:
+        self.goal_analysis_data = self.goal_simulation_results.get(goal_id)
+        if not self.goal_analysis_data or 'data_cube' not in self.goal_analysis_data:
             messagebox.showerror("Analysis Error", "Simulation data is missing or corrupt. Please run the simulation again.", parent=self)
             return
 
@@ -2150,10 +2180,12 @@ class PortfolioApp(tk.Tk):
         left_controls.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         left_controls.columnconfigure(0, weight=1)
         
-        c_range = self.analysis_data['contrib_range']
+        # --- THIS IS THE FIX ---
+        # The next 3 lines now correctly read from `self.goal_analysis_data`
+        c_range = self.goal_analysis_data['contrib_range']
         self.contrib_slider = self._create_slider(left_controls, "Monthly Contribution", c_range[0], c_range[-1], goal['monthly_contribution'], 0)
-        h_range = self.analysis_data['horizon_range']
-        self.horizon_slider = self._create_slider(left_controls, "Time Horizon (Years)", h_range[0]/12, h_range[-1]/12, self.analysis_data['base_months']/12, 1)
+        h_range = self.goal_analysis_data['horizon_range']
+        self.horizon_slider = self._create_slider(left_controls, "Time Horizon (Years)", h_range[0]/12, h_range[-1]/12, self.goal_analysis_data['base_months']/12, 1)
 
         # Right controls (metrics and actions)
         right_controls = ttk.Frame(controls_card, style="Card.TFrame")
@@ -2182,14 +2214,14 @@ class PortfolioApp(tk.Tk):
         
         # --- 6. Trigger the first draw ---
         self.update()
-        self._on_what_if_update()
+        self._on_what_if_update()  
 
     def _on_what_if_update(self, *args):
         """
         REVISED: The single, robust handler for updating all 'What-If' analysis.
         It calculates data, then calls the stateless plotting functions, and finally draws.
         """
-        if not all([self.active_analysis_goal, self.analysis_data, hasattr(self, 'contrib_slider')]):
+        if not all([self.active_analysis_goal, self.goal_analysis_data, hasattr(self, 'contrib_slider')]):
             return
 
         try:
@@ -2201,9 +2233,9 @@ class PortfolioApp(tk.Tk):
             lump_sum = float(self.lump_sum_var.get() or "0")
 
             # --- 2. Find the closest pre-calculated data ---
-            closest_contrib = min(self.analysis_data['contrib_range'], key=lambda x: abs(x - contrib_val))
-            closest_horizon = min(self.analysis_data['horizon_range'], key=lambda x: abs(x - horizon_months))
-            final_values = np.array(self.analysis_data['data_cube'][(closest_contrib, closest_horizon)]) + lump_sum
+            closest_contrib = min(self.goal_analysis_data['contrib_range'], key=lambda x: abs(x - contrib_val))
+            closest_horizon = min(self.goal_analysis_data['horizon_range'], key=lambda x: abs(x - horizon_months))
+            final_values = np.array(self.goal_analysis_data['data_cube'][(closest_contrib, closest_horizon)]) + lump_sum
 
             # --- 3. Update text-based metrics ---
             success_rate = (np.sum(final_values >= goal["target_amount"]) / len(final_values)) * 100
