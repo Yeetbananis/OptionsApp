@@ -9,10 +9,9 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.dates as mdates
 from tkinter import TclError
-from io import BytesIO
+import matplotlib.ticker as mticker
 from PIL import Image, ImageTk
-import squarify
-
+from io import BytesIO
 
 
 class MockFinancialDataAPI:
@@ -52,6 +51,38 @@ class MockFinancialDataAPI:
             "dividendYield": 0.015 # Realistic yield for S&P 500
         }
 
+class DataManager:
+    """Handles fetching and caching historical data."""
+    def __init__(self, api):
+        self.api = api
+        self.history_cache = {}
+
+    def get_portfolio_history(self, portfolio, start_date, end_date):
+        # This is a mock implementation. In a real app, this would
+        # fetch historical price data for each stock and calculate daily portfolio values.
+        # For now, we'll generate a simple random walk.
+        if start_date is None:
+            days = 365 * 5
+            start_date = datetime.now() - timedelta(days=days)
+        else:
+            days = (end_date - start_date).days
+
+        dates = pd.date_range(start=start_date, end=end_date)
+        
+        total_value = sum(pos["shares"] * self.api.get_stock_details(pos["symbol"])['regularMarketPrice'] for pos in portfolio['positions'])
+        if total_value == 0:
+            return pd.DataFrame(columns=['value'])
+            
+        # Simulate a random walk for the portfolio value
+        returns = np.random.normal(loc=0.0005, scale=0.015, size=len(dates))
+        price_path = np.cumprod(1 + returns)
+        
+        # Start the path from a value that ends near the current total_value
+        initial_value = total_value / price_path[-1]
+        
+        history_df = pd.DataFrame(initial_value * price_path, index=dates, columns=['value'])
+        return history_df
+    
 import multiprocessing
 
 # --- Main Portfolio Application ---
@@ -63,6 +94,7 @@ class PortfolioApp(tk.Tk):
     def __init__(self, theme_name='dark'):
         super().__init__()
         self.api = MockFinancialDataAPI()
+        self.data_manager = DataManager(self.api)
         # self.is_first_analysis_draw = True # REMOVED: This flag is no longer needed.
 
         # --- DYNAMIC THEME DEFINITION ---
@@ -100,6 +132,7 @@ class PortfolioApp(tk.Tk):
 
         # --- Data Storage ---
         self.portfolio = {"positions": [], "goals": []}
+        self.tax_sim_entries = {}
         self.market_data_cache = {}
         self.analysis_data = {} 
         self.logo_cache = {} 
@@ -131,7 +164,9 @@ class PortfolioApp(tk.Tk):
         self.update_job_id = None
         self.goal_analysis_data = {}
 
-
+        self.chart_hover_line = None
+        self.chart_hover_text = None
+        self.warning_icon = None
 
         self.fig_dash, self.ax_dash = plt.subplots()
         self.fig_pie, self.ax_pie = plt.subplots()
@@ -146,12 +181,14 @@ class PortfolioApp(tk.Tk):
         self.fig_dist, self.ax_dist = plt.subplots()
         self.radar_fig_dash, self.radar_ax_dash = plt.subplots() # For the dashboard radar
 
+
         # --- Build UI ---
         self._build_styles()
         self._build_main_layout()
         self.show_view("dashboard")
 
         self.load_portfolio_data()
+        self._load_warning_icon()
         self.start_periodic_updates()
 
     
@@ -217,12 +254,7 @@ class PortfolioApp(tk.Tk):
         style.configure("Accent.TButton", background=self.ACCENT_COLOR, foreground="#ffffff")
         style.map("Accent.TButton", background=[('active', '#0088cc')])
 
-        # --- Sidebar Buttons ---
-        style.configure("Sidebar.TButton", background=self.SIDEBAR_COLOR, foreground=self.SECONDARY_TEXT, font=self.FONT_SIDEBAR, padding=(15, 8), relief="flat")
-        style.map("Sidebar.TButton", background=[('active', self.BG_COLOR)], foreground=[('active', self.TEXT_COLOR)])
-        style.configure("AccentIndicator.TFrame", background=self.ACCENT_COLOR)
-
-        # --- Timeframe Buttons ---
+        # --- Timeframe Buttons (New) ---
         style.configure("Timeframe.TButton", font=self.FONT_NORMAL, padding=(8, 4), background=self.CARD_COLOR, foreground=self.SECONDARY_TEXT, relief="flat")
         style.map("Timeframe.TButton", background=[('active', '#333333')])
         style.configure("ActiveTimeframe.TButton", font=self.FONT_BOLD, padding=(8, 4), background=self.BG_COLOR, foreground=self.TEXT_COLOR, relief="flat")
@@ -232,7 +264,7 @@ class PortfolioApp(tk.Tk):
         style.configure("Treeview.Heading", background=self.BORDER_COLOR, foreground=self.TEXT_COLOR, font=self.FONT_BOLD, padding=6)
         style.map("Treeview", background=[('selected', '#333333')])
         style.layout("Treeview", [('Treeview.treearea', {'sticky': 'nswe'})])
-        
+
     def _build_main_layout(self):
         """Construct the main layout with sidebar and content area."""
         self.grid_columnconfigure(1, weight=1)
@@ -268,6 +300,69 @@ class PortfolioApp(tk.Tk):
         self.content_frame.grid(row=0, column=1, sticky="nsew")
         self.content_frame.columnconfigure(0, weight=1)
         self.content_frame.rowconfigure(0, weight=1)
+
+    def _build_hero_snapshot_card(self, parent):
+        """Builds the new primary KPI 'hero' card for the dashboard."""
+        card = ttk.Frame(parent, style="Card.TFrame", padding=(25, 20))
+        card.grid(row=0, column=0, sticky="nsew")
+        card.columnconfigure(0, weight=1)
+
+        # Main Portfolio Value
+        ttk.Label(card, text="Total Portfolio Value", style="Secondary.TLabel", background=self.CARD_COLOR).pack(anchor="w")
+        self.hero_total_value = ttk.Label(card, text="$0.00", font=("Calibri", 36, "bold"), background=self.CARD_COLOR, foreground=self.TEXT_COLOR)
+        self.hero_total_value.pack(anchor="w", pady=(0, 2))
+
+        # Daily Change
+        self.hero_day_change = ttk.Label(card, text="+$0.00 (+0.00%)", font=("Calibri", 14), background=self.CARD_COLOR)
+        self.hero_day_change.pack(anchor="w")
+
+        return card
+
+    def _update_dashboard_kpis(self):
+        """Updates the new hero snapshot KPI values."""
+        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", pos["entry_price"]) for pos in self.portfolio["positions"])
+        
+        # Calculate daily change more robustly
+        previous_day_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("previousClose", pos["entry_price"]) for pos in self.portfolio["positions"])
+        day_change_usd = total_value - previous_day_value
+        day_change_pct = (day_change_usd / previous_day_value * 100) if previous_day_value > 0 else 0
+        
+        # Update hero labels
+        self.hero_total_value.config(text=f"${total_value:,.2f}")
+        self.hero_day_change.config(
+            text=f"${day_change_usd:+,.2f} ({day_change_pct:+.2f}%) Today",
+            foreground=self.POSITIVE_COLOR if day_change_usd >= 0 else self.NEGATIVE_COLOR
+        )
+
+    def _create_timeframe_selector(self, parent):
+        """Creates the timeframe button group for the history chart."""
+        frame = ttk.Frame(parent, style="Card.TFrame")
+        self.timeframe_buttons = {}
+        timeframes = ["1M", "6M", "1Y", "5Y", "ALL"]
+
+        for i, tf in enumerate(timeframes):
+            btn = ttk.Button(
+                frame,
+                text=tf,
+                style="ActiveTimeframe.TButton" if tf == self.active_timeframe else "Timeframe.TButton",
+                command=lambda t=tf: self._set_timeframe(t)
+            )
+            btn.grid(row=0, column=i, padx=(2, 0))
+            self.timeframe_buttons[tf] = btn
+            
+        return frame
+
+    def _set_timeframe(self, timeframe):
+        """Callback to set the active timeframe and replot the chart."""
+        self.active_timeframe = timeframe
+        
+        # Update button styles
+        for tf, btn in self.timeframe_buttons.items():
+            style = "ActiveTimeframe.TButton" if tf == timeframe else "Timeframe.TButton"
+            btn.configure(style=style)
+            
+        # Re-plot the history chart with the new timeframe
+        self._plot_history_area_chart(timeframe)
 
     def show_view(self, view_key):
         """
@@ -339,71 +434,50 @@ class PortfolioApp(tk.Tk):
     def _build_dashboard_view(self, parent):
         """Builds the professional 'Command Center' dashboard view."""
         view = ttk.Frame(parent)
-        # --- ASYMMETRICAL LAYOUT: Main content is wider than the sidebar ---
-        view.columnconfigure(0, weight=7)  # 70% width for the main content
-        view.columnconfigure(1, weight=3)  # 30% width for the right sidebar
+        view.columnconfigure(0, weight=7)
+        view.columnconfigure(1, weight=3)
         view.rowconfigure(1, weight=1)
 
-        # --- Header ---
         header = ttk.Frame(view)
         header.grid(row=0, column=0, columnspan=2, pady=(0, 25), sticky="ew")
         ttk.Label(header, text="Dashboard Overview", style="Title.TLabel").pack(side="left")
         ttk.Button(header, text="+ Add Position", style="Accent.TButton", command=self._open_add_position_dialog).pack(side="right")
 
-        # --- PRIMARY COLUMN (LEFT) ---
         primary_col = ttk.Frame(view)
         primary_col.grid(row=1, column=0, sticky="nsew", padx=(0, 20))
-        primary_col.rowconfigure(1, weight=5) # History chart gets most height
-        primary_col.rowconfigure(2, weight=4) # Positions table gets less
+        primary_col.rowconfigure(1, weight=5)
+        primary_col.rowconfigure(2, weight=4)
         primary_col.columnconfigure(0, weight=1)
 
-        # 1. Hero Snapshot Card
         self._build_hero_snapshot_card(primary_col)
 
-        # 2. Performance History Chart
+        # Performance Chart Card
         chart_card = ttk.Frame(primary_col, style="Card.TFrame", padding=20)
         chart_card.grid(row=1, column=0, sticky="nsew", pady=20)
         chart_card.rowconfigure(1, weight=1)
         chart_card.columnconfigure(0, weight=1)
-        
         chart_header = ttk.Frame(chart_card, style="Card.TFrame")
         chart_header.grid(row=0, column=0, sticky="ew", pady=(0, 15))
         ttk.Label(chart_header, text="Performance History", style="Header.TLabel", background=self.CARD_COLOR).pack(side="left")
         self.timeframe_selector = self._create_timeframe_selector(chart_header)
         self.timeframe_selector.pack(side="right")
-
         self.canvas_dash = FigureCanvasTkAgg(self.fig_dash, chart_card)
         self.canvas_dash.get_tk_widget().grid(row=1, column=0, sticky="nsew")
         self._setup_chart_hover()
 
-        # 3. Positions Table Card
-        pos_card = ttk.Frame(primary_col, style="Card.TFrame", padding=20)
-        pos_card.grid(row=2, column=0, sticky="nsew")
-        pos_card.rowconfigure(1, weight=1)
-        pos_card.columnconfigure(0, weight=1)
-        
-        ttk.Label(pos_card, text="Current Positions", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 15))
-        self.tree = ttk.Treeview(pos_card, columns=("symbol", "shares", "price", "value", "day_pct"), show="headings")
-        self.tree.grid(row=1, column=0, sticky="nsew")
-        self.tree.heading("symbol", text="Symbol"); self.tree.column("symbol", anchor="w", width=80)
-        self.tree.heading("shares", text="Shares"); self.tree.column("shares", anchor="e", width=70)
-        self.tree.heading("price", text="Price"); self.tree.column("price", anchor="e", width=80)
-        self.tree.heading("value", text="Value"); self.tree.column("value", anchor="e", width=90)
-        self.tree.heading("day_pct", text="Day %"); self.tree.column("day_pct", anchor="e", width=60)
-        self.tree.tag_configure("odd", background="#2a2a2a")
-        self.position_context_menu = tk.Menu(self.tree, tearoff=0, background=self.CARD_COLOR, foreground=self.TEXT_COLOR)
-        self.position_context_menu.add_command(label="Edit Position", command=self._edit_position)
-        self.position_context_menu.add_command(label="Remove Position", command=self._remove_position)
-        self.tree.bind("<Button-3>", self._on_position_right_click)
+        # --- THIS IS THE FIX ---
+        # Call the dedicated builder for our new custom positions card.
+        # This was the missing link causing the table to be empty.
+        self._build_positions_card(primary_col)
+        # --- END OF FIX ---
 
-         # --- SECONDARY COLUMN (RIGHT) ---
         secondary_col = ttk.Frame(view)
         secondary_col.grid(row=1, column=1, sticky="nsew")
         secondary_col.rowconfigure(0, weight=1)
         secondary_col.rowconfigure(1, weight=1)
         secondary_col.columnconfigure(0, weight=1)
-        
-        # 1. Allocation Chart Card (this part is unchanged)
+
+        # Allocation Chart Card
         pie_card = ttk.Frame(secondary_col, style="Card.TFrame", padding=20)
         pie_card.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         pie_card.rowconfigure(1, weight=1)
@@ -411,26 +485,22 @@ class PortfolioApp(tk.Tk):
         ttk.Label(pie_card, text="Sector Allocation", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 15))
         self.canvas_pie = FigureCanvasTkAgg(self.fig_pie, pie_card)
         self.canvas_pie.get_tk_widget().grid(row=1, column=0, sticky="nsew")
-        
-        # --- REVISED: 2. Key Drivers Card ---
+
+        # Portfolio DNA Card
         drivers_card = ttk.Frame(secondary_col, style="Card.TFrame", padding=20)
         drivers_card.grid(row=1, column=0, sticky="nsew", pady=10)
         drivers_card.rowconfigure(1, weight=1)
         drivers_card.columnconfigure(0, weight=1)
-        
         ttk.Label(drivers_card, text="Portfolio DNA", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 10))
-        
         self.radar_canvas_dash = FigureCanvasTkAgg(self.radar_fig_dash, drivers_card)
         self.radar_canvas_dash.get_tk_widget().grid(row=1, column=0, sticky="nsew")
-        
         self.radar_canvas_dash.mpl_connect('motion_notify_event', self._on_radar_hover_dash)
         self.radar_canvas_dash.mpl_connect('axes_leave_event', self._on_radar_leave_dash)
-        
+
         self._update_dashboard_drivers_card()
 
-            
         return view
-    
+        
 
     def _initial_dashboard_draw(self, event):
         """
@@ -1199,10 +1269,19 @@ class PortfolioApp(tk.Tk):
         positions = self.portfolio["positions"]
         if not positions: return analytics
 
-        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in positions)
+        total_value = sum(lot["shares"] * self.market_data_cache.get(lot["symbol"], {}).get("regularMarketPrice", 0) for lot in positions)
         if total_value == 0: return analytics
 
-        weights = {pos["symbol"]: (pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0)) / total_value for pos in positions}
+        # --- THIS IS THE FIX: Aggregate position values by symbol before calculating weights ---
+        symbol_values = {}
+        for lot in positions:
+            symbol = lot['symbol']
+            value = lot["shares"] * self.market_data_cache.get(symbol, {}).get("regularMarketPrice", 0)
+            symbol_values[symbol] = symbol_values.get(symbol, 0) + value
+        
+        weights = {symbol: value / total_value for symbol, value in symbol_values.items()}
+        # --- END OF FIX ---
+
         portfolio_symbols = list(weights.keys())
         portfolio_returns = (returns_df[portfolio_symbols] * pd.Series(weights)).sum(axis=1)
 
@@ -1215,32 +1294,28 @@ class PortfolioApp(tk.Tk):
         excess_returns = portfolio_returns.mean() * 252 - risk_free_rate
         analytics['sharpe_ratio'] = excess_returns / analytics['volatility'] if analytics['volatility'] != 0 else 0
         
-        # --- Value at Risk (VaR) at 95% confidence for 1 day ---
-        # VaR = Portfolio Value * (Portfolio Volatility / sqrt(252)) * Z-score
-        # Z-score for 95% confidence is 1.645
         daily_volatility = portfolio_returns.std()
         analytics['var_95'] = total_value * daily_volatility * 1.645
 
         # --- Diversification Score ---
-        # Score = (1 - Average Correlation) * 100. Higher is better.
         corr_matrix = returns_df[portfolio_symbols].corr()
         if len(portfolio_symbols) > 1:
-            avg_corr = corr_matrix.unstack().drop_duplicates().mean()
+            # Correctly calculate average correlation by excluding self-correlation
+            corr_unstacked = corr_matrix.unstack()
+            corr_filtered = corr_unstacked[corr_unstacked.index.get_level_values(0) != corr_unstacked.index.get_level_values(1)]
+            avg_corr = corr_filtered.mean()
             analytics['diversification_score'] = (1 - avg_corr) * 100
         else:
-            analytics['diversification_score'] = 0 # Not applicable for 1 stock
+            analytics['diversification_score'] = 0
 
         # --- Fundamental Metrics ---
-        # Portfolio fundamentals
         analytics['fundamentals']['pe_ratio'] = sum(self.market_data_cache.get(s, {}).get("trailingPE", 0) * w for s, w in weights.items())
         analytics['fundamentals']['dividend_yield'] = sum(self.market_data_cache.get(s, {}).get("dividendYield", 0) * w for s, w in weights.items())
         
-        # Benchmark fundamentals
         benchmark_data = self.api.get_benchmark_details()
         analytics['fundamentals']['benchmark_pe'] = benchmark_data.get('trailingPE')
         analytics['fundamentals']['benchmark_yield'] = benchmark_data.get('dividendYield')
 
-        # Factor Exposures
         weighted_factors = {"Value": 0, "Growth": 0, "Quality": 0}
         for s, w in weights.items():
             factors = self.market_data_cache.get(s, {}).get("factor_exposures", {})
@@ -1249,6 +1324,39 @@ class PortfolioApp(tk.Tk):
         analytics['fundamentals']['factor_exposures'] = weighted_factors
         
         return analytics
+    
+    def _calculate_dashboard_data(self):
+        """
+        Calculates data specifically needed for the dashboard UI, 
+        like sector allocations.
+        """
+        self.sector_details = {}
+        if not self.portfolio["positions"]:
+            return
+
+        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in self.portfolio["positions"])
+        if total_value == 0:
+            return
+
+        # Use a predefined, professional color palette for sectors
+        colors = ["#00aaff", "#00cc66", "#ffcc00", "#ff6666", "#9966ff", "#ff9933", "#33cccc", "#cc6699"]
+        color_idx = 0
+
+        for pos in self.portfolio["positions"]:
+            market_info = self.market_data_cache.get(pos["symbol"], {})
+            sector = market_info.get("sector", "Other")
+            value = pos["shares"] * market_info.get("regularMarketPrice", 0)
+            
+            if sector not in self.sector_details:
+                self.sector_details[sector] = {'value': 0, 'color': colors[color_idx % len(colors)]}
+                color_idx += 1
+            
+            self.sector_details[sector]['value'] += value
+
+        for sector in self.sector_details:
+            self.sector_details[sector]['percentage'] = self.sector_details[sector]['value'] / total_value
+        
+    
 
     def _update_risk_volatility_view(self):
         """Populates the Risk & Volatility tab with calculated data, including VaR."""
@@ -1299,23 +1407,23 @@ class PortfolioApp(tk.Tk):
 
         returns = self.analysis_data.get('returns')
         
-        # Clear figure and re-apply styles
         self.fig_corr.clear()
         self.ax_corr = self.fig_corr.add_subplot(111)
         self._setup_matplotlib_style(self.fig_corr, self.ax_corr)
 
-        if returns is None or len(self.portfolio['positions']) < 2:
+        # --- THIS IS THE FIX: Ensure the list of symbols is unique ---
+        portfolio_symbols = sorted(list(set(pos['symbol'] for pos in self.portfolio['positions'])))
+        # --- END OF FIX ---
+
+        if returns is None or len(portfolio_symbols) < 2:
             self.ax_corr.text(0.5, 0.5, "Add at least 2 positions\nto see correlations", ha='center', va='center', color=self.TEXT_COLOR)
             self.canvas_corr.draw()
-            # ... text summary logic ...
             return
             
-        portfolio_symbols = [pos['symbol'] for pos in self.portfolio['positions']]
         corr_matrix = returns[portfolio_symbols].corr()
         
         im = self.ax_corr.imshow(corr_matrix, cmap='coolwarm', interpolation='nearest', vmin=-1, vmax=1)
         
-        # THEME FIX: Themed colorbar
         cbar = self.fig_corr.colorbar(im, ax=self.ax_corr)
         cbar.ax.yaxis.set_tick_params(color=self.SECONDARY_TEXT)
         cbar.outline.set_edgecolor(self.BORDER_COLOR)
@@ -1330,7 +1438,6 @@ class PortfolioApp(tk.Tk):
         self.fig_corr.tight_layout(pad=2.0)
         self.canvas_corr.draw()
 
-        # --- Restore Detailed Text Insights ---
         summary = self.corr_summary_text
         summary.config(state="normal")
         summary.delete("1.0", tk.END)
@@ -1345,7 +1452,7 @@ class PortfolioApp(tk.Tk):
 
         if len(portfolio_symbols) > 1:
             corr_unstacked = corr_matrix.unstack()
-            corr_unstacked = corr_unstacked[corr_unstacked != 1.0] # Remove self-correlations
+            corr_unstacked = corr_unstacked[corr_unstacked.index.get_level_values(0) != corr_unstacked.index.get_level_values(1)]
             max_corr = corr_unstacked.idxmax()
             min_corr = corr_unstacked.idxmin()
             summary.insert(tk.END, "Highest Correlation (Risk Concentrator):\n", "bold")
@@ -1354,7 +1461,6 @@ class PortfolioApp(tk.Tk):
             summary.insert(tk.END, f"{min_corr[0]} & {min_corr[1]}: {corr_unstacked[min_corr]:.2f}", "good")
         
         summary.config(state="disabled")
-
 
     def _update_attribution_view(self):
         """Calculates and plots contribution to return with correct theming."""
@@ -1417,53 +1523,56 @@ class PortfolioApp(tk.Tk):
             
         return frame
 
-    def _set_timeframe(self, timeframe):
-        """Callback to set the active timeframe and replot the chart."""
-        self.active_timeframe = timeframe
-        
-        # Update button styles
-        for tf, btn in self.timeframe_buttons.items():
-            style = "ActiveTimeframe.TButton" if tf == timeframe else "Timeframe.TButton"
-            btn.configure(style=style)
-            
-        # Re-plot the history chart with the new timeframe
-        self._plot_history(timeframe)
-
-    def _on_position_right_click(self, event):
-        """Handle right-click event on the positions treeview."""
-        item_id = self.tree.identify_row(event.y)
-        if item_id:
-            self.tree.selection_set(item_id)
-            self.position_context_menu.post(event.x_root, event.y_root)
+    def _on_position_right_click(self, event, symbol):
+        """Handle right-click event on the custom positions table."""
+        # The symbol is now passed directly, so we store it for the menu commands
+        self.active_context_symbol = symbol 
+        self.position_context_menu.post(event.x_root, event.y_root)
 
     def _remove_position(self):
-        """Remove the selected position from the portfolio."""
-        selected_item = self.tree.selection()
-        if not selected_item: return
+        """Remove the selected position and log it as a realized gain/loss."""
+        if not hasattr(self, 'active_context_symbol'): return
 
-        symbol_to_remove = self.tree.item(selected_item[0])["values"][0] 
-        
+        symbol_to_remove = self.active_context_symbol
+        pos_data = next((p for p in self.portfolio["positions"] if p["symbol"] == symbol_to_remove), None)
+        if not pos_data: return
+
         confirm = messagebox.askyesno(
-            "Confirm Removal",
-            f"Are you sure you want to remove {symbol_to_remove} from your portfolio?",
+            "Confirm Sale",
+            f"This will sell all {pos_data['shares']} shares of {symbol_to_remove} and realize the gain or loss. Are you sure?",
             parent=self
         )
 
         if confirm:
+            # Realize the gain/loss
+            current_price = self.market_data_cache.get(symbol_to_remove, {}).get("regularMarketPrice", pos_data["entry_price"])
+            gain_loss = (current_price - pos_data["entry_price"]) * pos_data["shares"]
+            
+            purchase_date = datetime.strptime(pos_data["purchase_date"], '%Y-%m-%d')
+            holding_period = (datetime.now() - purchase_date).days
+            gain_type = "Long-Term" if holding_period > 365 else "Short-Term"
+
+            self.portfolio["realized_gains"].append({
+                "symbol": symbol_to_remove,
+                "gain_loss": gain_loss,
+                "date": datetime.now().strftime('%Y-%m-%d'),
+                "type": gain_type
+            })
+
+            # Remove the position from holdings
             self.portfolio["positions"] = [
                 pos for pos in self.portfolio["positions"] if pos["symbol"] != symbol_to_remove
             ]
             if symbol_to_remove in self.logo_cache:
-                del self.logo_cache[symbol_to_remove] # Clear logo from cache
+                del self.logo_cache[symbol_to_remove]
+            
             self._update_all_views()
 
     def _edit_position(self):
         """Open a dialog to edit the selected position."""
-        selected_item = self.tree.selection()
-        if not selected_item: return
+        if not hasattr(self, 'active_context_symbol'): return
             
-        # FIX: Symbol is in the first column (index 0), not the second.
-        symbol_to_edit = self.tree.item(selected_item[0])["values"][0]
+        symbol_to_edit = self.active_context_symbol
         position_data = next((pos for pos in self.portfolio["positions"] if pos["symbol"] == symbol_to_edit), None)
         
         if position_data:
@@ -1535,54 +1644,358 @@ class PortfolioApp(tk.Tk):
 
 
     def _build_tax_view(self, parent):
-        """Build a tax view with three sections."""
+        """Builds the advanced 'Tax Center' with a smarter, conditional Treeview."""
         view = ttk.Frame(parent)
-        view.columnconfigure(0, weight=1)
+        view.columnconfigure(0, weight=3)
+        view.columnconfigure(1, weight=2)
         view.rowconfigure(1, weight=1)
 
         header = ttk.Frame(view)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 20))
         ttk.Label(header, text="Tax Center", style="Title.TLabel").pack(side="left")
+        
+        info_button = ttk.Button(header, text="[?]", command=self._show_tax_info_dialog, style="Toolbutton")
+        info_button.pack(side="left", padx=10, pady=0)
+        style = ttk.Style(self)
+        style.configure("Toolbutton", padding=5, relief="flat", background=self.BG_COLOR, font=self.FONT_BOLD, foreground=self.SECONDARY_TEXT)
+        style.map("Toolbutton", background=[('active', self.CARD_COLOR)], foreground=[('active', self.ACCENT_COLOR)])
 
-        content = ttk.Frame(view)
-        content.grid(row=1, column=0, sticky="nsew")
-        content.columnconfigure((0, 1), weight=1)
-        content.rowconfigure((0, 1), weight=1)
+        left_col = ttk.Frame(view)
+        left_col.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        left_col.rowconfigure(1, weight=1)
+        left_col.columnconfigure(0, weight=1)
+        
+        kpi_frame = ttk.Frame(left_col)
+        kpi_frame.grid(row=0, column=0, sticky="ew", pady=(0, 15))
+        kpi_frame.columnconfigure((0, 1, 2), weight=1)
+        self.tax_kpi_realized = self._create_kpi_card(kpi_frame, "Realized Gains YTD", "...", 0)
+        self.tax_kpi_harvestable = self._create_kpi_card(kpi_frame, "Total Harvestable Loss", "...", 1)
+        self.tax_kpi_efficiency = self._create_kpi_card(kpi_frame, "Tax Efficiency Score", "...", 2)
 
-        # --- Tax Loss Harvesting ---
-        tlh_frame = ttk.Frame(content, style="Card.TFrame", padding=15)
-        tlh_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10), pady=(0, 10))
-        ttk.Label(tlh_frame, text="Tax-Loss Harvesting", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w")
-        self.tlh_label = ttk.Label(tlh_frame, text="Scanning...", wraplength=400, background=self.CARD_COLOR)
-        self.tlh_label.pack(anchor="w", pady=10)
+        unrealized_card = ttk.Frame(left_col, style="Card.TFrame", padding=15)
+        unrealized_card.grid(row=1, column=0, sticky="nsew")
+        unrealized_card.rowconfigure(1, weight=1)
+        unrealized_card.columnconfigure(0, weight=1)
+        ttk.Label(unrealized_card, text="Unrealized Gains & Losses (by Lot)", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w", pady=(0, 10))
+        
+        # THIS IS THE CHANGE: The columns are redefined for the new structure.
+        self.unrealized_tree = ttk.Treeview(unrealized_card, columns=("name", "shares", "term", "cost", "value", "gain", "gain_pct"), show="headings")
+        self.unrealized_tree.pack(fill="both", expand=True)
+        self.unrealized_tree.heading("#0", text="Symbol / Lot")
+        self.unrealized_tree.heading("name", text="Name")
+        self.unrealized_tree.heading("shares", text="Shares")
+        self.unrealized_tree.heading("term", text="Term")
+        self.unrealized_tree.heading("cost", text="Cost Basis")
+        self.unrealized_tree.heading("value", text="Market Value")
+        self.unrealized_tree.heading("gain", text="Unrealized ($)")
+        self.unrealized_tree.heading("gain_pct", text="Unrealized (%)")
+        
+        self.unrealized_tree.column("#0", anchor="w", width=200)
+        self.unrealized_tree.column("name", anchor="w", width=180)
+        self.unrealized_tree.column("shares", anchor="e", width=60, stretch=False)
+        self.unrealized_tree.column("term", anchor="center", width=100, stretch=False)
+        self.unrealized_tree.column("cost", anchor="e", width=120)
+        self.unrealized_tree.column("value", anchor="e", width=120)
+        self.unrealized_tree.column("gain", anchor="e", width=120)
+        self.unrealized_tree.column("gain_pct", anchor="e", width=120)
 
-        # --- Asset Location ---
-        loc_frame = ttk.Frame(content, style="Card.TFrame", padding=15)
-        loc_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(10, 0))
-        ttk.Label(loc_frame, text="Asset Location", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w")
-        ttk.Label(loc_frame, text="Place high-tax assets in tax-advantaged accounts.", wraplength=400, style="Secondary.TLabel", background=self.CARD_COLOR).pack(anchor="w", pady=10)
+        self.unrealized_tree.tag_configure('gain', foreground=self.POSITIVE_COLOR)
+        self.unrealized_tree.tag_configure('loss', foreground=self.NEGATIVE_COLOR)
+        self.unrealized_tree.tag_configure('parent', font=self.FONT_BOLD)
 
-        # --- Tax Impact ---
-        tax_frame = ttk.Frame(content, style="Card.TFrame", padding=15)
-        tax_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(10, 0))
-        ttk.Label(tax_frame, text="Tax Impact Preview", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w")
-        controls = ttk.Frame(tax_frame, style="Card.TFrame")
-        controls.pack(fill="x", pady=10)
-        ttk.Label(controls, text="Position:", background=self.CARD_COLOR).grid(row=0, column=0, padx=5)
-        self.tax_pos_var = tk.StringVar()
-        self.tax_menu = ttk.Combobox(controls, textvariable=self.tax_pos_var, state="readonly")
-        self.tax_menu.grid(row=0, column=1, sticky="ew", padx=5)
-        ttk.Label(controls, text="Shares:", background=self.CARD_COLOR).grid(row=1, column=0, padx=5, pady=5)
-        self.tax_shares = ttk.Entry(controls)
-        self.tax_shares.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(controls, text="Calculate", style="Accent.TButton", command=self._calculate_tax_impact).grid(row=2, column=1, sticky="e", pady=5)
-        controls.columnconfigure(1, weight=1)
-        self.tax_result = ttk.Label(tax_frame, text="$0.00", style="KPI.TLabel", background=self.CARD_COLOR)
-        self.tax_result.pack(pady=10)
+        # ... (The rest of the method remains the same)
+        right_col = ttk.Frame(view)
+        right_col.grid(row=1, column=1, sticky="nsew", padx=(10, 0))
+        right_col.rowconfigure(0, weight=1)
+        right_col.rowconfigure(1, weight=1)
+        right_col.columnconfigure(0, weight=1)
+
+        self._build_tax_simulator_card(right_col)
+
+        realized_card = ttk.Frame(right_col, style="Card.TFrame", padding=15)
+        realized_card.grid(row=1, column=0, sticky="nsew", pady=(15, 0))
+        realized_card.rowconfigure(1, weight=1)
+        realized_card.columnconfigure(0, weight=1)
+        ttk.Label(realized_card, text="Realized Gains Log (YTD)", style="Header.TLabel", background=self.CARD_COLOR).pack(anchor="w", pady=(0, 10))
+
+        self.realized_tree = ttk.Treeview(realized_card, columns=("date", "symbol", "type", "gain_loss"), show="headings")
+        self.realized_tree.pack(fill="both", expand=True)
+        self.realized_tree.heading("date", text="Date")
+        self.realized_tree.heading("symbol", text="Symbol")
+        self.realized_tree.heading("type", text="Type")
+        self.realized_tree.heading("gain_loss", text="Gain/Loss ($)")
+        for col in ("date", "symbol", "type", "gain_loss"):
+            self.realized_tree.column(col, anchor="center", width=80)
+        self.realized_tree.column("gain_loss", anchor="e")
+        self.realized_tree.tag_configure('realized_gain', foreground=self.NEGATIVE_COLOR)
+        self.realized_tree.tag_configure('realized_loss', foreground=self.POSITIVE_COLOR)
 
         return view
-    
 
+    def _build_tax_simulator_card(self, parent):
+        """Builds the new interactive 'What-If' sale simulator with a professional grid layout."""
+        sim_card = ttk.Frame(parent, style="Card.TFrame", padding=15)
+        sim_card.grid(row=0, column=0, sticky="nsew")
+        sim_card.rowconfigure(2, weight=1) # Make the canvas area expand
+        sim_card.columnconfigure(0, weight=1)
+
+        # --- Header ---
+        ttk.Label(sim_card, text="\"What-If\" Sale Simulator", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 15))
+
+        # --- Tax Rate Inputs (Neat Grid Layout) ---
+        rates_frame = ttk.Frame(sim_card, style="Card.TFrame")
+        rates_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
+        rates_frame.columnconfigure(1, weight=1)
+        rates_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(rates_frame, text="Short-Term Rate (%):", style="Secondary.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
+        self.st_rate_var = tk.StringVar(value="24")
+        ttk.Entry(rates_frame, textvariable=self.st_rate_var, width=8).grid(row=0, column=1, sticky="w", padx=10)
+
+        ttk.Label(rates_frame, text="Long-Term Rate (%):", style="Secondary.TLabel", background=self.CARD_COLOR).grid(row=0, column=2, sticky="w", padx=(20, 0))
+        self.lt_rate_var = tk.StringVar(value="15")
+        ttk.Entry(rates_frame, textvariable=self.lt_rate_var, width=8).grid(row=0, column=3, sticky="w", padx=10)
+
+        # --- Scrollable Frame for Position Inputs ---
+        canvas_frame = ttk.Frame(sim_card) # No style needed, it's just a container
+        canvas_frame.grid(row=2, column=0, sticky="nsew")
+        canvas_frame.rowconfigure(0, weight=1)
+        canvas_frame.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(canvas_frame, bg=self.CARD_COLOR, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        self.tax_sim_container = ttk.Frame(canvas, style="Card.TFrame")
+        
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        canvas.create_window((0, 0), window=self.tax_sim_container, anchor="nw")
+        self.tax_sim_container.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<MouseWheel>", lambda e, c=canvas: self._on_mousewheel(e, c))
+
+        # --- Results and Calculation Button ---
+        sim_footer = ttk.Frame(sim_card, style="Card.TFrame")
+        sim_footer.grid(row=3, column=0, sticky="ew", pady=(15, 0))
+        sim_footer.columnconfigure(0, weight=1)
+        
+        self.tax_sim_result_lbl = self._create_metric_display(sim_footer, "Total Estimated Tax Impact", "$0.00", 0, 0)
+        
+        calc_btn = ttk.Button(sim_footer, text="Calculate Impact", style="Accent.TButton", command=self._run_tax_simulation)
+        calc_btn.grid(row=0, column=1, sticky="e", rowspan=2, padx=(10,0))
+        
+    def _update_tax_view(self):
+        """The master update function for the Tax Center."""
+        if not self.winfo_exists(): return
+        
+        # Populate the main table of all positions
+        self._populate_unrealized_gains_table()
+        
+        # Populate the KPIs at the top
+        self._populate_tax_kpis()
+        
+        # Populate the simulator with an entry for each position
+        self._populate_tax_simulator_inputs()
+        
+        # Populate the log of past sales
+        self._populate_realized_gains_table()
+
+    def _populate_tax_kpis(self):
+        """Calculates and displays the key tax metrics, including the new efficiency score."""
+        total_realized = sum(item['gain_loss'] for item in self.portfolio.get('realized_gains', []))
+        
+        harvestable_loss = 0
+        for lot in self.portfolio["positions"]:
+            market_info = self.market_data_cache.get(lot["symbol"], {})
+            price = market_info.get("regularMarketPrice", lot["entry_price"])
+            unrealized_gain = (price - lot["entry_price"]) * lot["shares"]
+            if unrealized_gain < 0:
+                harvestable_loss += unrealized_gain
+
+        self.tax_kpi_realized.config(text=f"${total_realized:,.2f}", foreground=self.NEGATIVE_COLOR if total_realized > 0 else self.POSITIVE_COLOR)
+        self.tax_kpi_harvestable.config(text=f"${harvestable_loss:,.2f}", foreground=self.POSITIVE_COLOR)
+        
+        # Calculate and display the new efficiency score
+        score, grade = self._calculate_tax_efficiency_score()
+        self.tax_kpi_efficiency.config(text=f"{score}/100 ({grade})")
+        if score >= 90: color = self.POSITIVE_COLOR
+        elif score >= 70: color = "#4caf50" # Lighter Green
+        elif score >= 50: color = "#ffc107" # Amber
+        else: color = self.NEGATIVE_COLOR
+        self.tax_kpi_efficiency.config(foreground=color)
+
+    def _populate_unrealized_gains_table(self):
+        """Fills the Treeview with single rows for single lots and expandable rows for multiple lots."""
+        for i in self.unrealized_tree.get_children():
+            self.unrealized_tree.delete(i)
+
+        positions_by_symbol = {}
+        for lot in self.portfolio["positions"]:
+            symbol = lot['symbol']
+            if symbol not in positions_by_symbol:
+                positions_by_symbol[symbol] = []
+            positions_by_symbol[symbol].append(lot)
+
+        for symbol in sorted(positions_by_symbol.keys()):
+            lots = positions_by_symbol[symbol]
+            market_info = self.market_data_cache.get(symbol, {})
+            name = market_info.get("shortName", "N/A")
+
+            # --- THIS IS THE NEW CONDITIONAL LOGIC ---
+            if len(lots) == 1:
+                # --- Single Lot Logic: Insert one clean row ---
+                lot = lots[0]
+                price = market_info.get("regularMarketPrice", lot["entry_price"])
+                cost_basis = lot["entry_price"] * lot["shares"]
+                market_value = price * lot["shares"]
+                unrealized_gain = market_value - cost_basis
+                unrealized_pct = (unrealized_gain / cost_basis * 100) if cost_basis != 0 else 0
+                purchase_date = datetime.strptime(lot["purchase_date"], '%Y-%m-%d')
+                holding_period = (datetime.now() - purchase_date).days
+                term = "Long-Term" if holding_period > 365 else "Short-Term"
+                tag = 'gain' if unrealized_gain >= 0 else 'loss'
+
+                # Insert a single, non-expandable row with all data
+                self.unrealized_tree.insert("", "end", text=symbol, values=(
+                    name,
+                    f"{lot['shares']}",
+                    term,
+                    f"${cost_basis:,.2f}",
+                    f"${market_value:,.2f}",
+                    f"{unrealized_gain:,.2f}",
+                    f"{unrealized_pct:.2f}%"
+                ), tags=(tag,))
+            else:
+                # --- Multi-Lot Logic: Insert parent with children ---
+                # The parent row only contains the symbol and name
+                parent_id = self.unrealized_tree.insert("", "end", text=symbol, values=(name, "", "", "", "", "", ""), open=True, tags=('parent',))
+
+                # Child rows contain the specific lot details
+                for lot in sorted(lots, key=lambda x: x['purchase_date']):
+                    price = market_info.get("regularMarketPrice", lot["entry_price"])
+                    cost_basis = lot["entry_price"] * lot["shares"]
+                    market_value = price * lot["shares"]
+                    unrealized_gain = market_value - cost_basis
+                    unrealized_pct = (unrealized_gain / cost_basis * 100) if cost_basis != 0 else 0
+                    purchase_date = datetime.strptime(lot["purchase_date"], '%Y-%m-%d')
+                    holding_period = (datetime.now() - purchase_date).days
+                    term = "Long-Term" if holding_period > 365 else "Short-Term"
+                    tag = 'gain' if unrealized_gain >= 0 else 'loss'
+                    
+                    # Insert child row under the parent
+                    self.unrealized_tree.insert(parent_id, "end", text=f"   Purchased: {lot['purchase_date']}", values=(
+                        "",  # Name column is blank for child rows
+                        f"{lot['shares']}",
+                        term,
+                        f"${cost_basis:,.2f}",
+                        f"${market_value:,.2f}",
+                        f"{unrealized_gain:,.2f}",
+                        f"{unrealized_pct:.2f}%"
+                    ), tags=(tag,))
+
+
+    def _populate_tax_simulator_inputs(self):
+        """Creates the dynamic input rows for each specific tax lot."""
+        for widget in self.tax_sim_container.winfo_children():
+            widget.destroy()
+        self.tax_sim_entries.clear()
+
+        header_frame = ttk.Frame(self.tax_sim_container, style="Card.TFrame")
+        header_frame.pack(fill="x", expand=True, pady=(0, 5))
+        header_frame.columnconfigure(0, weight=2)
+        header_frame.columnconfigure(1, weight=1)
+        header_frame.columnconfigure(2, weight=0) # For warning icon
+        ttk.Label(header_frame, text="Position Lot (Shares Held)", font=self.FONT_BOLD, background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
+        ttk.Label(header_frame, text="Shares to Sell", font=self.FONT_BOLD, background=self.CARD_COLOR).grid(row=0, column=1, sticky="w")
+
+        sorted_lots = sorted(self.portfolio["positions"], key=lambda lot: (lot['symbol'], lot['purchase_date']))
+
+        for lot in sorted_lots:
+            row_frame = ttk.Frame(self.tax_sim_container, style="Card.TFrame")
+            row_frame.pack(fill="x", expand=True, pady=2)
+            row_frame.columnconfigure(0, weight=2)
+            row_frame.columnconfigure(1, weight=1)
+            row_frame.columnconfigure(2, weight=0)
+
+            label_text = f"{lot['symbol']} ({lot['purchase_date']}) - {lot['shares']} shares"
+            ttk.Label(row_frame, text=label_text, background=self.CARD_COLOR).grid(row=0, column=0, sticky="w")
+            
+            entry = ttk.Entry(row_frame, width=10)
+            entry.grid(row=0, column=1, sticky="w")
+            entry.insert(0, "0")
+
+            warning_label = ttk.Label(row_frame, image=self.warning_icon, text="", compound="left", style="Warning.TLabel")
+            warning_label.grid(row=0, column=2, sticky="w", padx=5)
+            warning_label.grid_remove() # Hide it initially
+
+            self.tax_sim_entries[lot['lot_id']] = {'entry': entry, 'warning_label': warning_label}
+
+    def _run_tax_simulation(self):
+        """Calculates tax impact with lot-specificity and wash sale detection."""
+        total_tax_impact = 0
+        try:
+            st_rate = float(self.st_rate_var.get()) / 100.0
+            lt_rate = float(self.lt_rate_var.get()) / 100.0
+
+            # Get all simulated sales first
+            simulated_sales = []
+            for lot_id, widgets in self.tax_sim_entries.items():
+                shares_to_sell = float(widgets['entry'].get())
+                if shares_to_sell > 0:
+                    lot_data = next((p for p in self.portfolio["positions"] if p["lot_id"] == lot_id), None)
+                    if not lot_data or shares_to_sell > lot_data['shares']:
+                        messagebox.showwarning("Invalid Input", f"Shares to sell for lot {lot_id} exceeds holdings.", parent=self)
+                        return
+                    simulated_sales.append({'lot_id': lot_id, 'shares': shares_to_sell, 'sale_date': datetime.now()})
+
+            # Now iterate and check for wash sales
+            for sale in simulated_sales:
+                lot_data = next((p for p in self.portfolio["positions"] if p["lot_id"] == sale['lot_id']), None)
+                widgets = self.tax_sim_entries[sale['lot_id']]
+                
+                current_price = self.market_data_cache.get(lot_data['symbol'], {}).get("regularMarketPrice", lot_data["entry_price"])
+                gain_loss = (current_price - lot_data["entry_price"]) * sale['shares']
+                
+                purchase_date = datetime.strptime(lot_data["purchase_date"], '%Y-%m-%d')
+                holding_period = (datetime.now() - purchase_date).days
+                tax_rate = lt_rate if holding_period > 365 else st_rate
+                
+                is_wash_sale = False
+                if gain_loss < 0:
+                    # Check for purchases within 30 days (before or after) the simulated sale
+                    for other_lot in self.portfolio["positions"]:
+                        if other_lot['symbol'] == lot_data['symbol']:
+                            other_purchase_date = datetime.strptime(other_lot['purchase_date'], '%Y-%m-%d')
+                            if abs((sale['sale_date'] - other_purchase_date).days) <= 30:
+                                is_wash_sale = True
+                                break
+                
+                if is_wash_sale:
+                    widgets['warning_label'].grid() # Show the warning
+                else:
+                    widgets['warning_label'].grid_remove() # Hide the warning
+                    total_tax_impact += gain_loss * tax_rate
+
+            color = self.NEGATIVE_COLOR if total_tax_impact > 0 else self.POSITIVE_COLOR
+            self.tax_sim_result_lbl.config(text=f"${total_tax_impact:,.2f}", foreground=color)
+
+        except (ValueError, TypeError):
+            messagebox.showerror("Invalid Input", "Please check that tax rates and shares to sell are valid numbers.", parent=self)
+
+    def _populate_realized_gains_table(self):
+        """Fills the Treeview with the log of realized gains/losses for the year."""
+        for i in self.realized_tree.get_children():
+            self.realized_tree.delete(i)
+
+        for sale in sorted(self.portfolio.get('realized_gains', []), key=lambda x: x['date'], reverse=True):
+            gain_loss = sale['gain_loss']
+            tag = 'realized_gain' if gain_loss >= 0 else 'realized_loss'
+            
+            self.realized_tree.insert("", "end", values=(
+                sale['date'],
+                sale['symbol'],
+                sale['type'],
+                f"${gain_loss:,.2f}"
+            ), tags=(tag,))
     def _on_mousewheel(self, event, canvas):
         """Handle mouse wheel and trackpad scrolling for a canvas."""
         # FIX: Add a safety check to ensure the canvas widget still exists before
@@ -1598,21 +2011,31 @@ class PortfolioApp(tk.Tk):
             canvas.yview_scroll(1, "units")
 
     # --- Data Management ---
+    # The portfolio data is now structured as a list of individual lots.
     def load_portfolio_data(self):
-        """Load initial mock data."""
+        """Load initial mock data with multiple tax lots per position."""
         self.portfolio = {
             "positions": [
-                {"symbol": "AAPL", "shares": 50, "entry_price": 150.0},
-                {"symbol": "MSFT", "shares": 30, "entry_price": 280.0},
-                {"symbol": "NVDA", "shares": 15, "entry_price": 850.0},
+                # Each dictionary is now a specific purchase lot
+                {"lot_id": "aapl1", "symbol": "AAPL", "shares": 20, "entry_price": 150.0, "purchase_date": (datetime.now() - timedelta(days=500)).strftime('%Y-%m-%d')},
+                {"lot_id": "aapl2", "symbol": "AAPL", "shares": 30, "entry_price": 180.0, "purchase_date": (datetime.now() - timedelta(days=100)).strftime('%Y-%m-%d')},
+                {"lot_id": "msft1", "symbol": "MSFT", "shares": 30, "entry_price": 280.0, "purchase_date": (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')},
+                {"lot_id": "googl1", "symbol": "GOOGL", "shares": 10, "entry_price": 140.0, "purchase_date": (datetime.now() - timedelta(days=250)).strftime('%Y-%m-%d')},
+                {"lot_id": "googl2", "symbol": "GOOGL", "shares": 15, "entry_price": 175.0, "purchase_date": (datetime.now() - timedelta(days=25)).strftime('%Y-%m-%d')}, # Recent purchase for wash sale demo
+                {"lot_id": "tsla1", "symbol": "TSLA", "shares": 40, "entry_price": 300.0, "purchase_date": (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')},
             ],
-            "goals": []
+            "goals": [],
+            "realized_gains": [
+                 {"symbol": "AMD", "gain_loss": -550.75, "date": (datetime.now() - timedelta(days=45)).strftime('%Y-%m-%d'), "type": "Short-Term"},
+                 {"symbol": "PYPL", "gain_loss": 1203.40, "date": (datetime.now() - timedelta(days=90)).strftime('%Y-%m-%d'), "type": "Long-Term"},
+            ]
         }
         self._fetch_market_data()
 
-        # Force radar card refresh if it was missed on <Map> event
         if self.active_view_key == "dashboard" and self.is_initial_dashboard_draw_pending:
             self.after(300, self._update_dashboard_drivers_card)
+
+
 
 
     def start_periodic_updates(self):
@@ -1629,78 +2052,64 @@ class PortfolioApp(tk.Tk):
 
     # --- Replace this method entirely ---
     def _fetch_worker(self):
-        """Worker for fetching market data and logos."""
         from curl_cffi import requests as cffi_requests
-        from PIL import Image, ImageTk
-        from io import BytesIO
-
+        """Worker for fetching market data and logos."""
         for pos in self.portfolio["positions"]:
             symbol = pos["symbol"]
             self.market_data_cache[symbol] = self.api.get_stock_details(symbol)
             
+            # Fetch logo only if it's not already in the cache
             if symbol not in self.logo_cache:
                 try:
                     url = self.market_data_cache[symbol]['logo_url']
+                    # Use curl_cffi to impersonate a browser and avoid being blocked
                     response = cffi_requests.get(url, impersonate="chrome110", timeout=10)
                     
                     if response.status_code == 200:
                         img_data = response.content
                         img = Image.open(BytesIO(img_data))
                         img.thumbnail((24, 24), Image.Resampling.LANCZOS)
+                        # Store the PhotoImage object, not the raw image
                         self.logo_cache[symbol] = ImageTk.PhotoImage(img)
                     else:
-                        self.logo_cache[symbol] = None
+                        self.logo_cache[symbol] = None # Mark as failed
                 except Exception as e:
                     print(f"Could not fetch logo for {symbol}: {e}")
-                    self.logo_cache[symbol] = None
+                    self.logo_cache[symbol] = None # Mark as failed
 
-        # --- THIS IS THE FIX ---
-        # 1. First, process the data to calculate all analytics. This happens
-        #    in the background thread immediately after data is fetched.
+        # After fetching all data, run calculations
         self._process_portfolio_data()
+        self._calculate_dashboard_data()
 
-        # 2. Then, schedule the UI update on the main thread. By the time
-        #    _update_all_views runs, self.analysis_data will be fully populated.
+        # Schedule the UI update on the main thread
         self.after(0, self._update_all_views)
-
 
     def _update_all_views(self):
         """Update the active view with latest data."""
         if not self.active_view_key or not self.winfo_exists():
             return
-            
-        # --- GUARANTEED FIX ---
-        # Before updating any part of the UI, we check if the core analytics data exists.
-        # If it doesn't, it means the initial processing hasn't completed yet.
-        # We force the calculation to happen here, guaranteeing that any subsequent
-        # function in this method will have the data it needs.
+
         if 'analytics' not in self.analysis_data and self.portfolio["positions"]:
             self._process_portfolio_data()
 
-        # Now, with data guaranteed to be present, proceed with the normal updates.
         if self.active_view_key == "dashboard":
             if hasattr(self, "hero_total_value"): self._update_dashboard_kpis()
-            if hasattr(self, "tree"): self._update_positions()
-            if hasattr(self, "canvas_dash"): self._plot_history(self.active_timeframe)
-            if hasattr(self, "canvas_pie"): self._plot_pie()
-            
-            # This call is now safe and will have the data it needs.
-            if hasattr(self, "radar_canvas_dash"):
-                self._update_dashboard_drivers_card()
+            if hasattr(self, "positions_table_frame"): self._update_positions()
+            if hasattr(self, "ax_dash"): self._plot_history_area_chart(self.active_timeframe)
+            if hasattr(self, "ax_pie"): self._plot_allocation_bars()
+            if hasattr(self, "radar_canvas_dash"): self._update_dashboard_drivers_card()
 
-        # --- THIS IS THE FIX ---
-        # Added the missing case to handle updates for the "Goals" tab.
         elif self.active_view_key == "goals":
-            if hasattr(self, "goals_container"): # Check if the goals view is ready
+            if hasattr(self, "goals_container"):
                 self._update_goals()
-        # --- END OF FIX ---
-            
+        
         elif self.active_view_key == "analysis":
             self._update_analysis_view_data()
+            
+        # THIS IS THE MODIFIED PART
         elif self.active_view_key == "tax":
-            if hasattr(self, "tlh_label"): self._scan_tax_losses()
-            if hasattr(self, "tax_menu"): self._update_tax_dropdown()
-
+            self._update_tax_view() # Call the new master update method
+            
     def _update_dashboard_kpis(self):
         """Updates the new hero snapshot KPI values."""
         total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", pos["entry_price"]) for pos in self.portfolio["positions"])
@@ -1717,110 +2126,196 @@ class PortfolioApp(tk.Tk):
             foreground=self.POSITIVE_COLOR if day_change_usd >= 0 else self.NEGATIVE_COLOR
         )
 
-    def _plot_history(self, timeframe="6M"):
-        """Plot portfolio value history with a clean, professional style."""
+    def _plot_history_area_chart(self, timeframe="6M"):
+        """Plots a professional-looking area chart with a gradient fill."""
         self.ax_dash.clear()
-        self._setup_matplotlib_style(self.fig_dash, self.ax_dash) # Apply theme
-        
-        days_map = {"1M": 30, "6M": 180, "1Y": 365, "5Y": 365*5, "ALL": 365*10}
-        num_days = days_map.get(timeframe, 180)
-        
-        dates = [datetime.now() - timedelta(days=x) for x in range(num_days)][::-1]
-        base_value = sum(pos["shares"] * pos["entry_price"] for pos in self.portfolio["positions"])
-        if base_value == 0: base_value = 50000
-        returns = np.random.randn(num_days) * 0.015
-        values = base_value * (1 + returns).cumprod()
-        
-        self.ax_dash.plot(dates, values, color=self.ACCENT_COLOR, linewidth=2)
-        self.ax_dash.fill_between(dates, values, alpha=0.2, color=self.ACCENT_COLOR)
-        
-        self.ax_dash.set_ylabel("Portfolio Value ($)", fontsize=10, color=self.SECONDARY_TEXT) # THEME FIX
-        self.ax_dash.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
-        
-        self.ax_dash.spines["left"].set_visible(False) # Redundant but safe
-        self.ax_dash.grid(False)
-        self.ax_dash.tick_params(axis='y', length=0)
-        
-        self.fig_dash.tight_layout(pad=1.5)
+        self._setup_matplotlib_style(self.fig_dash, self.ax_dash)
+
+        if self.portfolio["positions"]:
+            # Data fetching and processing (same as before)
+            end_date = datetime.now()
+            if timeframe == "1M": start_date = end_date - timedelta(days=30)
+            elif timeframe == "6M": start_date = end_date - timedelta(days=180)
+            elif timeframe == "1Y": start_date = end_date - timedelta(days=365)
+            elif timeframe == "5Y": start_date = end_date - timedelta(days=365*5)
+            else: start_date = None # ALL
+            
+            history_df = self.data_manager.get_portfolio_history(self.portfolio, start_date, end_date)
+            self.history_data = history_df # Store for hover
+            
+            if not history_df.empty:
+                line, = self.ax_dash.plot(history_df.index, history_df['value'], color=self.ACCENT_COLOR, lw=2)
+
+                # --- The Gradient Fill ---
+                x = history_df.index
+                y = history_df['value']
+                self.ax_dash.fill_between(x, y, color=self.ACCENT_COLOR, alpha=0.5)
+
+                # Create a gradient effect by layering another fill on top
+                self.ax_dash.fill_between(x, y,
+                    where=(y > y.min()),
+                    interpolate=True,
+                    color=self.ACCENT_COLOR,
+                    alpha=0.2,
+                    zorder=line.get_zorder()-1 # Ensure it's below the line
+                )
+                self.ax_dash.set_title(f"Portfolio Performance ({timeframe})", fontsize=11, color=self.SECONDARY_TEXT, pad=10)
+
+        # --- Styling ---
+        self.ax_dash.spines['top'].set_visible(False)
+        self.ax_dash.spines['right'].set_visible(False)
+        self.ax_dash.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'${x/1000:.0f}K'))
+        self.ax_dash.tick_params(axis='x', rotation=0, labelsize=9)
+        self.ax_dash.tick_params(axis='y', labelsize=9)
+        self.ax_dash.grid(axis='y', linestyle='--', color=self.BORDER_COLOR, alpha=0.5)
+        self.fig_dash.tight_layout(pad=2.0)
         self.canvas_dash.draw()
 
-    def _plot_pie(self):
-        """Plot sector diversification as a modern donut chart."""
+    def _plot_allocation_bars(self):
+        """Plots a much cleaner horizontal bar chart for sector allocations."""
         self.ax_pie.clear()
         self._setup_matplotlib_style(self.fig_pie, self.ax_pie)
+
+        if not self.sector_details:
+            self.ax_pie.text(0.5, 0.5, "No data for allocation", ha='center', va='center', transform=self.ax_pie.transAxes)
+        else:
+            # Prepare data
+            sorted_sectors = sorted(self.sector_details.items(), key=lambda item: item[1]['value'], reverse=True)
+            sectors = [item[0] for item in sorted_sectors]
+            percentages = [item[1]['percentage'] * 100 for item in sorted_sectors]
+            colors = [item[1]['color'] for item in sorted_sectors]
+
+            # Plot bars
+            bars = self.ax_pie.barh(sectors, percentages, color=colors, height=0.6)
+            self.ax_pie.invert_yaxis() # Display largest at the top
+
+            # Add percentage labels on the bars
+            for bar in bars:
+                width = bar.get_width()
+                label_x_pos = width + 0.5
+                self.ax_pie.text(label_x_pos, bar.get_y() + bar.get_height()/2., f'{width:.1f}%', 
+                                va='center', ha='left', color=self.TEXT_COLOR, fontsize=9)
+
+        # --- Styling ---
+        self.ax_pie.spines['top'].set_visible(False)
+        self.ax_pie.spines['right'].set_visible(False)
+        self.ax_pie.spines['bottom'].set_visible(False)
+        self.ax_pie.spines['left'].set_color(self.BORDER_COLOR)
+        self.ax_pie.xaxis.set_visible(False) # The labels on bars are enough
+        self.ax_pie.tick_params(axis='y', length=0, labelsize=9, colors=self.SECONDARY_TEXT)
+        self.fig_pie.tight_layout(pad=1.5)
         
-        sectors = {}
-        total_value = sum(pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0) for pos in self.portfolio["positions"])
-
-        for pos in self.portfolio["positions"]:
-            sector = self.market_data_cache.get(pos["symbol"], {}).get("sector", "Other")
-            value = pos["shares"] * self.market_data_cache.get(pos["symbol"], {}).get("regularMarketPrice", 0)
-            sectors[sector] = sectors.get(sector, 0) + value
-
-        if sectors and total_value > 0:
-            labels = sectors.keys()
-            values = list(sectors.values())
-            
-            # Use a more vibrant and modern color palette
-            colors = plt.cm.viridis(np.linspace(0.4, 0.9, len(labels)))
-
-            wedges, texts, autotexts = self.ax_pie.pie(
-                values, 
-                autopct='%1.1f%%',
-                startangle=140, 
-                pctdistance=0.85,
-                colors=colors,
-                wedgeprops={'width': 0.3, 'edgecolor': self.CARD_COLOR} # Donut hole effect
-            )
-            
-            for autotext in autotexts:
-                autotext.set_color("white")
-                autotext.set_fontweight('bold')
-            
-            # THEME FIX: Correctly themed legend instead of labels on the pie
-            self.ax_pie.legend(wedges, labels,
-                          title="Sectors",
-                          loc="center",
-                          bbox_to_anchor=(0.5, 0.5),
-                          facecolor=self.CARD_COLOR,
-                          edgecolor=self.BORDER_COLOR,
-                          labelcolor=self.TEXT_COLOR)
-
-        self.ax_pie.axis('equal')
-        self.fig_pie.tight_layout()
         self.canvas_pie.draw()
 
+    def _build_positions_card(self, parent):
+        """Builds the new custom-styled positions table with a precise grid layout."""
+        card = ttk.Frame(parent, style="Card.TFrame", padding=20)
+        card.grid(row=2, column=0, sticky="nsew")
+        card.rowconfigure(2, weight=1) # The canvas with rows will expand
+        card.columnconfigure(0, weight=1)
+
+        ttk.Label(card, text="Current Positions", style="Header.TLabel", background=self.CARD_COLOR).grid(row=0, column=0, sticky="w", pady=(0, 15))
+
+        # --- Custom Table Header ---
+        # This frame's grid configuration will be the master layout for all data rows.
+        self.positions_header = ttk.Frame(card, style="Card.TFrame", padding=(10, 5))
+        self.positions_header.grid(row=1, column=0, sticky="ew")
+        
+        # Define column weights for a balanced layout
+        self.positions_header.columnconfigure(0, weight=3)  # Symbol
+        self.positions_header.columnconfigure(1, weight=2)  # Shares
+        self.positions_header.columnconfigure(2, weight=2)  # Price
+        self.positions_header.columnconfigure(3, weight=3)  # Value
+        self.positions_header.columnconfigure(4, weight=2)  # Day %
+
+        headers = ["Symbol", "Shares", "Price", "Value", "Day %"]
+        for i, text in enumerate(headers):
+            anchor = "w" if text == "Symbol" else "e"
+            lbl = ttk.Label(self.positions_header, text=text, style="Secondary.TLabel", font=self.FONT_BOLD, background=self.CARD_COLOR, anchor=anchor)
+            lbl.grid(row=0, column=i, sticky="ew", padx=(0, 20))
+
+        # --- Canvas and Scrollable Frame for Table Rows ---
+        canvas = tk.Canvas(card, background=self.CARD_COLOR, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(card, orient="vertical", command=canvas.yview)
+        self.positions_table_frame = ttk.Frame(canvas, style="Card.TFrame")
+
+        self.positions_table_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=self.positions_table_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.grid(row=2, column=0, sticky="nsew")
+        scrollbar.grid(row=2, column=1, sticky="ns")
+        card.rowconfigure(2, weight=1)
+
+        self.position_context_menu = tk.Menu(self, tearoff=0, background=self.CARD_COLOR, foreground=self.TEXT_COLOR)
+        self.position_context_menu.add_command(label="Edit Position", command=self._edit_position)
+        self.position_context_menu.add_command(label="Remove Position", command=self._remove_position)
+
     def _update_positions(self):
-        """Update positions table, now with company logos."""
-        self.tree.delete(*self.tree.get_children())
+        """Populates the positions table with a perfectly aligned grid layout."""
+        for widget in self.positions_table_frame.winfo_children():
+            widget.destroy()
+
+        if not self.portfolio["positions"]:
+            ttk.Label(self.positions_table_frame, text="No positions added yet.", style="Secondary.TLabel").pack(pady=20)
+            return
+
         for i, pos in enumerate(self.portfolio["positions"]):
-            data = self.market_data_cache.get(pos["symbol"], {})
-            price = data.get("regularMarketPrice", pos["entry_price"])
+            market_info = self.market_data_cache.get(pos["symbol"], {})
+            price = market_info.get("regularMarketPrice", pos["entry_price"])
             value = pos["shares"] * price
-            day_change = price - data.get("previousClose", price)
-            day_pct = (day_change / data.get("previousClose", price)) * 100 if data.get("previousClose") else 0
-            
-            color = self.POSITIVE_COLOR if day_pct >= 0 else self.NEGATIVE_COLOR
-            self.tree.tag_configure(f'color_{pos["symbol"]}', foreground=color)
+            day_change = market_info.get("regularMarketChangePercent", 0)
 
-            # Get logo from cache
+            # Each row frame gets the same grid configuration as the header
+            row_frame = ttk.Frame(self.positions_table_frame, style="Card.TFrame", padding=(10, 15))
+            row_frame.pack(fill="x", expand=True)
+
+            row_frame.columnconfigure(0, weight=3)  # Symbol
+            row_frame.columnconfigure(1, weight=2)  # Shares
+            row_frame.columnconfigure(2, weight=2)  # Price
+            row_frame.columnconfigure(3, weight=3)  # Value
+            row_frame.columnconfigure(4, weight=2)  # Day %
+
+            # --- Widgets are now placed on this new grid ---
+            # 1. Symbol (Logo + Ticker), aligned left
+            symbol_frame = ttk.Frame(row_frame, style="Card.TFrame")
+
+            # --- THIS IS THE FIX ---
+            # By changing sticky="w" to sticky="ew", the symbol_frame now expands
+            # to fill the entire width of its column, just like the header does.
+            symbol_frame.grid(row=0, column=0, sticky="ew", padx=(0, 20))
+            # --- END OF FIX ---
+            
             logo_image = self.logo_cache.get(pos["symbol"])
-
-            values = (
-                pos["symbol"],
-                f"{pos['shares']:.2f}",
-                f"${price:,.2f}",
-                f"${value:,.2f}",
-                f"{day_pct:+.2f}%"
-            )
-            
-            tags = ("odd",) if i % 2 else ()
-            # Insert item and apply the color tag
-            item_id = self.tree.insert("", "end", values=values, tags=tags + (f'color_{pos["symbol"]}',))
-            
-            # Set the image for the specific item
             if logo_image:
-                self.tree.item(item_id, image=logo_image)
+                logo_label = ttk.Label(symbol_frame, image=logo_image, background=self.CARD_COLOR)
+                logo_label.pack(side="left", padx=(0, 8))
+            
+            ttk.Label(symbol_frame, text=pos["symbol"], font=self.FONT_BOLD, background=self.CARD_COLOR).pack(side="left")
+
+            # 2. Other data points, aligned right
+            ttk.Label(row_frame, text=f"{pos['shares']}", background=self.CARD_COLOR, anchor="e").grid(row=0, column=1, sticky="ew", padx=(0, 20))
+            ttk.Label(row_frame, text=f"${price:,.2f}", background=self.CARD_COLOR, anchor="e").grid(row=0, column=2, sticky="ew", padx=(0, 20))
+            ttk.Label(row_frame, text=f"${value:,.2f}", font=self.FONT_BOLD, background=self.CARD_COLOR, anchor="e").grid(row=0, column=3, sticky="ew", padx=(0, 20))
+            
+            change_color = self.POSITIVE_COLOR if day_change >= 0 else self.NEGATIVE_COLOR
+            day_change_label = ttk.Label(row_frame, text=f"{day_change:+.2f}%", foreground=change_color, background=self.CARD_COLOR, anchor="e")
+            day_change_label.grid(row=0, column=4, sticky="ew", padx=(0, 20))
+            
+            # Hover and Right-Click functionality
+            def on_enter(e, rf=row_frame): rf.configure(style="Hover.Card.TFrame")
+            def on_leave(e, rf=row_frame): rf.configure(style="Card.TFrame")
+
+            all_widgets = [row_frame] + list(row_frame.winfo_children())
+            all_widgets.extend(list(symbol_frame.winfo_children()))
+
+            for widget in all_widgets:
+                widget.bind("<Enter>", on_enter)
+                widget.bind("<Leave>", on_leave)
+                widget.bind("<Button-3>", lambda event, s=pos["symbol"]: self._on_position_right_click(event, s))
+
+        style = ttk.Style(self)
+        style.configure("Hover.Card.TFrame", background="#2F2F2F")
 
     def _update_goals(self):
         """Final update to goals display with a robust layout and Monte Carlo integration."""
@@ -1956,11 +2451,53 @@ class PortfolioApp(tk.Tk):
             self._update_all_views()
     # --- Chart Interaction ---
     def _setup_chart_hover(self):
-        """Setup hover interaction for dashboard chart."""
-        self.chart_hover_elements["line"] = self.ax_dash.axvline(color=self.ACCENT_COLOR, linestyle="--", visible=False)
-        self.chart_hover_elements["text"] = self.ax_dash.text(0.05, 0.95, "", transform=self.ax_dash.transAxes, backgroundcolor=self.CARD_COLOR, bbox={"facecolor": self.CARD_COLOR, "edgecolor": self.BORDER_COLOR})
-        self.canvas_dash.mpl_connect("motion_notify_event", self._on_chart_hover)
-        self.canvas_dash.mpl_connect("axes_leave_event", self._on_chart_leave)
+        """Sets up the new interactive crosshair for the main performance chart."""
+        self.chart_hover_line = self.ax_dash.axvline(x=self.ax_dash.get_xlim()[0], color=self.ACCENT_COLOR, lw=0.8, linestyle='--', zorder=0)
+        self.chart_hover_text = self.ax_dash.text(0.02, 0.98, '', transform=self.ax_dash.transAxes,
+                                                  ha='left', va='top', fontsize=9,
+                                                  bbox=dict(boxstyle='round,pad=0.3', fc=self.CARD_COLOR, ec='none', alpha=0.8))
+        self.chart_hover_line.set_visible(False)
+        self.chart_hover_text.set_visible(False)
+
+        def on_hover(event):
+            if not event.inaxes:
+                if self.chart_hover_line.get_visible():
+                    self.chart_hover_line.set_visible(False)
+                    self.chart_hover_text.set_visible(False)
+                    self.canvas_dash.draw_idle()
+                return
+
+            visible = True
+            x, y = event.xdata, event.ydata
+            self.chart_hover_line.set_xdata([x])
+
+            # Find the closest data point to the hover event
+            if hasattr(self, 'history_data') and not self.history_data.empty:
+                # Convert matplotlib float date to datetime object
+                date_obj = mdates.num2date(x).replace(tzinfo=None)
+                # Find the index of the closest date in the dataframe
+                closest_idx = self.history_data.index.get_indexer([date_obj], method='nearest')[0]
+                # Get the actual data for that point
+                actual_date = self.history_data.index[closest_idx]
+                actual_value = self.history_data.iloc[closest_idx]['value']
+                
+                # Update the text with the actual data
+                self.chart_hover_text.set_text(f"{actual_date.strftime('%b %d, %Y')}\nValue: ${actual_value:,.2f}")
+            
+            if self.chart_hover_line.get_visible() != visible:
+                self.chart_hover_line.set_visible(visible)
+                self.chart_hover_text.set_visible(visible)
+
+            self.canvas_dash.draw_idle()
+
+        def on_leave(event):
+            self.chart_hover_line.set_visible(False)
+            self.chart_hover_text.set_visible(False)
+            self.canvas_dash.draw_idle()
+
+        self.canvas_dash.mpl_connect('motion_notify_event', on_hover)
+        self.canvas_dash.mpl_connect('axes_leave_event', on_leave)
+
 
     def _on_chart_hover(self, event):
         """Handle chart hover event."""
@@ -2559,9 +3096,149 @@ class PortfolioApp(tk.Tk):
         self._clear_analysis_pane()
         self._update_all_views()
 
+    def _show_tax_info_dialog(self):
+        """Creates and shows the tax information manual dialog."""
+        TaxInfoDialog(self, title="Tax Center Manual")
+    
+    def _calculate_tax_efficiency_score(self):
+        """Calculates a holistic tax efficiency score for the portfolio."""
+        total_value = sum(lot["shares"] * self.market_data_cache.get(lot["symbol"], {}).get("regularMarketPrice", 0) for lot in self.portfolio["positions"])
+        if total_value == 0:
+            return 0, "N/A"
+
+        # --- Component 1: Long-Term Holdings Ratio (40 points) ---
+        long_term_value = 0
+        for lot in self.portfolio["positions"]:
+            purchase_date = datetime.strptime(lot['purchase_date'], '%Y-%m-%d')
+            if (datetime.now() - purchase_date).days > 365:
+                long_term_value += lot["shares"] * self.market_data_cache.get(lot["symbol"], {}).get("regularMarketPrice", 0)
+        
+        long_term_ratio = (long_term_value / total_value) if total_value > 0 else 0
+        long_term_score = long_term_ratio * 40
+
+        # --- Component 2: Harvestable Loss Ratio (30 points) ---
+        unrealized_losses = abs(sum(
+            (self.market_data_cache.get(lot["symbol"], {}).get("regularMarketPrice", lot["entry_price"]) - lot["entry_price"]) * lot["shares"]
+            for lot in self.portfolio["positions"]
+            if self.market_data_cache.get(lot["symbol"], {}).get("regularMarketPrice", lot["entry_price"]) < lot["entry_price"]
+        ))
+        # Score is capped at 5% of portfolio value being harvestable losses.
+        harvest_ratio = min((unrealized_losses / total_value) / 0.05, 1.0) if total_value > 0 else 0
+        harvest_score = harvest_ratio * 30
+
+        # --- Component 3: Realized Gains Quality (30 points) ---
+        realized_gains_log = self.portfolio.get('realized_gains', [])
+        total_realized_gains = sum(g['gain_loss'] for g in realized_gains_log if g['gain_loss'] > 0)
+        long_term_realized_gains = sum(g['gain_loss'] for g in realized_gains_log if g['gain_loss'] > 0 and g['type'] == 'Long-Term')
+        
+        realized_quality_ratio = (long_term_realized_gains / total_realized_gains) if total_realized_gains > 0 else 1.0 # Default to 1 if no gains
+        realized_score = realized_quality_ratio * 30
+
+        # --- Final Score and Grade ---
+        final_score = int(long_term_score + harvest_score + realized_score)
+        
+        if final_score >= 97: grade = "A+"
+        elif final_score >= 93: grade = "A"
+        elif final_score >= 90: grade = "A-"
+        elif final_score >= 87: grade = "B+"
+        elif final_score >= 83: grade = "B"
+        elif final_score >= 80: grade = "B-"
+        elif final_score >= 77: grade = "C+"
+        elif final_score >= 73: grade = "C"
+        elif final_score >= 70: grade = "C-"
+        elif final_score >= 60: grade = "D"
+        else: grade = "F"
+        
+        return final_score, grade
+
+    def _load_warning_icon(self):
+        """Loads the base64 warning icon into a PhotoImage object."""
+        try:
+            import base64
+            from io import BytesIO
+            # A 16x16 yellow triangle with a black '!'
+            icon_data = base64.b64decode(
+                b'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAADPSURBVDhPzZExDoAwCERtEou9hYvsLdjd3t7D3sJQYmFhYREEIYIiSgI/pL9gIplgQzL5k2R+SY8kM0kQzL8xSflfAgCM4/g7RgC2aZp2u90BQJ7n2e/3I5PJtNvtJ5XKaTQazWq1arVaLa/X6/V6vb5er59bVzXgD4bhyWQiSRIURd/3fd/3Pd/3/Vd5nufz+UyS5Lqu4zhJkgDA8zxN0wCAOI6maZIk4ziSJAFAlmVZlhEEARAEURTl+Xw+n8/n8/l8Pp/PBwB+3CTcbg2YwQAAAABJRU5ErkJggg=='
+            )
+            img = Image.open(BytesIO(icon_data))
+            self.warning_icon = ImageTk.PhotoImage(img)
+            style = ttk.Style(self)
+            style.configure("Warning.TLabel", background=self.CARD_COLOR, foreground="yellow", font=self.FONT_BOLD)
+        except Exception as e:
+            print(f"Failed to load warning icon: {e}")
+
+
+
 
    
 # --- Dialog Classes ---
+
+class TaxInfoDialog(tk.Toplevel):
+    """A custom dialog to display the help manual for the Advanced Tax Center."""
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.transient(parent)
+        self.title(title)
+        self.parent = parent
+        self.resizable(True, True)
+        self.geometry("650x750")
+        self.configure(bg=parent.CARD_COLOR, padx=10, pady=10)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        main_frame = ttk.Frame(self, style="Card.TFrame")
+        main_frame.pack(fill="both", expand=True)
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=1)
+
+        self.text_widget = tk.Text(main_frame, wrap="word", bg=parent.CARD_COLOR, fg=parent.TEXT_COLOR, font=parent.FONT_NORMAL, relief="flat", highlightthickness=0, padx=15, pady=15)
+        self.text_widget.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=self.text_widget.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.text_widget.config(yscrollcommand=scrollbar.set)
+
+        self.text_widget.tag_configure("h1", font=parent.FONT_HEADER, foreground=parent.ACCENT_COLOR, spacing3=10)
+        self.text_widget.tag_configure("h2", font=parent.FONT_BOLD, foreground=parent.TEXT_COLOR, spacing1=15, spacing3=5)
+        self.text_widget.tag_configure("p", spacing3=10)
+        self.text_widget.tag_configure("bullet", lmargin1=20, lmargin2=20, spacing3=5)
+        self.text_widget.tag_configure("sub_bullet", lmargin1=40, lmargin2=40, spacing3=5)
+
+        self._add_content()
+        self.text_widget.config(state="disabled")
+
+        button_frame = ttk.Frame(self, style="Card.TFrame")
+        button_frame.pack(fill="x", pady=(10,0))
+        close_button = ttk.Button(button_frame, text="Close", style="Accent.TButton", command=self.destroy)
+        close_button.pack(pady=5)
+
+        self.grab_set()
+        self.wait_window(self)
+
+    def _add_content(self):
+        """Adds the formatted help text to the Text widget."""
+        self.text_widget.insert(tk.END, "Tax Center Manual\n\n", "h1")
+        
+        self.text_widget.insert(tk.END, "Tax Efficiency Score\n", "h2")
+        self.text_widget.insert(tk.END, "This score (0-100) provides a holistic view of your portfolio's tax-friendliness. A higher score is better. It is calculated from three components:\n\n", "p")
+        self.text_widget.insert(tk.END, "1. Long-Term Holdings (40 pts): ", "sub_bullet")
+        self.text_widget.insert(tk.END, "Measures the percentage of your portfolio held for over a year. Long-term holdings are taxed at a lower rate.\n", "p")
+        self.text_widget.insert(tk.END, "2. Harvestable Losses (30 pts): ", "sub_bullet")
+        self.text_widget.insert(tk.END, "Measures the amount of unrealized losses relative to your portfolio size. Having losses available to offset gains is a key tax-saving strategy.\n", "p")
+        self.text_widget.insert(tk.END, "3. Realized Gains Quality (30 pts): ", "sub_bullet")
+        self.text_widget.insert(tk.END, "Measures the proportion of your realized gains for the year that were long-term. Prioritizing long-term gains is more tax-efficient.\n", "p")
+
+        self.text_widget.insert(tk.END, "Unrealized Gains & Losses by Lot\n", "h2")
+        self.text_widget.insert(tk.END, "This table shows every individual purchase (a 'tax lot') you own. Click the arrow next to a symbol to see all of its lots.\n\n", "p")
+        self.text_widget.insert(tk.END, "• Term: ", "bullet")
+        self.text_widget.insert(tk.END, "Indicates if a lot is 'Short-Term' (held ≤ 1 year) or 'Long-Term' (held > 1 year), which determines its tax rate upon sale.\n", "p")
+
+        self.text_widget.insert(tk.END, "\"What-If\" Sale Simulator\n", "h2")
+        self.text_widget.insert(tk.END, "This tool lets you preview the tax impact of selling specific lots.\n\n", "p")
+        self.text_widget.insert(tk.END, "• Wash Sale Risk: ", "bullet")
+        self.text_widget.insert(tk.END, "The [!] icon appears if you try to harvest a loss from a lot when you have purchased the same stock within the last 30 days. The IRS disallows these losses for tax purposes. The simulator will correctly ignore this loss in its 'Total Estimated Tax Impact' calculation.\n", "p")
+        self.text_widget.insert(tk.END, "• Total Estimated Tax Impact: ", "bullet")
+        self.text_widget.insert(tk.END, "Shows the net tax you would owe (red) or save (green) from the combination of all simulated sales, accounting for wash sale rules.\n", "p")
+
 class PositionDialog(simpledialog.Dialog):
     """Dialog for adding or editing positions with better styling."""
     def __init__(self, parent, title="Add Position", initial_data=None):
@@ -2773,6 +3450,8 @@ class SuggestionDialog(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
         
         self.grab_set()
+
+
 
 if __name__ == "__main__":
     app = PortfolioApp(theme_name='dark')
