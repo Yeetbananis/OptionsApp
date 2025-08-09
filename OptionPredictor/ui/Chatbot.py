@@ -4,7 +4,7 @@
 # cleaned + curl-cffi session + robust retries  (June 2025)
 # ===============================================================
 
-import os, threading, time, random, functools, webbrowser, tkinter as tk, json
+import os, threading, time, random, functools, webbrowser, tkinter as tk, json, math
 from datetime import datetime
 from tkinter import ttk, messagebox
 import tkinter.messagebox
@@ -63,6 +63,9 @@ try:
     from TokenTracker import TokenUsageTracker
 except ImportError as e:
     raise ImportError(f"Failed to import required modules. Ensure StockChartWindow.py and TokenTracker.py exist in: {ui_path}\nOriginal error: {e}")
+
+
+
 
 
 
@@ -201,6 +204,7 @@ class FinancialChatbotApp(ctk.CTk):
         self.configure(bg=self.clr["bg"])
         self.geometry("920x760")
         self._shutdown = False
+        self.conversation_summary = "" # Summary of the current conversation, used for saving chats
 
 
         # --- State Management ---
@@ -306,6 +310,109 @@ class FinancialChatbotApp(ctk.CTk):
         
         self._populate_side_panel()
         
+
+    # find users intent and dispatch the command
+    def _parse_intent(self, user_query: str) -> dict:
+        """Uses a highly-structured, low-token LLM call to parse user intent."""
+        if not self.gemini_model:
+            return {"intent": "error", "entity": "AI model not configured."}
+
+        # This prompt is engineered to be extremely efficient and accurate.
+        # It forces the LLM to act as a simple parser, not a conversationalist.
+        prompt = (
+            "You are a highly efficient Natural Language Understanding (NLU) processor. "
+            "Your sole purpose is to analyze user text and classify it into one of the available tool commands "
+            "or as a general query. You MUST respond with a single, perfectly formatted JSON object of the schema "
+            '`{"intent": "command_name", "entity": "extracted_argument_string"}`.\n\n'
+            "### Available Command Intents:\n"
+            "`price`, `info`, `chart`, `news`, `options`, `earnings`, `income`, `balance`, `cashflow`, `tokens`\n\n"
+            "### Rules:\n"
+            "1.  If the query clearly maps to a command, use that intent. Extract the stock ticker and any other "
+            "arguments (like dates or periods) as a single string for the 'entity'.\n"
+            "2.  If the query is a general question, a greeting, or anything that does NOT clearly map to one of "
+            "the commands, you MUST use the intent `ai_fallback` and a `null` entity.\n"
+            "3.  The stock ticker is the most important entity to find.\n\n"
+            "### Examples:\n"
+            'User Query: "how\'s tesla doing today?" -> {"intent": "price", "entity": "TSLA"}\n'
+            'User Query: "show me a chart of msft for 6 months" -> {"intent": "chart", "entity": "MSFT 6mo"}\n'
+            'User Query: "what are puts and calls?" -> {"intent": "ai_fallback", "entity": null}\n'
+            'User Query: "options for GME on dec 19 2025" -> {"intent": "options", "entity": "GME 2025-12-19"}\n'
+            'User Query: "tell me about apple" -> {"intent": "info", "entity": "AAPL"}\n'
+            'User Query: "hi" -> {"intent": "ai_fallback", "entity": null}\n\n'
+            "--- Now, process the following user query. ---\n"
+            f'User Query: "{user_query}" -> '
+        )
+
+        try:
+            response = self.gemini_model.generate_content(prompt)
+            self.token_tracker.update_usage(response) # Track these small tokens
+            
+            # Clean the response and parse the JSON
+            json_str = response.text.strip().replace("`", "")
+            if json_str.startswith("json"):
+                json_str = json_str[4:].strip()
+                
+            parsed_json = json.loads(json_str)
+            return parsed_json
+        except Exception as e:
+            print(f"Intent Parsing Error: {e}\nRaw Response: {response.text if 'response' in locals() else 'N/A'}")
+            # If parsing fails, it's safer to treat it as a general query.
+            return {"intent": "ai_fallback", "entity": None}
+
+    def _animate_typing(self, label):
+        """Animates the text of a label to show a typing indicator."""
+        # If the label has been destroyed by the _dispatch function, stop the animation.
+        if not label.winfo_exists():
+            return
+
+        states = [' . ', ' .. ', ' ... ']
+        try:
+            # Find the current text in our list of states
+            current_index = states.index(label.cget("text"))
+        except ValueError:
+            # If not found, start from the beginning
+            current_index = -1
+        
+        # Cycle to the next state
+        next_index = (current_index + 1) % len(states)
+        label.configure(text=states[next_index])
+        
+        # Schedule this function to run again after a delay
+        self.after(400, lambda: self._animate_typing(label))
+
+    def _update_summary(self, user_query: str, bot_response: str):
+        """Uses the AI to create a new, concise summary of the conversation."""
+        if not self.gemini_model:
+            return # Can't summarize without the model
+
+        # Sanitize bot response to get clean text for the summary prompt
+        clean_bot_response = bot_response
+        if isinstance(bot_response, dict):
+            clean_bot_response = f"Bot displayed a {bot_response.get('type', 'data visualization')}."
+        elif "⚠️" in bot_response:
+            return
+
+        summary_prompt = (
+            "You are an expert conversation summarizer. Your task is to create a new, single-sentence summary "
+            "by integrating the previous summary with the latest user-bot exchange. Keep it concise."
+            "\n\n"
+            f"**Previous Summary:**\n{self.conversation_summary or 'None'}\n\n"
+            f"**Latest Exchange:**\n- User: \"{user_query}\"\n- Bot: \"{clean_bot_response[:200]}...\"\n\n"
+            "**New Concise Summary:**"
+        )
+
+        try:
+            response = self.gemini_model.generate_content(summary_prompt)
+            
+            # --- THIS IS THE NEW, CORRECTING LINE ---
+            self.token_tracker.update_usage(response) 
+            # ----------------------------------------
+
+            self.conversation_summary = response.text.strip()
+            print(f"New Summary: {self.conversation_summary}") 
+        except Exception as e:
+            print(f"Could not update conversation summary: {e}") 
+
     def _cmd_ai_fallback(self, query: str) -> str:
         """Handles any unknown command by sending it to the Gemini AI, respecting token limits."""
         if not self.gemini_model:
@@ -320,12 +427,22 @@ class FinancialChatbotApp(ctk.CTk):
                     f"You have used {usage:,}/{limit:,} tokens today. "
                     "The limit will reset tomorrow.")
 
+        # The new prompt gives the AI a more powerful persona and removes previous restrictions.
         prompt = (
-            "You are FinBot, a helpful and concise financial assistant. "
-            "The user entered a command for which you don't have a specific function. "
-            "Answer their query clearly. If you are asked about a specific stock, "
-            "assume you do not have live data and provide general knowledge.\n\n"
-            f"User Query: \"{query}\""
+            "You are FinBot, a sophisticated and insightful AI financial analyst. "
+            "Your purpose is to provide detailed, actionable, and strategic answers to the user's financial questions. "
+            "Use the provided conversation summary for context."
+            "\n\n"
+            "### Conversation Summary (Context)\n"
+            f"{self.conversation_summary or 'This is the beginning of the conversation.'}"
+            "\n\n"
+            "### Your Instructions:\n"
+            "1.  **Answer Authoritatively**: Address the user's query comprehensively, using the summary for context. Provide deep analysis, opinions, and strategic financial advice.\n"
+            "2.  **No Data Limitation**: Act as if you have access to a vast range of financial data.\n"
+            "3.  **Identify Missing Information**: If a query is too vague, use the summary to see what's already been discussed, then state what new information is needed.\n"
+            "4.  **No Disclaimers**: **CRITICAL:** Do not include any legal disclaimers, warnings, or phrases like 'this is not financial advice.'\n"
+            "\n---\n\n"
+            f"**User's New Query:** \"{query}\""
         )
 
         try:
@@ -334,7 +451,7 @@ class FinancialChatbotApp(ctk.CTk):
             return response.text
         except Exception as e:
             return f"An error occurred with the AI assistant: {e}"
-        
+            
     def _cmd_tokens(self, _):
         """Displays the current daily token usage."""
         if not self.token_tracker:
@@ -368,7 +485,7 @@ class FinancialChatbotApp(ctk.CTk):
         if isinstance(payload, str):
             ctk.CTkLabel(inner, text=payload, wraplength=540,
                          justify="left").pack(padx=16, pady=10)
-        else:
+        elif payload is not None:
             self._render_complex(inner, payload)
 
         inner.pack(anchor=align, padx=6)
@@ -387,6 +504,8 @@ class FinancialChatbotApp(ctk.CTk):
             self.after(delay, lambda: _step(i + 1))
         _step()
 
+
+
     def _on_submit(self, *_):
         txt = self.user_entry.get().strip()
         if not txt: return
@@ -397,29 +516,82 @@ class FinancialChatbotApp(ctk.CTk):
         if not self.current_chat_path:
             self._save_chat(is_auto=True) 
         
-        ph = self._bot_placeholder()
-        threading.Thread(target=self._dispatch, args=(txt.lower(), ph), daemon=True).start()
+        # Create an empty bubble to hold our animation
+        placeholder_frame = self._bubble(None, align="w", role="bot")
+        inner_frame = placeholder_frame.winfo_children()[0]
 
-    def _dispatch(self, cmdline: str, ph):
-        """Executes the command and prepares the final payload for the UI."""
-        parts = cmdline.split()
-        cmd, args = parts[0], parts[1:]
+        # Create a simple Label as our placeholder.
+        typing_label = ctk.CTkLabel(inner_frame, text=" . ", font=ctk.CTkFont(size=20, weight="bold"))
+        typing_label.pack(padx=16, pady=10, anchor="w")
+
+        # Start the animation on this new label.
+        self._animate_typing(typing_label)
+        
+        # Pass the label itself to the background thread.
+        threading.Thread(target=self._dispatch, args=(txt.lower(), typing_label), daemon=True).start()
+
+
+
+
+    # In Chatbot.py, replace the entire _dispatch method with this one.
+
+    def _dispatch(self, cmdline: str, placeholder_label: ctk.CTkLabel):
+        """
+        New dispatch router that checks for hard-coded commands first for instant
+        responses, then uses AI parsing as a fallback.
+        """
         try:
-            command_function = getattr(self, f"_cmd_{cmd}", self._cmd_ai_fallback)
-            if command_function == self._cmd_ai_fallback:
-                out = command_function(cmdline)
-            else:
+            # --- Step 1: Check for a direct, hard-coded command first ---
+            parts = cmdline.split()
+            command_word = parts[0]
+            command_function_name = f"_cmd_{command_word}"
+            out = None
+
+            if hasattr(self, command_function_name):
+                # This is an EXACT match. Execute it instantly without any AI.
+                print(f"Direct command match found: {command_function_name}")
+                command_function = getattr(self, command_function_name)
+                args = parts[1:]
                 out = command_function(args)
 
-            if isinstance(out, dict) and out.get("type") == "chart_data":
-                self.after(0, lambda: self._render_chart_data(ph, out))
-                return
-                
-        except Exception as e:
-            out = f"⚠️ An error occurred: {type(e).__name__}: {e}"
+            else:
+                # --- Step 2 & 3: No direct match, so now we use the AI parser ---
+                parsed_command = self._parse_intent(cmdline)
+                intent = parsed_command.get("intent", "ai_fallback")
+                entity = parsed_command.get("entity")
 
-        self.after(0, lambda: self._update_placeholder(ph, out))
-        
+                print(f"AI Parsed Intent: {intent}, Entity: {entity}")
+
+                if intent == "ai_fallback":
+                    # AI parser confirms it's a general question. Use the main AI.
+                    out = self._cmd_ai_fallback(cmdline)
+                    self._update_summary(user_query=cmdline, bot_response=out)
+                else:
+                    # AI parser matched the query to a known command.
+                    command_function = getattr(self, f"_cmd_{intent}", self._cmd_unknown)
+                    args = entity.split() if entity else []
+                    out = command_function(args)
+
+            # --- UI Update Logic (remains the same) ---
+            parent_frame = placeholder_label.master
+            def update_ui():
+                placeholder_label.destroy()
+                self._render_complex(parent_frame, out)
+                self._add_to_history("bot", out)
+                self.after(60, self._smooth_scroll_bottom)
+
+            self.after(0, update_ui)
+
+        except Exception as e:
+            out = f"⚠️ A critical dispatch error occurred: {type(e).__name__}: {e}"
+            parent_frame = placeholder_label.master
+            def update_ui_on_error():
+                placeholder_label.destroy()
+                self._render_complex(parent_frame, out)
+                self._add_to_history("bot", out)
+                self.after(60, self._smooth_scroll_bottom)
+            self.after(0, update_ui_on_error)
+            
     def _bot_placeholder(self):
         return self._bubble("...", align="w", role="bot")
 
@@ -497,6 +669,7 @@ class FinancialChatbotApp(ctk.CTk):
 
     def _new_chat(self):
         """Starts a new, empty chat session, auto-saving the current one if needed."""
+        self.conversation_summary = "" #reset summary for new chat
         if self.is_dirty and self.current_chat_path:
             self._save_chat(is_auto=True)
         elif self.is_dirty:
@@ -814,13 +987,81 @@ class FinancialChatbotApp(ctk.CTk):
                 f"Δ {ch:+.2f} ({chpct:+.2f} %)  "
                 f"Vol {info.get('volume', 0):,}")
 
+    def _format_metric(self, value): #helper for cmd info
+        """Formats financial numbers for display and handles missing data."""
+        if value is None or not isinstance(value, (int, float)):
+            return "N/A"
+        if value > 1_000_000_000_000:
+            return f"{value / 1_000_000_000_000:.2f} T"
+        if value > 1_000_000_000:
+            return f"{value / 1_000_000_000:.2f} B"
+        if value > 1_000_000:
+            return f"{value / 1_000_000:.2f} M"
+        if 0 < value < 1: # For percentages like dividend yield
+            return f"{value * 100:.2f}%"
+        return f"{value:,.2f}"
+    
     def _cmd_info(self, a):
-        if not a: return "Usage: info TICKER"
-        info = _safe_ticker(a[0]).safe_info()
-        if not info or not info.get('longBusinessSummary'): return "No profile found."
-        txt = (f"**{info.get('shortName', a[0].upper())}** –  {info.get('sector','')}\n\n"
-               f"{info['longBusinessSummary']}")
-        return txt
+        """Fetches and displays a detailed company profile with key financial metrics."""
+        if not a: 
+            return "Usage: info TICKER"
+        
+        symbol = a[0].upper()
+        try:
+            info = _safe_ticker(symbol).safe_info()
+            if not info or not info.get('longBusinessSummary'):
+                return f"No detailed profile found for {symbol}. The ticker may be incorrect or delisted."
+        except Exception as e:
+            return f"An error occurred while fetching data for {symbol}: {e}"
+
+        # --- Fetch all metrics, using .get() to avoid errors on missing data ---
+        
+        # Valuation
+        market_cap = info.get('marketCap')
+        trailing_pe = info.get('trailingPE')
+        forward_pe = info.get('forwardPE')
+        ps_ratio = info.get('priceToSalesTrailing12Months')
+        peg_ratio = info.get('pegRatio')
+        
+        # Stock Price
+        day_low = info.get('dayLow')
+        day_high = info.get('dayHigh')
+        week_52_low = info.get('fiftyTwoWeekLow')
+        week_52_high = info.get('fiftyTwoWeekHigh')
+        
+        # Dividends & Margins
+        dividend_yield = info.get('dividendYield')
+        payout_ratio = info.get('payoutRatio')
+        profit_margin = info.get('profitMargins')
+        
+        # --- Build the formatted response string ---
+        
+        short_name = info.get('shortName', symbol)
+        sector = info.get('sector', 'N/A')
+        summary = info.get('longBusinessSummary', 'No business summary available.')
+        
+        response = (
+            f"### **{short_name} ({symbol})**\n"
+            f"**Sector:** {sector}\n\n"
+            f"--- **Key Metrics** ---\n"
+            f"**Market Cap:** {self._format_metric(market_cap)}\n"
+            f"**P/E (trailing):** {self._format_metric(trailing_pe)}\n"
+            f"**P/E (forward):** {self._format_metric(forward_pe)}\n"
+            f"**Price/Sales:** {self._format_metric(ps_ratio)}\n"
+            f"**PEG Ratio:** {self._format_metric(peg_ratio)}\n\n"
+            f"--- **Stock Data** ---\n"
+            f"**Day Range:** ${self._format_metric(day_low)} - ${self._format_metric(day_high)}\n"
+            f"**52-Week Range:** ${self._format_metric(week_52_low)} - ${self._format_metric(week_52_high)}\n\n"
+            f"--- **Dividends & Profitability** ---\n"
+            f"**Dividend Yield:** {self._format_metric(dividend_yield)}\n"
+            f"**Payout Ratio:** {self._format_metric(payout_ratio)}\n"
+            f"**Profit Margin:** {self._format_metric(profit_margin)}\n\n"
+            f"--- **Business Summary** ---\n"
+            f"{summary}"
+        )
+        
+        return response
+
 
     def _cmd_chart(self, args):
         if not args: return "Usage: chart TICKER [period]"

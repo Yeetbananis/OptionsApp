@@ -478,7 +478,7 @@ class OptionAnalyzerApp:
         # derive our colors from the current_theme
         bg       = "#0f0f0f" if self.current_theme == 'dark' else "#f0f0f0"
         fg       = "#ffffff" if self.current_theme == 'dark' else "#000000"
-        entry_bg = "#3c3c3c" if self.current_theme == 'dark' else "#ffffff"
+        entry_bg = "#3c3c3c" if self.current_theme == 'dark' else "#3b1f1f"
 
         # theme this container
         try:
@@ -2441,6 +2441,7 @@ class OptionAnalyzerApp:
        
 # --- Main Execution ---
 if __name__ == "__main__":
+
     # --- FIX: Add DPI Awareness setting at the entry point of the main app ---
     try:
         import ctypes

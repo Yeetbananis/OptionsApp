@@ -1196,11 +1196,22 @@ class HomeDashboard(ttk.Frame):
         display_tkr  = data.get("symbol", "N/A")
         bind_ticker  = context_ticker if context_ticker else display_tkr
 
-        change       = price - prev_close
-        pct_change   = (change / prev_close * 100) if prev_close else 0
+        # --- ROBUSTNESS FIX for VIX ---
+        # VIX data can sometimes return a previousClose of 0 or a near-zero number.
+        # If this happens, both the absolute and percentage change are meaningless.
+        # We will treat the change as 0 in this case to avoid misleading the user.
+        if prev_close and abs(prev_close) > 1e-9: # Check if prev_close is not None and not effectively zero
+            change = price - prev_close
+            pct_change = (change / prev_close) * 100
+        else:
+            # If prev_close is 0, None, or extremely small, the change is undefined.
+            # Displaying a change of 0 is the safest and least misleading representation.
+            change = 0.0
+            pct_change = 0.0
+
         sign         = "+" if change >= 0 else ""
         colour       = "green" if change >= 0 else "red"
-
+        
         # ── INVISIBLE hit-area (adds *vertical* padding only) ───────
         # 6 px extra top & bottom = far easier to hover while scrolling
         hitbox = ttk.Frame(parent, style="Hitbox.TFrame", padding=(0, 6))

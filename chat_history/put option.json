@@ -1,0 +1,88 @@
+[
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "price aapl"
+  },
+  {
+    "role": "bot",
+    "payload": "**Apple Inc. (AAPL)**\nPrice $229.35   \u0394 +9.32 (+4.24 %)  Vol 110,755,700"
+  },
+  {
+    "role": "user",
+    "payload": "chart aapl"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "unserializable"
+    }
+  },
+  {
+    "role": "user",
+    "payload": "chart aapl 5yr"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "unserializable"
+    }
+  },
+  {
+    "role": "user",
+    "payload": "chart aapl 5y"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "unserializable"
+    }
+  },
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "tokens"
+  },
+  {
+    "role": "bot",
+    "payload": "### AI Token Usage (Today)\n\n**Used:** 10,590 / 33,000 tokens\n**Usage:** 32.09%\n\nThe limit resets daily."
+  },
+  {
+    "role": "user",
+    "payload": "what is a put"
+  },
+  {
+    "role": "bot",
+    "payload": "A put option is a contract that grants the holder the right, but not the obligation, to sell an underlying asset at a specified price (the strike price) on or before a certain date (the expiration date).  Essentially, it's a bet that the price of the underlying asset will decline. Let's break down the key components and strategic uses:\n\n* **Underlying Asset:** This is the asset tied to the put option.  It can be a stock, index, commodity, currency, or other financial instrument. For example, if you buy a put option on Apple stock, Apple stock is the underlying asset.\n\n* **Strike Price:** The predetermined price at which the holder can sell the underlying asset. If you buy an Apple put option with a strike price of $150, you have the right to sell Apple stock at $150, regardless of its market price.\n\n* **Expiration Date:** The date on which the put option expires and becomes worthless if not exercised.  Options contracts have standardized expiration dates.\n\n* **Premium:** The price you pay to purchase the put option.  This is essentially the cost of insuring against a potential price drop in the underlying asset. The premium is influenced by several factors including the underlying asset's price volatility, time to expiration, and the difference between the current market price and the strike price.\n\n**Strategic Uses of Put Options:**\n\n* **Hedging:**  Investors use puts to protect against potential losses in their portfolio. For example, if you own Apple stock and are concerned about a potential price drop, buying a put option can limit your downside risk. If the price of Apple falls below the strike price, you can exercise the put and sell your shares at the strike price, mitigating your losses.\n\n* **Speculation:**  Traders use puts to profit from anticipated price declines. If you believe a stock's price will fall, you can buy a put option.  If the price does indeed drop below the strike price, the value of the put option increases, and you can sell it for a profit.\n\n* **Income Generation (Covered Puts):** If you have a bullish outlook on a stock but want to generate income, you can sell a put option (also known as writing a put). This obligates you to buy the stock at the strike price if the buyer chooses to exercise the option.  If the stock price stays above the strike price, the put option expires worthless, and you keep the premium as income. However, if the stock price falls below the strike price, you are obligated to buy the stock at the strike price.\n\n**Different Types of Put Options:**\n\n* **American Style:** Allows the holder to exercise the option at any time before the expiration date.\n* **European Style:** Allows the holder to exercise the option only on the expiration date.\n\nUnderstanding the nuances of put options is crucial for navigating complex market conditions.  Their flexibility allows for both risk management and profit generation strategies, making them a valuable tool for any investor.  To provide more specific advice, I would need to know what your investment goals are and what asset you are considering.  Are you looking to hedge existing positions, generate income, or speculate on price movements?  Providing this context will allow me to offer tailored recommendations.\n"
+  },
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "info aapl"
+  },
+  {
+    "role": "bot",
+    "payload": "### **Apple Inc. (AAPL)**\n**Sector:** Technology\n\n--- **Key Metrics** ---\n**Market Cap:** 3.40 T\n**P/E (trailing):** 34.86\n**P/E (forward):** 27.60\n**Price/Sales:** 8.33\n**PEG Ratio:** N/A\n\n--- **Stock Data** ---\n**Day Range:** $219.25 - $230.99\n**52-Week Range:** $169.21 - $260.10\n\n--- **Dividends & Profitability** ---\n**Dividend Yield:** 45.00%\n**Payout Ratio:** 15.33%\n**Profit Margin:** 24.30%\n\n--- **Business Summary** ---\nApple Inc. designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories worldwide. The company offers iPhone, a line of smartphones; Mac, a line of personal computers; iPad, a line of multi-purpose tablets; and wearables, home, and accessories comprising AirPods, Apple TV, Apple Watch, Beats products, and HomePod. It also provides AppleCare support and cloud services; and operates various platforms, including the App Store that allow customers to discover and download applications and digital content, such as books, music, video, games, and podcasts, as well as advertising services include third-party licensing arrangements and its own advertising platforms. In addition, the company offers various subscription-based services, such as Apple Arcade, a game subscription service; Apple Fitness+, a personalized fitness service; Apple Music, which offers users a curated listening experience with on-demand radio stations; Apple News+, a subscription news and magazine service; Apple TV+, which offers exclusive original content; Apple Card, a co-branded credit card; and Apple Pay, a cashless payment service, as well as licenses its intellectual property. The company serves consumers, and small and mid-sized businesses; and the education, enterprise, and government markets. It distributes third-party applications for its products through the App Store. The company also sells its products through its retail and online stores, and direct sales force; and third-party cellular network carriers, wholesalers, retailers, and resellers. Apple Inc. was founded in 1976 and is headquartered in Cupertino, California."
+  }
+]

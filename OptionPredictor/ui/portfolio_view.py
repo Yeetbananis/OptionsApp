@@ -132,6 +132,7 @@ class PortfolioApp(tk.Tk):
 
         # --- Data Storage ---
         self.portfolio = {"positions": [], "goals": []}
+        self.view_cache = {}
         self.tax_sim_entries = {}
         self.market_data_cache = {}
         self.analysis_data = {} 
@@ -168,18 +169,30 @@ class PortfolioApp(tk.Tk):
         self.chart_hover_text = None
         self.warning_icon = None
 
-        self.fig_dash, self.ax_dash = plt.subplots()
-        self.fig_pie, self.ax_pie = plt.subplots()
-        # This is the key change: self.fig_factors is now self.radar_fig_analysis
-        self.radar_fig_analysis, self.radar_ax_analysis = plt.subplots()
-        self.fig_risk, self.ax_risk = plt.subplots()
-        self.fig_corr, self.ax_corr = plt.subplots()
-        self.fig_attr, self.ax_attr = plt.subplots()
-        self.fig_stress, self.ax_stress = plt.subplots()
-        self.fig_interactive, self.ax_interactive = plt.subplots()
-        self.fig_breakdown, self.ax_breakdown = plt.subplots()
-        self.fig_dist, self.ax_dist = plt.subplots()
-        self.radar_fig_dash, self.radar_ax_dash = plt.subplots() # For the dashboard radar
+        # --- FIX: Get screen DPI for consistent chart scaling ---
+        try:
+            self.dpi = self.winfo_fpixels('1i')
+        except tk.TclError:
+            self.dpi = 96 
+
+        # --- Create all figures with synchronized DPI and explicit padding ---
+        self.fig_dash, self.ax_dash = plt.subplots(dpi=self.dpi)
+        self.fig_dash.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.18)
+        
+        self.fig_pie, self.ax_pie = plt.subplots(dpi=self.dpi)
+        self.radar_fig_analysis, self.radar_ax_analysis = plt.subplots(dpi=self.dpi)
+        self.fig_risk, self.ax_risk = plt.subplots(dpi=self.dpi)
+        self.fig_corr, self.ax_corr = plt.subplots(dpi=self.dpi)
+        self.fig_attr, self.ax_attr = plt.subplots(dpi=self.dpi)
+        
+        self.fig_stress, self.ax_stress = plt.subplots(dpi=self.dpi)
+        # This pre-allocates space for the Stress Test's two-line title.
+        self.fig_stress.subplots_adjust(left=0.1, right=0.98, top=0.88, bottom=0.15)
+
+        self.fig_interactive, self.ax_interactive = plt.subplots(dpi=self.dpi)
+        self.fig_breakdown, self.ax_breakdown = plt.subplots(dpi=self.dpi)
+        self.fig_dist, self.ax_dist = plt.subplots(dpi=self.dpi)
+        self.radar_fig_dash, self.radar_ax_dash = plt.subplots(dpi=self.dpi)
 
 
         # --- Build UI ---
@@ -366,68 +379,48 @@ class PortfolioApp(tk.Tk):
 
     def show_view(self, view_key):
         """
-        REWRITTEN: Switches views and cleans up all Matplotlib figures AND their
-        associated annotation objects from the old view before destroying it. This
-        is the foolproof fix to prevent state corruption and tooltip failures by
-        eliminating "dangling references" to destroyed objects.
+        REWRITTEN: Switches views using a caching mechanism to prevent layout
+        instability. The view is built only once and then hidden/shown,
+        preserving the layout perfectly.
         """
-        # --- 1. Clean up resources from the PREVIOUS view ---
-        if self.active_view_key:
-            # Clean up Dashboard-specific resources
-            if self.active_view_key == "dashboard":
-                if self.fig_dash: plt.close(self.fig_dash)
-                if self.fig_pie: plt.close(self.fig_pie)
-                if self.radar_fig_dash: plt.close(self.radar_fig_dash)
-                # THIS IS THE CRITICAL FIX: Reset the dangling reference
-                self.radar_annot_dash = None
-
-            # Clean up Analysis-specific resources
-            elif self.active_view_key == "analysis":
-                if self.radar_fig_analysis: plt.close(self.radar_fig_analysis)
-                if self.fig_risk: plt.close(self.fig_risk)
-                if self.fig_corr: plt.close(self.fig_corr)
-                if self.fig_attr: plt.close(self.fig_attr)
-                if self.fig_stress: plt.close(self.fig_stress)
-                # THIS IS THE CRITICAL FIX: Reset the dangling reference
-                self.radar_annot_analysis = None
-
-            # Clean up Goals-specific resources
-            elif self.active_view_key == "goals":
-                if self.fig_interactive: plt.close(self.fig_interactive)
-                if self.fig_breakdown: plt.close(self.fig_breakdown)
-                if self.fig_dist: plt.close(self.fig_dist)
-
-        # --- 2. Destroy the old Tkinter view frame ---
+        # --- 1. Hide the currently active view (if one exists) ---
         if hasattr(self, 'active_view') and self.active_view:
-            try:
-                self.active_view.destroy()
-            except TclError:
-                pass # Can happen on shutdown, safe to ignore.
+            self.active_view.grid_forget()
 
         self.active_view_key = view_key
 
-        # --- 3. Update the sidebar UI ---
+        # --- 2. Update the sidebar UI to highlight the correct button ---
         for key, btn in self.sidebar_buttons.items():
             is_active = key == view_key
-            btn["frame"].configure(style="TFrame" if is_active else "Sidebar.TFrame")
+            # Use a simpler background color change for the active frame
+            btn["frame"].configure(style="Card.TFrame" if is_active else "Sidebar.TFrame")
             btn["text"].configure(foreground=self.TEXT_COLOR if is_active else self.SECONDARY_TEXT)
             btn["icon"].configure(foreground=self.TEXT_COLOR if is_active else self.SECONDARY_TEXT)
             if is_active:
-                btn["indicator"].pack(side="left", fill="y")
+                btn["indicator"].pack(side="left", fill="y", before=btn["icon"])
             else:
                 btn["indicator"].pack_forget()
 
-        # --- 4. Build the NEW view ---
-        views = {
-            "dashboard": self._build_dashboard_view,
-            "goals": self._build_goals_view,
-            "analysis": self._build_analysis_view,
-            "tax": self._build_tax_view
-        }
-        self.active_view = views[view_key](self.content_frame)
-        self.active_view.grid(row=0, column=0, sticky="nsew")
+        # --- 3. Show the new view, building it only if it's not in the cache ---
+        if view_key in self.view_cache:
+            self.active_view = self.view_cache[view_key]
+            self.active_view.grid(row=0, column=0, sticky="nsew")
+        else:
+            # If view is not cached, build it for the first time
+            views = {
+                "dashboard": self._build_dashboard_view,
+                "goals": self._build_goals_view,
+                "analysis": self._build_analysis_view,
+                "tax": self._build_tax_view
+            }
+            # Create the new view and store it in the cache
+            new_view = views[view_key](self.content_frame)
+            self.view_cache[view_key] = new_view
+            self.active_view = new_view
+            self.active_view.grid(row=0, column=0, sticky="nsew")
 
-        # --- 5. Trigger an update for the newly created view ---
+        # --- 4. Trigger a data refresh for the now-visible view ---
+        # This ensures the data is current without rebuilding the layout.
         self.after(50, self._update_all_views)
 
     # --- View Builders ---
@@ -1228,7 +1221,7 @@ class PortfolioApp(tk.Tk):
             text.set_color(self.TEXT_COLOR)
 
         self.ax_stress.grid(True, linestyle='--', alpha=0.5)
-        self.fig_stress.tight_layout(rect=[0, 0, 1, 0.9])
+        #self.fig_stress.tight_layout(rect=[0, 0, 1, 0.9])
         self.canvas_stress.draw()
 
     def _update_analysis_view_data(self):
@@ -2168,7 +2161,7 @@ class PortfolioApp(tk.Tk):
         self.ax_dash.tick_params(axis='x', rotation=0, labelsize=9)
         self.ax_dash.tick_params(axis='y', labelsize=9)
         self.ax_dash.grid(axis='y', linestyle='--', color=self.BORDER_COLOR, alpha=0.5)
-        self.fig_dash.tight_layout(pad=2.0)
+        # self.fig_dash.tight_layout(pad=2.0) # REMOVED THIS LINE
         self.canvas_dash.draw()
 
     def _plot_allocation_bars(self):
