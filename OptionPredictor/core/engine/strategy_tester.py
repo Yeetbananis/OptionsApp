@@ -422,7 +422,7 @@ class StrategyTesterWindow:
         main_pane.add(results_pane, stretch="always")
 
         self.win.update_idletasks()
-        main_pane.sash_place(0, 0, 250)
+        main_pane.sash_place(0, 0, 275)
 
         left_frame = ttk.Frame(results_pane, padding=10)
         results_pane.add(left_frame, stretch="always")

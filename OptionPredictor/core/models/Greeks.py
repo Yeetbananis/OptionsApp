@@ -15,6 +15,7 @@ class Greeks:
         self.K = self.S0  # or actual strike input
         self.r = 0.04
         self.sigma = 0.25
+        self._canvases = []
 
 
 
@@ -39,7 +40,7 @@ class Greeks:
         self.win.title("Greek Sensitivity Analysis")
         self.win.geometry("1100x800")
 
-        self.bg_color = "#1e1e1e" if self.dark_mode else "#f0f0f0"
+        self.bg_color = "#000000" if self.dark_mode else "#f0f0f0"
         self.fg_color = "#f0f0f0" if self.dark_mode else "#000000"
 
         self.win.configure(bg=self.bg_color)
@@ -65,18 +66,41 @@ class Greeks:
         frame = ttk.Frame(self.notebook)
         self.notebook.add(frame, text="📚 2nd Order Breakdown")
 
-        canvas = tk.Canvas(frame)
+        # Match colors to theme
+        bg = self.bg_color
+        fg = self.fg_color
+
+        # Scrollable canvas setup
+        canvas = tk.Canvas(frame, bg=bg, highlightthickness=0, bd=0)
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        scroll_frame = ttk.Frame(canvas)
 
-        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        scroll_frame = ttk.Frame(canvas, style="TFrame")
 
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Force scroll_frame width to match canvas width
+            canvas.itemconfig(window_id, width=canvas.winfo_width())
+
+        window_id = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        # Force an initial update so content renders immediately
+        frame.update_idletasks()
+        canvas.configure(scrollregion=canvas.bbox("all"))
+        canvas.itemconfig(window_id, width=canvas.winfo_width())
+
+        scroll_frame.bind("<Configure>", _on_frame_configure)
+
         canvas.configure(yscrollcommand=scrollbar.set)
-
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        # === Two-column layout ===
+        left_col = ttk.Frame(scroll_frame, style="TFrame")
+        right_col = ttk.Frame(scroll_frame, style="TFrame")
+
+        left_col.pack(side="left", fill="both", expand=True, padx=20, pady=10)
+        right_col.pack(side="left", fill="both", expand=True, padx=20, pady=10)
+
+        # All your sections
         sections = {
             "Charm (Delta Decay)": (
                 "Charm measures how Delta (your sensitivity to stock price) changes as time passes. It's especially relevant near expiry when Delta changes more rapidly.",
@@ -141,16 +165,36 @@ class Greeks:
                 "Who uses it: Retail directional traders, leverage funds, options screeners.",
                 "📈 Analogy:\nLambda = turbo boost\nIf stock rises, your option rises faster — like putting your trade on steroids."
             )
-            
         }
 
-        for title, (desc, example, use_case, who_uses, analogy) in sections.items():
-            ttk.Label(scroll_frame, text=title, font=("Helvetica", 14, "bold"), foreground="#004488").pack(anchor='w', pady=(20, 5), padx=10)
-            ttk.Label(scroll_frame, text=desc, wraplength=980, justify="left").pack(anchor='w', padx=20)
-            ttk.Label(scroll_frame, text=example, wraplength=980, justify="left", foreground="gray").pack(anchor='w', padx=20, pady=(3, 5))
-            ttk.Label(scroll_frame, text=use_case, wraplength=980, justify="left", foreground="gray").pack(anchor='w', padx=20, pady=(0, 3))
-            ttk.Label(scroll_frame, text=who_uses, wraplength=980, justify="left", foreground="gray").pack(anchor='w', padx=20, pady=(0, 5))
-            ttk.Label(scroll_frame, text=analogy, wraplength=980, justify="left", foreground="#336699", font=("Helvetica", 9, "italic")).pack(anchor='w', padx=20, pady=(0, 15))
+        # Alternate sections left/right
+        for i, (title, (desc, example, use_case, who_uses, analogy)) in enumerate(sections.items()):
+            target_col = left_col if i % 2 == 0 else right_col
+            ttk.Label(target_col, text=title, font=("Helvetica", 14, "bold"), foreground="#004488").pack(anchor='w', pady=(20, 5))
+            ttk.Label(target_col, text=desc, wraplength=450, justify="left").pack(anchor='w', padx=10)
+            ttk.Label(target_col, text=example, wraplength=450, justify="left", foreground="gray").pack(anchor='w', padx=10, pady=(3, 5))
+            ttk.Label(target_col, text=use_case, wraplength=450, justify="left", foreground="gray").pack(anchor='w', padx=10, pady=(0, 3))
+            ttk.Label(target_col, text=who_uses, wraplength=450, justify="left", foreground="gray").pack(anchor='w', padx=10, pady=(0, 5))
+            ttk.Label(target_col, text=analogy, wraplength=450, justify="left", foreground="#336699", font=("Helvetica", 9, "italic")).pack(anchor='w', padx=10, pady=(0, 15))
+            
+                # --- Force redraw when this tab is selected ---
+        def _on_tab_changed(event, frame=frame, canvas=canvas, window_id=window_id):
+            current = event.widget.nametowidget(event.widget.select())
+            if current is frame:
+                try:
+                    w = frame.winfo_width() or frame.winfo_reqwidth()
+                    h = frame.winfo_height() or frame.winfo_reqheight()
+                    canvas.itemconfig(window_id, width=w)
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                    canvas.update_idletasks()
+                except Exception:
+                    pass
+
+        # bind only once for this notebook
+        if not hasattr(self, "_second_order_tab_bound"):
+            self.notebook.bind("<<NotebookTabChanged>>", _on_tab_changed)
+            self._second_order_tab_bound = True
+
 
 
     def create_risk_tab(self):
@@ -229,17 +273,38 @@ class Greeks:
     
 
 
+  
+
+
+    # Replace your create_greek_charts with this implementation:
     def create_greek_charts(self):
-        if self.dark_mode:
-            plt.style.use('dark_background')
-        else:
-            plt.style.use('default')
+        from matplotlib.figure import Figure
 
-        for greek in ['delta', 'gamma', 'vega', 'theta', 'rho']:
-            fig, axs = plt.subplots(1, 2, figsize=(10, 4))
+        # local colors based on theme (explicit, avoids global rc changes)
+        bg = "#1e1e1e" if self.dark_mode else "#ffffff"
+        fg = "#f0f0f0" if self.dark_mode else "#000000"
 
+        # helper to style each Axes so theme is always correct
+        def _style_axes(ax):
+            ax.set_facecolor(bg)
+            ax.title.set_color(fg)
+            ax.xaxis.label.set_color(fg)
+            ax.yaxis.label.set_color(fg)
+            ax.tick_params(colors=fg)
+            for spine in ax.spines.values():
+                spine.set_color(fg)
+
+        # Greek list
+        greeks = ['delta', 'gamma', 'vega', 'theta', 'rho']
+
+        for greek in greeks:
+            # Create a Figure object (not pyplot) — isolate from global state
+            fig = Figure(figsize=(10, 4), dpi=100, facecolor=bg)
+            axs = fig.subplots(1, 2)
+
+            # prepare data
             x_price = np.linspace(self.S0 * 0.8, self.S0 * 1.2, 100)
-            x_time = np.linspace(1, self.T * 365, 100)
+            x_time = np.linspace(1, max(1, int(self.T * 365)), 100)
             base_val = self.greek_inputs.get(greek, 0)
 
             if greek == 'delta':
@@ -256,12 +321,12 @@ class Greeks:
             elif greek == 'vega':
                 y_time = base_val * np.exp(-x_time / 100)
             elif greek == 'gamma':
-                decay_constant = 50  # or make it adjustable
+                decay_constant = 50
                 y_time = base_val * np.exp(-x_time / decay_constant)
             else:
                 y_time = np.full_like(x_time, base_val)
 
-
+            # draw
             axs[0].plot(x_price, y_price)
             axs[0].set_title(f"{greek.capitalize()} vs Price")
             axs[0].set_xlabel("Stock Price")
@@ -274,12 +339,84 @@ class Greeks:
             axs[1].set_ylabel(greek.capitalize())
             axs[1].grid(True)
 
+            # style axes explicitly
+            _style_axes(axs[0])
+            _style_axes(axs[1])
+
+            # tighten layout once (will be refined on resize)
+            fig.tight_layout()
+
+            # create the tab/frame and attach FigureCanvasTkAgg
             chart_frame = ttk.Frame(self.notebook)
-            self.notebook.add(chart_frame, text=f"\ud83d\udcc8 {greek.capitalize()} Chart")
+            self.notebook.add(chart_frame, text=f"📊 {greek.capitalize()} Chart")
 
             canvas = FigureCanvasTkAgg(fig, master=chart_frame)
-            canvas.draw()
-            canvas.get_tk_widget().pack(expand=True, fill=tk.BOTH)
+            widget = canvas.get_tk_widget()
+            widget.pack(expand=True, fill=tk.BOTH)
+
+            # debounce redraw when frame resizes so matplotlib computes bounding box correctly
+            last_after = {"id": None}
+            def _on_config(e, c=canvas, f=fig, frame=chart_frame):
+                # throttle frequent configure events
+                if last_after["id"]:
+                    try:
+                        frame.after_cancel(last_after["id"])
+                    except Exception:
+                        pass
+                def _do_resize_and_draw():
+                    try:
+                        w = frame.winfo_width() or frame.winfo_reqwidth()
+                        h = frame.winfo_height() or frame.winfo_reqheight()
+                        dpi = f.get_dpi()
+                        # set figure size to match widget size (in inches)
+                        f.set_size_inches(max(0.1, w / dpi), max(0.1, h / dpi))
+                        f.tight_layout()
+                        c.draw_idle()
+                        c.get_tk_widget().update_idletasks()
+                    except Exception:
+                        pass
+                last_after["id"] = frame.after(60, _do_resize_and_draw)
+
+            chart_frame.bind("<Configure>", _on_config)
+
+            # store for tab-change redraw
+            self._canvases.append((chart_frame, canvas, fig))
+
+        # ensure the notebook tab-change handler is bound once
+        try:
+            # bind only once
+            if not getattr(self, "_notebook_tab_bound", False):
+                self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+                self._notebook_tab_bound = True
+        except Exception:
+            pass
+
+
+    # Add this helper method (inside the class)
+    def _on_tab_changed(self, event):
+        """
+        When user switches tabs, force the active tab's canvas/figure to resize and redraw.
+        This resolves the common Matplotlib-on-Notebook cropping problem.
+        """
+        try:
+            current_frame = event.widget.nametowidget(event.widget.select())
+        except Exception:
+            current_frame = None
+
+        for frame, canvas, fig in getattr(self, "_canvases", []):
+            if frame is current_frame:
+                try:
+                    w = frame.winfo_width() or frame.winfo_reqwidth()
+                    h = frame.winfo_height() or frame.winfo_reqheight()
+                    dpi = fig.get_dpi()
+                    fig.set_size_inches(max(0.1, w / dpi), max(0.1, h / dpi))
+                    fig.tight_layout()
+                    canvas.draw_idle()
+                    canvas.get_tk_widget().update_idletasks()
+                except Exception:
+                    pass
+
+
 
     def create_multi_greek_plot(self):
         if self.dark_mode:

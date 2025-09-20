@@ -554,6 +554,40 @@ class YfinanceEarningsProvider(DataProvider):
             import traceback
             traceback.print_exc()
             return None
+        
+class RedditProvider(DataProvider):
+    """
+    Fetches the top mentioned tickers from buzztickr.com/reddit.html.
+    """
+    @lru_cache(maxsize=1) # Cache the result for the duration of a run
+    def fetch(self, symbol: str = "all", **kwargs) -> Dict[str, int]:
+        try:
+            url = "https://buzztickr.com/reddit.html"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, "html.parser")
+            
+            table = soup.find("table")
+            if not table:
+                return {}
+
+            mentions = {}
+            rows = table.find_all("tr")
+            for row in rows[1:]: # Skip header row
+                cols = row.find_all("td")
+                if len(cols) >= 5:
+                    ticker = cols[1].text.strip()
+                    # Use "Posts" and "Comments" for a total score
+                    posts = int(cols[3].text.strip())
+                    comments = int(cols[4].text.strip())
+                    total_mentions = posts + comments
+                    if ticker:
+                        mentions[ticker] = total_mentions
+            return mentions
+        except Exception as e:
+            print(f"Error fetching Reddit mentions: {e}")
+            return {}
+
 
 
 # =============================================================
@@ -1108,6 +1142,7 @@ class ProviderHub:
     _earnings = YfinanceEarningsProvider()
     _macro = HardcodedMacroProvider()
     _fundamental = FundamentalDataProvider(_price)
+    _reddit = RedditProvider()
     # Instantiate new provider with your Finnhub key
     _insider = InsiderTransactionsProvider(api_key="d114k6hr01qse6lf8c1gd114k6hr01qse6lf8c20")
 
@@ -1178,13 +1213,21 @@ class ProviderHub:
             "momentum": cls._momentum.fetch,
             "earnings": cls._earnings.fetch,
             "fundamental": cls._fundamental.fetch,
-            "insider": cls._insider.fetch
+            "insider": cls._insider.fetch,
+            "reddit": cls._reddit.fetch 
         }
         
         raw_data = {}
         for key, fetch_func in providers_to_fetch.items():
             try:
-                raw_data[key] = fetch_func(symbol)
+                # For reddit, we want to fetch all symbols at once.
+                if key == 'reddit':
+                    # RedditProvider fetches all tickers, so we can pass any symbol
+                    # and it will return the full dictionary.
+                    all_mentions = fetch_func("all")
+                    raw_data[key] = {"mentions": all_mentions.get(symbol, 0)}
+                else:
+                    raw_data[key] = fetch_func(symbol)
             except Exception as e:
                 print(f"Error fetching {key} data for {symbol}: {e}")
                 raw_data[key] = {} # Ensure it's an empty dict on failure
@@ -1203,6 +1246,7 @@ class ProviderHub:
         data.update(MomentumAdapter.adapt(raw_data.get("momentum", {})))
         data.update(EarningsAdapter.adapt(raw_data.get("earnings", {})))
         data.update(FundamentalAdapter.adapt(raw_data.get("fundamental", {})))
+        data.update(RedditAdapter.adapt(raw_data.get("reddit", {})))
         # A simple pass-through for insider data
         data["insider_transactions"] = raw_data.get("insider", [])
 

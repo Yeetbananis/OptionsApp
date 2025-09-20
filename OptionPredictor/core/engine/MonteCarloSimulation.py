@@ -982,8 +982,9 @@ def generate_volatility_surface_data(S0, K, T, base_sigma, price_steps=30, time_
 
 def plot_profit_heatmap(parent_window, prices, times, profit_m, percent_m, day_lbls, price_lbls, premium,
                         option_type, strike, title="Profit/Loss Heatmap", chance_of_profit=None, dark_mode=False):
-    """Plots the Profit/Loss heatmap with toggles, metrics, full screen, and contract multiplier."""
+    """Plots the Profit/Loss heatmap with a fixed-layout to prevent resizing on updates."""
     import matplotlib.pyplot as plt
+    from matplotlib.figure import Figure
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     import seaborn as sns
     import tkinter as tk
@@ -993,56 +994,100 @@ def plot_profit_heatmap(parent_window, prices, times, profit_m, percent_m, day_l
     bg_color = "#1e1e1e" if dark_mode else "#f0f0f0"
     fg_color = "#ffffff" if dark_mode else "#000000"
 
-    if dark_mode:
-        plt.style.use('dark_background')
-    else:
-        plt.style.use('default')
-
     root_window = parent_window.winfo_toplevel()
-    frame = tk.Frame(parent_window, bg=bg_color)
-    frame.pack(fill=tk.BOTH, expand=True)
+    main_container = tk.Frame(parent_window, bg=bg_color)
+    main_container.pack(fill=tk.BOTH, expand=True)
 
     contract_multiplier = tk.DoubleVar(value=1.0)
-    view_state = {"view": "dollar", "canvas": None, "fig": None, "fullscreen": False}
+    view_state = {"view": "dollar", "fullscreen": False}
+
+    # --- robust formatter ---
+    def _format_number(val, mode):
+        if np.isnan(val): return ""
+        # Updated "percent" mode to handle large numbers
+        if mode == "percent":
+            absval = abs(val)
+            if absval >= 1_000_000:
+                return f"{val/1_000_000:.1f}M%"
+            if absval >= 1_000:
+                return f"{val/1_000:.1f}k%"
+            return f"{val:.1f}%"
+        
+        # Dollar formatting remains the same
+        absval = abs(val)
+        if absval >= 1e9: return f"{val/1e9:.1f}B"
+        elif absval >= 1e6: return f"{val/1e6:.1f}M"
+        elif absval >= 1e3: return f"{val/1e3:.0f}K"
+        else: return f"{val:.0f}"
+
+    # --- UI Controls (Top section) ---
+    controls_container = tk.Frame(main_container, bg=bg_color)
+    controls_container.pack(fill=tk.X, pady=(10, 5))
+    input_row = tk.Frame(controls_container, bg=bg_color)
+    input_row.pack(side=tk.LEFT, padx=10)
+    tk.Label(input_row, text="Contracts:", bg=bg_color, fg=fg_color).pack(side=tk.LEFT, padx=(0,5))
+    entry = ttk.Entry(input_row, textvariable=contract_multiplier, width=7)
+    entry.pack(side=tk.LEFT)
+    metrics_frame = tk.Frame(controls_container, bg=bg_color)
+    metrics_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+    button_frame = tk.Frame(controls_container, bg=bg_color)
+    button_frame.pack(side=tk.RIGHT, padx=10)
+    toggle_btn = ttk.Button(button_frame, text="Switch to % View", command=lambda: toggle_view())
+    toggle_btn.pack(side=tk.LEFT, padx=5)
+    fullscreen_btn = ttk.Button(button_frame, text="Full Screen", command=lambda: toggle_fullscreen())
+    fullscreen_btn.pack(side=tk.LEFT, padx=5)
+
+    # --- PLOT AREA (Middle section) ---
+    plot_area_frame = tk.Frame(main_container, bg=bg_color)
+    plot_area_frame.pack(fill=tk.BOTH, expand=True)
+
+    # --- CREATE FIGURE AND AXES WITH A FIXED LAYOUT USING GRIDSPEC ---
+    fig = Figure(facecolor=bg_color)
+    # Create a grid: 94% for the plot, 6% for the color bar, with a small space
+    gs = fig.add_gridspec(1, 2, width_ratios=[18, 1], wspace=0.12, left=0.1, right=0.9)
+    ax = fig.add_subplot(gs[0, 0])
+    cbar_ax = fig.add_subplot(gs[0, 1])
+
+    canvas = FigureCanvasTkAgg(fig, master=plot_area_frame)
+    widget = canvas.get_tk_widget()
+    widget.pack(fill=tk.BOTH, expand=True)
 
     def update_heatmap():
-        if view_state["canvas"]:
-            view_state["canvas"].get_tk_widget().destroy()
+        ax.clear()
+        cbar_ax.clear()
 
-        fig, ax = plt.subplots(figsize=(10, 8))
-
+        # --- Data calculation (unchanged) ---
         multiplier = contract_multiplier.get() * 100
-        
-        # Ensure profit data is a numpy array before multiplication
         safe_profit_m = np.array(profit_m)
         safe_percent_m = np.array(percent_m)
-        
         data = safe_profit_m * multiplier if view_state["view"] == "dollar" else safe_percent_m
         label = 'Profit ($)' if view_state["view"] == "dollar" else 'Profit (%)'
-        fmt = ".2f" if view_state["view"] == "dollar" else ".1f"
-
         if view_state["view"] == "dollar":
             vmin, vmax = -premium * multiplier, np.nanmax(data)
         else:
             vmin, vmax = -100.0, np.nanmax(data)
+        annot_data = np.vectorize(lambda v: _format_number(v, view_state["view"]))(data)
 
-        sns.heatmap(data, cmap='RdYlGn', ax=ax, annot=True, fmt=fmt,
-                    xticklabels=price_lbls, yticklabels=day_lbls,
-                    linewidths=0.5, linecolor='black',
-                    cbar_kws={'label': label}, vmin=vmin, vmax=vmax)
+        # --- Draw heatmap on the pre-defined axes ---
+        sns.heatmap(
+            data, ax=ax, cbar=True, cbar_ax=cbar_ax,
+            cmap='RdYlGn', annot=annot_data, fmt='',
+            xticklabels=price_lbls, yticklabels=day_lbls,
+            linewidths=0.5, linecolor='black' if not dark_mode else '#444',
+            cbar_kws={'label': label}, vmin=vmin, vmax=vmax
+        )
 
-        ax.set_title(f"{option_type.capitalize()} Option Profitability | Strike=${strike:.2f}")
-        ax.set_xlabel("Underlying Price")
-        ax.set_ylabel("Days Remaining")
-        ax.tick_params(axis='x', rotation=45, labelsize='small')
-        ax.tick_params(axis='y', labelsize='small')
-
-        fig.tight_layout()
-        canvas = FigureCanvasTkAgg(fig, master=frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        view_state["canvas"] = canvas
-        view_state["fig"] = fig
+        # --- Re-apply formatting ---
+        ax.set_facecolor(bg_color)
+        ax.set_title(f"{option_type.capitalize()} Option Profitability | Strike=${strike:.2f}", color=fg_color)
+        ax.set_xlabel("Underlying Price", color=fg_color)
+        ax.set_ylabel("Days Remaining", color=fg_color)
+        ax.tick_params(axis='x', rotation=45, labelsize='small', colors=fg_color)
+        ax.tick_params(axis='y', labelsize='small', colors=fg_color)
+        cbar_ax.yaxis.label.set_color(fg_color)
+        cbar_ax.tick_params(colors=fg_color)
+        
+        canvas.draw_idle()
 
     def toggle_view():
         view_state["view"] = "percent" if view_state["view"] == "dollar" else "dollar"
@@ -1058,58 +1103,29 @@ def plot_profit_heatmap(parent_window, prices, times, profit_m, percent_m, day_l
         update_heatmap()
         update_metrics()
 
-    def update_metrics():
-        for widget in metrics_frame.winfo_children():
-            widget.destroy()
-
-        contracts = contract_multiplier.get()
-        multiplier = contracts * 100
-
-        net_debit = premium * multiplier
-        max_loss = net_debit
-        max_profit = "Infinite"
-        breakeven_price = strike + premium if option_type == 'call' else strike - premium
-        breakeven_text = f"Above ${breakeven_price:.2f}" if option_type == 'call' else f"Below ${breakeven_price:.2f}"
-
-        prob_text = f"{chance_of_profit*100:.1f}%" if isinstance(chance_of_profit, (float, int)) else "--%"
-
-        metrics = [
-            ("CONTRACTS:", f"{contracts:.2f}"),
-            ("NET DEBIT:", f"${net_debit:.2f}  (${premium:.2f} × {int(multiplier)} shares)"),
-            ("MAX LOSS:", f"${max_loss:.2f}"),
-            ("MAX PROFIT:", max_profit),
-            ("CHANCE OF PROFIT:", prob_text),
-            ("BREAKEVEN:", breakeven_text)
-        ]
-
-        for label, value in metrics:
-            row = tk.Frame(metrics_frame)
-            row.pack(side=tk.LEFT, padx=10)
-            tk.Label(row, text=label, font=("Helvetica", 10, "bold"), anchor="w").pack()
-            tk.Label(row, text=value, font=("Helvetica", 10), anchor="w").pack()
-
-    # --- Metrics + Input ---
-    input_row = tk.Frame(frame)
-    input_row.pack(pady=(10, 5))
-
-    tk.Label(input_row, text="Contracts (can be fractional): ").pack(side=tk.LEFT)
-    entry = ttk.Entry(input_row, textvariable=contract_multiplier, width=7)
-    entry.pack(side=tk.LEFT)
     entry.bind("<Return>", apply_contracts)
 
-    metrics_frame = tk.Frame(frame)
-    metrics_frame.pack(pady=5)
+    def update_metrics():
+        for widget in metrics_frame.winfo_children(): widget.destroy()
+        contracts = contract_multiplier.get()
+        multiplier = contracts * 100
+        net_debit = premium * multiplier
+        max_loss = net_debit
+        max_profit = "Infinite" if option_type == 'call' else f"${(strike * multiplier) - net_debit:.2f}"
+        breakeven_price = strike + premium if option_type == 'call' else strike - premium
+        breakeven_text = f"Above ${breakeven_price:.2f}" if option_type == 'call' else f"Below ${breakeven_price:.2f}"
+        prob_text = f"{chance_of_profit*100:.1f}%" if isinstance(chance_of_profit, (float, int)) else "--%"
+        metrics = [("CONTRACTS:", f"{contracts:.2f}"), ("NET DEBIT:", f"${net_debit:.2f}"),
+                   ("MAX LOSS:", f"${max_loss:.2f}"), ("MAX PROFIT:", max_profit), ("BREAKEVEN:", breakeven_text)]
+        if chance_of_profit is not None:
+             metrics.insert(4, ("CHANCE OF PROFIT:", prob_text))
+        for label, value in metrics:
+            row = tk.Frame(metrics_frame, bg=bg_color)
+            row.pack(side=tk.LEFT, padx=10, fill='y')
+            tk.Label(row, text=label, font=("Helvetica", 9, "bold"), anchor="w", bg=bg_color, fg=fg_color).pack(anchor='w')
+            tk.Label(row, text=value, font=("Helvetica", 9), anchor="w", bg=bg_color, fg=fg_color).pack(anchor='w')
 
-    # --- Button Frame ---
-    button_frame = tk.Frame(frame)
-    button_frame.pack(pady=5)
-
-    toggle_btn = ttk.Button(button_frame, text="Switch to % View", command=toggle_view)
-    toggle_btn.pack(side=tk.LEFT, padx=5)
-
-    fullscreen_btn = ttk.Button(button_frame, text="Full Screen", command=toggle_fullscreen)
-    fullscreen_btn.pack(side=tk.LEFT, padx=5)
-
+    # --- Initial Calls ---
     update_metrics()
     update_heatmap()
 

@@ -622,7 +622,7 @@ class FinancialChatbotApp(ctk.CTk):
 
     def _configure_ai(self):
         try:
-            api_key = "AIzaSyAt67ZI4vacvCacjzFbrXoeIsKTG__qaCI" #os.getenv("GOOGLE_API_KEY")
+            api_key = "AIzaSyBdDbT1I_kfLQ_-I85E2qx2BvwyV2-PHqY" #os.getenv("GOOGLE_API_KEY")
             if not api_key:
                 print("WARNING: GOOGLE_API_KEY not set. AI fallback will be disabled.")
                 return

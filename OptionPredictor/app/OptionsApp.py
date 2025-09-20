@@ -1,3 +1,7 @@
+#!!! FIXES: STRAT BUILDER -> CLEANER MONTE CARLO SIMULATION GRAPH, FIX GREEK GRAPH IMAGES OUTPUT, DTE LOGIC FOR OPTIONS (NONE CURRENTLY)
+#!!! STRATTESTER -> FIX THE PERFORMANCE SUMMARY FULLSCREEN CHART (CUTOFF)
+
+
 # =========================
 # Standard Library Imports
 # =========================
@@ -1159,132 +1163,125 @@ class OptionAnalyzerApp:
        
                     
     def open_input_window(self):
-        """Opens a Toplevel window for user inputs."""
-
-        tooltips = {
-            "Ticker": "The stock symbol (e.g., AAPL for Apple).",
-            "Current Price (S0)": "The stock's price right now, in dollars.",
-            "Barrier Price (H)": "Your target price or safety level to watch.",
-            "Implied Volatility": "How much the market expects the stock to move.",
-            "Risk-Free Rate": "A baseline interest rate, like from treasury bonds.",
-            "Days to Expiry": "How many days left before the option expires.",
-            "Strike Price (K)": "The price at which you can buy or sell the stock.",
-            "Option Type": "'Call' if you're betting it goes up, 'Put' if down.",
-            "Paths to Display": "How many simulated price paths to visualize (1–500)."
-        }
+        """Opens a Toplevel window for user inputs with an improved, cleaner layout."""
 
         if self.is_loading:
             messagebox.showwarning("Busy", "Analysis is already in progress.", parent=self.root)
             return
 
-
         input_win = tk.Toplevel(self.root)
-        input_win.title("Input Parameters")
-        input_win.geometry("760x900")
+        input_win.title("Input Parameters for Analysis")
+        input_win.geometry("550x750") # Adjusted size for new layout
+        input_win.minsize(500, 600)
         input_win.transient(self.root)
-
         self.apply_theme_to_window(input_win)
 
-        # Create canvas + scrollbar wrapper
-        canvas = tk.Canvas(input_win, borderwidth=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(input_win, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # --- 1. Main Layout: Action Bar (Bottom) and Scroll Area (Top) ---
+        
+        # Action Bar (fixed at the bottom)
+        action_frame = ttk.Frame(input_win, padding=(15, 12))
+        action_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        action_frame.columnconfigure(0, weight=1) # Center the button
+        
+        # Scrollable Area (fills the rest of the window)
+        scroll_container = ttk.Frame(input_win)
+        scroll_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
+        theme_bg = self.theme_settings()['bg']
+        canvas = tk.Canvas(scroll_container, borderwidth=0, highlightthickness=0, bg=theme_bg)
+        scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-
-        # Actual input frame inside the canvas
-        input_frame = ttk.Frame(canvas)
-        input_frame_id = canvas.create_window((0, 0), window=input_frame, anchor="nw")
+        
+        # This frame holds all the content cards and is placed inside the canvas
+        content_frame = ttk.Frame(canvas, padding=(20, 15))
+        content_frame_id = canvas.create_window((0, 0), window=content_frame, anchor="nw")
 
         def on_frame_configure(event):
             canvas.configure(scrollregion=canvas.bbox("all"))
+        content_frame.bind("<Configure>", on_frame_configure)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(content_frame_id, width=e.width))
 
-        input_frame.bind("<Configure>", on_frame_configure)
-
-        # Resize canvas when window resized
-        def on_canvas_resize(event):
-            canvas.itemconfig(input_frame_id, width=event.width)
-
-        canvas.bind("<Configure>", on_canvas_resize)
-
-        # Enable mouse scrolling
         def _on_mousewheel(event):
-            try:
-                if event.num == 4 or event.delta > 0:
-                    canvas.yview_scroll(-1, "units")
-                elif event.num == 5 or event.delta < 0:
-                    canvas.yview_scroll(1, "units")
-            except tk.TclError:
-                pass  # Ignore scroll after widget is destroyed
+            # The event.delta attribute is used for Windows/macOS trackpads and mouse wheels
+            # The event.num is for Linux
+            if event.num == 4 or event.delta > 0:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5 or event.delta < 0:
+                canvas.yview_scroll(1, "units")
 
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)       # Windows & most trackpads
-        canvas.bind_all("<Button-4>", _on_mousewheel)         # Linux scroll up
-        canvas.bind_all("<Button-5>", _on_mousewheel)         # Linux scroll down
-
-
-        # --- Top bar with fullscreen + close ---
-        topbar = ttk.Frame(input_win, padding=(0, 5))
-        topbar.place(relx=1.0, y=0, anchor="ne")
-
-        fs_button = ttk.Button(topbar, text="⛶", width=3, command=lambda: self._toggle_fullscreen_input(input_win))
-        fs_button.pack(side=tk.RIGHT)
-
-        close_button = ttk.Button(topbar, text="✖", width=3, command=input_win.destroy)
-        close_button.pack(side=tk.RIGHT, padx=(0, 5))
-
-        self.educational_mode = tk.BooleanVar(value=False)
-        edu_check = ttk.Checkbutton(
-            input_frame,
-            text="Educational Mode",
-            variable=self.educational_mode,
-            command=lambda: self._refresh_tooltips(self.tooltip_labels, tooltips)
-        )
-        edu_check.grid(row=0, column=0, columnspan=2, sticky='w', padx=5, pady=10)
-
-        labels_hints_defaults = {
-            "Ticker:": ("(e.g., AAPL)", "AAPL"),
-            "Current Price (S0):": ("(e.g., 170.5)", "170.5"),
-            "Barrier Price (H):": ("(Target/Floor, e.g., 180)", "180.0"),
-            "Implied Volatility:": ("(Decimal, e.g., 0.25)", "0.25"),
-            "Risk-Free Rate:": ("(Decimal, e.g., 0.04)", "0.04"),
-            "Days to Expiry:": ("(e.g., 90)", "90"),
-            "Strike Price (K):": ("(e.g., 175)", "175.0"),
-            "Option Type:": ("(call or put)", "call"),
-            "Paths to Display:": ("(1 to 500)", "30")
-        }
+        # Bind the scrolling action to the entire canvas area
+        # Using bind_all makes it work even if the mouse is over a child widget like a button
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>", _on_mousewheel) # For Linux scroll up
+        canvas.bind_all("<Button-5>", _on_mousewheel) # For Linux scroll down
+        
+        # --- 2. Create and Populate Content "Cards" ---
 
         self.entries = {}
-        self.tooltip_labels = {}
+        self.greeks_entries = {}
 
-        for i, (label_text, (hint, default_val)) in enumerate(labels_hints_defaults.items(), start=1):
-            clean_key = label_text.replace(":", "")
-            label = ttk.Label(input_frame, text=f"{label_text} {hint}")
-            label.grid(row=i, column=0, sticky='w', padx=5, pady=6)
-            self.tooltip_labels[clean_key] = label
+        # CARD 1: Core Option Info
+        core_frame = ttk.LabelFrame(content_frame, text="Core Option Info", padding=15)
+        core_frame.pack(fill=tk.X, expand=True, pady=(0, 15))
+        core_frame.columnconfigure(1, weight=1)
 
-            entry = ttk.Entry(input_frame, width=18)
-            entry.grid(row=i, column=1, sticky='ew', padx=5, pady=6)
-            entry.insert(0, default_val)
-            self.entries[clean_key] = entry
+        labels_core = {
+            "Ticker:": "AAPL", "Current Price (S0):": "170.5",
+            "Strike Price (K):": "175.0", "Option Type:": "call"
+        }
+        for i, (text, default) in enumerate(labels_core.items()):
+            ttk.Label(core_frame, text=text).grid(row=i, column=0, sticky='w', pady=4)
+            key = text.replace(":", "")
+            if key == "Option Type":
+                entry = ttk.Combobox(core_frame, values=["call", "put"], state="readonly")
+                entry.set(default)
+            else:
+                entry = ttk.Entry(core_frame)
+                entry.insert(0, default)
+            entry.grid(row=i, column=1, sticky='ew', padx=(10, 0), pady=4)
+            self.entries[key] = entry
+            
+        # CARD 2: Pricing & Time
+        pricing_frame = ttk.LabelFrame(content_frame, text="Pricing & Time", padding=15)
+        pricing_frame.pack(fill=tk.X, expand=True, pady=(0, 15))
+        pricing_frame.columnconfigure(1, weight=1)
 
-            if self.educational_mode.get() and clean_key in tooltips:
-                Tooltip(label, tooltips[clean_key])
-
-        self.greeks_mode = tk.StringVar(value="manual")
-        mode_frame = ttk.Frame(input_frame)
-        mode_frame.grid(row=i+1, column=0, columnspan=2, pady=(10, 5), sticky='w')
-        ttk.Label(mode_frame, text="Greek Mode:").pack(side=tk.LEFT)
-        ttk.Radiobutton(mode_frame, text="Manual", variable=self.greeks_mode, value="manual").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(mode_frame, text="Model (Binomial)", variable=self.greeks_mode, value="model").pack(side=tk.LEFT, padx=5)
-
-        # --- Model choice section with config buttons ---
+        labels_pricing = {
+            "Days to Expiry:": "90", "Implied Volatility:": "0.25", "Risk-Free Rate:": "0.04"
+        }
+        for i, (text, default) in enumerate(labels_pricing.items()):
+            ttk.Label(pricing_frame, text=text).grid(row=i, column=0, sticky='w', pady=4)
+            key = text.replace(":", "")
+            entry = ttk.Entry(pricing_frame)
+            entry.insert(0, default)
+            entry.grid(row=i, column=1, sticky='ew', padx=(10, 0), pady=4)
+            self.entries[key] = entry
+            
+        # CARD 3: Simulation
+        sim_frame = ttk.LabelFrame(content_frame, text="Simulation Control", padding=15)
+        sim_frame.pack(fill=tk.X, expand=True, pady=(0, 15))
+        sim_frame.columnconfigure(1, weight=1)
+        
+        labels_sim = {"Barrier Price (H):": "180.0", "Paths to Display:": "30"}
+        for i, (text, default) in enumerate(labels_sim.items()):
+            ttk.Label(sim_frame, text=text).grid(row=i, column=0, sticky='w', pady=4)
+            key = text.replace(":", "")
+            entry = ttk.Entry(sim_frame)
+            entry.insert(0, default)
+            entry.grid(row=i, column=1, sticky='ew', padx=(10, 0), pady=4)
+            self.entries[key] = entry
+            
+        # CARD 4: Simulation Model (Reusing existing logic)
         self.model_choice = tk.StringVar(value="black_scholes")
-        model_frame = ttk.LabelFrame(input_frame, text="Simulation Model", padding=(10,5))
-        model_frame.grid(row=i+8, column=0, columnspan=2, sticky='ew', pady=(20,5))
-
+        model_frame = ttk.LabelFrame(content_frame, text="Simulation Model", padding=15)
+        model_frame.pack(fill=tk.X, expand=True, pady=(0, 15))
+        
         def ask_model_params(model_name, parent):
             win = tk.Toplevel(parent)
+            self.apply_theme_to_window(win)  
             win.title(f"{model_name.title()} Parameters")
             win.geometry("320x300")
             param_entries = {}
@@ -1303,73 +1300,71 @@ class OptionAnalyzerApp:
                 add_entry('μ (Jump Mean)', -0.1)
                 add_entry('σ (Jump Volatility)', 0.2)
             elif model_name == 'heston':
-                add_entry('κ (Mean Reversion)',    2.0)
-                add_entry('θ (Long-run Var)',      0.04)
-                add_entry('ξ (Vol of Vol)',        0.10)
-                add_entry('v₀ (Initial Var)',      0.04)
-                add_entry('ρ (Corr)',             -0.70)   
+                add_entry('κ (Mean Reversion)', 2.0); add_entry('θ (Long-run Var)', 0.04)
+                add_entry('ξ (Vol of Vol)', 0.10); add_entry('v₀ (Initial Var)', 0.04)
+                add_entry('ρ (Corr)', -0.70)   
             elif model_name == 'rough_bergomi':
-                add_entry('H (Hurst Exponent)',     0.10)
-                add_entry('η (Vol of Vol)',         1.50)
-                add_entry('ρ (Corr)',               0.00)   
+                add_entry('H (Hurst Exponent)', 0.10); add_entry('η (Vol of Vol)', 1.50)
+                add_entry('ρ (Corr)', 0.00)
+                
             def save_and_close():
                 self.input_data.setdefault("model_params", {})
                 for key, entry in param_entries.items():
-                    val = float(entry.get())
-                    self.input_data["model_params"][key] = val
-
+                    self.input_data["model_params"][key] = float(entry.get())
                 win.destroy()
-
             ttk.Button(win, text="Save", command=save_and_close).pack(pady=10)
-            win.bind("<Return>", lambda e: save_and_close())
-
+        
         def add_model_row(text, value):
             row = ttk.Frame(model_frame)
             row.pack(anchor='w', fill='x', pady=2)
             ttk.Radiobutton(row, text=text, variable=self.model_choice, value=value).pack(side='left')
             if value != 'black_scholes':
-                ttk.Button(row, text="⚙", width=2, command=lambda v=value: ask_model_params(v, input_win)).pack(side='left', padx=4)
-
+                ttk.Button(row, text="⚙", width=3, command=lambda v=value: ask_model_params(v, input_win)).pack(side='left', padx=4)
+        
         add_model_row("Black-Scholes", "black_scholes")
         add_model_row("Jump Diffusion", "jump_diffusion")
         add_model_row("Heston (Mean-Reverting Vol)", "heston")
         add_model_row("Rough Bergomi (Fractal Vol)", "rough_bergomi")
 
-        # Greeks Input
-        ttk.Label(input_frame, text="(Optional) Input Greeks:").grid(row=i+2, column=0, columnspan=2, pady=(20, 5))
+        # CARD 5: Greeks
+        greeks_frame = ttk.LabelFrame(content_frame, text="Greek Inputs", padding=15)
+        greeks_frame.pack(fill=tk.X, expand=True, pady=(0, 15))
+        greeks_frame.columnconfigure(1, weight=1)
 
-        greek_defaults = {
-            "Delta": "0.6",
-            "Gamma": "0.05",
-            "Vega": "-0.44",
-            "Theta": "-0.18",
-            "Rho": "0.2"
-        }
-        self.greeks_entries = {}
-        for j, (greek, default) in enumerate(greek_defaults.items()):
-            ttk.Label(input_frame, text=f"{greek}:").grid(row=i+3+j, column=0, sticky='w', padx=5)
-            entry = ttk.Entry(input_frame, width=18)
-            entry.grid(row=i+3+j, column=1, sticky='ew', padx=5, pady=3)
+        self.greeks_mode = tk.StringVar(value="manual")
+        mode_frame = ttk.Frame(greeks_frame)
+        mode_frame.grid(row=0, column=0, columnspan=2, pady=(0, 10), sticky='w')
+        ttk.Label(mode_frame, text="Mode:").pack(side=tk.LEFT, padx=(0,10))
+        ttk.Radiobutton(mode_frame, text="Manual", variable=self.greeks_mode, value="manual").pack(side=tk.LEFT)
+        ttk.Radiobutton(mode_frame, text="Model (Binomial)", variable=self.greeks_mode, value="model").pack(side=tk.LEFT, padx=10)
+        
+        # This frame holds the manual entry fields and can be hidden/shown
+        manual_greeks_container = ttk.Frame(greeks_frame)
+        manual_greeks_container.grid(row=1, column=0, columnspan=2, sticky='ew')
+        manual_greeks_container.columnconfigure(1, weight=1)
+
+        greek_defaults = {"Delta": "0.6", "Gamma": "0.05", "Vega": "-0.44", "Theta": "-0.18", "Rho": "0.2"}
+        for i, (greek, default) in enumerate(greek_defaults.items()):
+            ttk.Label(manual_greeks_container, text=f"{greek}:").grid(row=i, column=0, sticky='w', pady=2)
+            entry = ttk.Entry(manual_greeks_container)
+            entry.grid(row=i, column=1, sticky='ew', padx=(10, 0), pady=2)
             entry.insert(0, default)
             self.greeks_entries[greek.lower()] = entry
 
-        def update_greek_input_state():
-            state = 'normal' if self.greeks_mode.get() == "manual" else 'disabled'
-            for entry in self.greeks_entries.values():
-                entry.config(state=state)
+        def update_greek_input_state(*args):
+            if self.greeks_mode.get() == "manual":
+                manual_greeks_container.grid(row=1, column=0, columnspan=2, sticky='ew')
+            else:
+                manual_greeks_container.grid_forget()
+        
+        self.greeks_mode.trace_add("write", update_greek_input_state)
+        update_greek_input_state() # Call once to set initial state
 
-        self.greeks_mode.trace_add("write", lambda *args: update_greek_input_state())
-        update_greek_input_state()
-
-        # Submit
-        submit_btn = ttk.Button(input_frame, text="Run Analysis",
-                                command=lambda win=input_win: self.submit_inputs(win))
-        submit_btn.grid(row=i+1, column=0, columnspan=2, pady=25)
-
-        input_frame.columnconfigure(1, weight=1)
-
-        if self.educational_mode.get():
-            self._refresh_tooltips(self.tooltip_labels, tooltips)
+        # --- 3. Finalize Action Bar ---
+        submit_btn = ttk.Button(action_frame, text="▶ Run Analysis",
+                                style="Accent.TButton",
+                                command=lambda: self.submit_inputs(input_win))
+        submit_btn.grid(row=0, column=0, ipady=5, sticky='ew')
 
 
 
@@ -1391,7 +1386,7 @@ class OptionAnalyzerApp:
             input_values['option_type'] = self.entries["Option Type"].get().strip().lower()
             input_values['paths_to_display'] = int(self.entries["Paths to Display"].get())
             #input_values['style'] = self.entries["Option Style"].get().strip().lower()
-            input_values['educational_mode'] = self.educational_mode.get()
+            input_values['educational_mode'] = False #change to educational_mode.get() if you add that option
             # Collect Greeks if provided, else use 0
             greek_inputs = {}
             for greek in ['delta', 'gamma', 'vega', 'theta', 'rho']:

@@ -455,6 +455,27 @@ class ShortSqueezeDetector(DetectorBase):
     
 # --- C. Crowd-powered detectors ---
 
+class RedditDetector(DetectorBase):
+    category = "💬 Social"
+
+    def run(self, symbol: str, m: dict) -> Idea | None:
+        try:
+            mentions = int(m.get("RedditMentions_24h", 0))
+            if mentions < 10:  # Set a threshold for what's considered "high"
+                return None
+
+            strat_type = "Straddle"
+            risk_level = "High"
+            title = f"High Reddit Mentions: {mentions}"
+            desc = "This stock is gaining significant traction on Reddit, which could lead to increased volatility."
+
+            return Idea(symbol, title, desc, self.category, mentions,
+                        {"type": strat_type, "risk": risk_level},
+                        m, risk=risk_level, sparkline_data=m.get('price_sparkline'))
+        except Exception as e:
+            print(f"[{symbol}] Error in {self.__class__.__name__}: {e}")
+            return None
+
 
 class GoogleTrendsDetector(DetectorBase):
     category = "💬 Social"
@@ -556,6 +577,7 @@ DETECTORS: Sequence[DetectorBase] = (
     IVCrushDetector(),
     PostEarningsReactionDetector(), 
     ShortSqueezeDetector(),
+    RedditDetector(),
 )
 
 # Category labels for the UI - updated to match detector categories

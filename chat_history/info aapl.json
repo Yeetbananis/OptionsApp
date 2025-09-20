@@ -1,0 +1,253 @@
+[
+  {
+    "role": "user",
+    "payload": "info aapl"
+  },
+  {
+    "role": "bot",
+    "payload": "### **Apple Inc. (AAPL)**\n**Sector:** Technology\n\n--- **Key Metrics** ---\n**Market Cap:** 3.37 T\n**P/E (trailing):** 34.53\n**P/E (forward):** 27.34\n**Price/Sales:** 8.25\n**PEG Ratio:** N/A\n\n--- **Stock Data** ---\n**Day Range:** $224.76 - $229.56\n**52-Week Range:** $169.21 - $260.10\n\n--- **Dividends & Profitability** ---\n**Dividend Yield:** 45.00%\n**Payout Ratio:** 15.33%\n**Profit Margin:** 24.30%\n\n--- **Business Summary** ---\nApple Inc. designs, manufactures, and markets smartphones, personal computers, tablets, wearables, and accessories worldwide. The company offers iPhone, a line of smartphones; Mac, a line of personal computers; iPad, a line of multi-purpose tablets; and wearables, home, and accessories comprising AirPods, Apple TV, Apple Watch, Beats products, and HomePod. It also provides AppleCare support and cloud services; and operates various platforms, including the App Store that allow customers to discover and download applications and digital content, such as books, music, video, games, and podcasts, as well as advertising services include third-party licensing arrangements and its own advertising platforms. In addition, the company offers various subscription-based services, such as Apple Arcade, a game subscription service; Apple Fitness+, a personalized fitness service; Apple Music, which offers users a curated listening experience with on-demand radio stations; Apple News+, a subscription news and magazine service; Apple TV+, which offers exclusive original content; Apple Card, a co-branded credit card; and Apple Pay, a cashless payment service, as well as licenses its intellectual property. The company serves consumers, and small and mid-sized businesses; and the education, enterprise, and government markets. It distributes third-party applications for its products through the App Store. The company also sells its products through its retail and online stores, and direct sales force; and third-party cellular network carriers, wholesalers, retailers, and resellers. Apple Inc. was founded in 1976 and is headquartered in Cupertino, California."
+  },
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "earnings aapl"
+  },
+  {
+    "role": "bot",
+    "payload": "### AAPL \u2014 Earnings Snapshot\n\nNext report  \u00b7  **30 Oct 2025**\nLast quarter EPS data unavailable."
+  },
+  {
+    "role": "user",
+    "payload": "income aapl"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "table_placeholder",
+      "title": "AAPL \u2013 Income Statement",
+      "statement_type": "income",
+      "symbol": "AAPL"
+    }
+  },
+  {
+    "role": "user",
+    "payload": "options aapl"
+  },
+  {
+    "role": "bot",
+    "payload": "**Available Expiries for AAPL**:\n- `2025-08-15`\n- `2025-08-22`\n- `2025-08-29`\n- `2025-09-05`\n- `2025-09-12`\n- `2025-09-19`\n- `2025-09-26`\n- `2025-10-17`\n- `2025-11-21`\n- `2025-12-19`\n- `2026-01-16`\n- `2026-02-20`\n- `2026-03-20`\n- `2026-05-15`\n- `2026-06-18`\n- `2026-09-18`\n- `2026-12-18`\n- `2027-01-15`\n- `2027-06-17`\n- `2027-12-17`\n\nUse `options AAPL YYYY-MM-DD` to see a specific chain."
+  },
+  {
+    "role": "user",
+    "payload": "options APPLE"
+  },
+  {
+    "role": "bot",
+    "payload": "No options expiries found for APPLE."
+  },
+  {
+    "role": "user",
+    "payload": "give me options chain data for apple"
+  },
+  {
+    "role": "bot",
+    "payload": "**Available Expiries for AAPL**:\n- `2025-08-15`\n- `2025-08-22`\n- `2025-08-29`\n- `2025-09-05`\n- `2025-09-12`\n- `2025-09-19`\n- `2025-09-26`\n- `2025-10-17`\n- `2025-11-21`\n- `2025-12-19`\n- `2026-01-16`\n- `2026-02-20`\n- `2026-03-20`\n- `2026-05-15`\n- `2026-06-18`\n- `2026-09-18`\n- `2026-12-18`\n- `2027-01-15`\n- `2027-06-17`\n- `2027-12-17`\n\nUse `options AAPL YYYY-MM-DD` to see a specific chain."
+  },
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "chart aapl"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "unserializable"
+    }
+  },
+  {
+    "role": "user",
+    "payload": "news aapl"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "news",
+      "news": [
+        {
+          "headline": "Trump's 'pay-to-play' deals blur line between govt. & free market",
+          "url": "https://finnhub.io/api/news?id=e13cab44e8bcfacdccff3821a44873c0c11c85e2a123ed99c532993e891097b1",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "Stock market today: Dow, S&P 500, Nasdaq waver as Trump reportedly extends China tariff deadline",
+          "url": "https://finnhub.io/api/news?id=53be61114582e1b8423027b22f64a4cc1d2a6a7e28841774084b46ec373cad44",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "If You'd Invested $1,000 in Zoetis (ZTS) Stock 10 Years Ago, Here's How Much You'd Have Today",
+          "url": "https://finnhub.io/api/news?id=11eb8e58135eb68ba4aedc6b6cd2e077cb857c8ff2edb62f72447496271085ce",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Trump Expands \u2018Pay-for-Play\u2019 in Trade Policy With Nvidia, AMD Deal",
+          "url": "https://finnhub.io/api/news?id=8b5452d5420416789f0bbc9fccf51ad74dd5be9652db87e1f2a4ea50d6ba77f2",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Apple and Cook Are Back in Trump\u2019s Good Books: How Should You Play AAPL Stock Here?",
+          "url": "https://finnhub.io/api/news?id=0122a2a75e648c923f4e7b9dbc0bc6ae638a7ec922bfc51c87ac5a7f94d31aa3",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "iPhone 17, the \u2018thinnest iPhone ever,\u2019 and everything else we\u2019re expecting out of Apple\u2019s hardware event",
+          "url": "https://finnhub.io/api/news?id=47644b5a45dea57fbccc89d62b84e30ab7c244404dc8caa6d25655f9f470976a",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "The Rich Get Richer",
+          "url": "https://finnhub.io/api/news?id=b294d12df97f1bf4da7a12d0f47108015a61965351806c0d8a8026920d5af1e6",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "Apple: Navigating Tariffs while Services Drive Growth",
+          "url": "https://finnhub.io/api/news?id=ec7920ff579cb022a1a4f3f43e9393b6b1f3c1ae79da6778cebbb05e2fa1cbc1",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "Apple Inc (AAPL) Increases its Total Investment to $600 billion to Expand its Manufacturing in the United States",
+          "url": "https://finnhub.io/api/news?id=5d84a2dd21ab7c4773e38ae1efe412261cb0b176990ee05bc300fe9195ab394e",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "Apple Is Missing the Boat on AI, Says Ives",
+          "url": "https://finnhub.io/api/news?id=aef1ab5a797922fc24cda38655db3d9b87faa3b0ea31c85aa935ab4e8aac4527",
+          "sentiment": "Neutral"
+        }
+      ]
+    }
+  },
+  {
+    "role": "user",
+    "payload": "news rkt"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "news",
+      "news": [
+        {
+          "headline": "Q2 Earnings Roundup: Rocket Companies (NYSE:RKT) And The Rest Of The Thrifts & Mortgage Finance Segment",
+          "url": "https://finnhub.io/api/news?id=38a53e7b6c8b24fe4941829d0958ef977bf7f87568c7fb91217af31bd0977bde",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Paramount, Rocket, and More Stocks See Action From Activist Investors",
+          "url": "https://finnhub.io/api/news?id=56a533097ac3e9dfd9e0ad89b0b29fb8c6ca0c0f682e81ce8e96742555a5ec64",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "'DORK' Meme Stock Mania Flames Out \u2014 Costs Investors $13.1 Billion",
+          "url": "https://finnhub.io/api/news?id=0dacc5837b6c3b93d76dbea8e0409504a06e9e13d601347cf8ff3b12c6ebe3e2",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Rocket, United Wholesale Mortgage swing back to profitability",
+          "url": "https://finnhub.io/api/news?id=ad460da3ed4ccd7c4157b52928c7742d523dfcb1d70707e30b9392ca877976b0",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "Buyers, Take Note: Mortgage Rates Are Falling, Home-Price Growth Is Cooling and Supply Is Outpacing Demand",
+          "url": "https://finnhub.io/api/news?id=e6fa4981df7390f95ef659f5c93446249c0d6fefe65eda2177429ca7a1448447",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Davis Financial Fund 2025 Semi-Annual Review",
+          "url": "https://finnhub.io/api/news?id=7dfd35236a6b340feb81fa5ca192c009d817d941fdd662fba9a32531abbe0af7",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Redfin Reports Homebuying Affordability Is Improving in These 11 Places",
+          "url": "https://finnhub.io/api/news?id=237b93a55293c07e47af0a6a92867526332d052362f238f5e38a6c165a96fecb",
+          "sentiment": "Bullish"
+        },
+        {
+          "headline": "Social Buzz: Wallstreetbets Stocks Mostly Declining Pre-Bell Wednesday; Snap, Opendoor Technologies to Open Lower",
+          "url": "https://finnhub.io/api/news?id=807feeceb629a1de66b99d622708e130eef03f5080a91a32ee7ce64b769f34f9",
+          "sentiment": "Neutral"
+        },
+        {
+          "headline": "Mortgage Rates Drop to Lowest Level in 10 Months, Upping Purchasing Power in a Buyer-Friendly Market",
+          "url": "https://finnhub.io/api/news?id=eb0b181f8b8c481c4147a48fd6cf0bdb18ead3e5b173050c361ece692045f259",
+          "sentiment": "Bearish"
+        },
+        {
+          "headline": "Rocket Companies, The Bancorp, Dime Community Bancshares, Mr. Cooper Group, and Columbia Financial Shares Skyrocket, What You Need To Know",
+          "url": "https://finnhub.io/api/news?id=dff35c02e0cce10ea218acdc976ee11640b096fad644be1daf11aff897297c22",
+          "sentiment": "Neutral"
+        }
+      ]
+    }
+  },
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "tokens"
+  },
+  {
+    "role": "bot",
+    "payload": "### AI Token Usage (Today)\n\n**Used:** 438 / 33,000 tokens\n**Usage:** 1.33%\n\nThe limit resets daily."
+  },
+  {
+    "role": "user",
+    "payload": "what is the marketcap of BBAI"
+  },
+  {
+    "role": "bot",
+    "payload": "### **BigBear.ai, Inc. (BBAI)**\n**Sector:** Technology\n\n--- **Key Metrics** ---\n**Market Cap:** 2.06 B\n**P/E (trailing):** N/A\n**P/E (forward):** -35.45\n**Price/Sales:** 12.91\n**PEG Ratio:** N/A\n\n--- **Stock Data** ---\n**Day Range:** $6.74 - $7.39\n**52-Week Range:** $1.20 - $10.36\n\n--- **Dividends & Profitability** ---\n**Dividend Yield:** N/A\n**Payout Ratio:** 0.00\n**Profit Margin:** -1.44\n\n--- **Business Summary** ---\nBigBear.ai Holdings, Inc. provides artificial intelligence-powered decision intelligence solutions. The company offers national security, supply chain management, and digital identity and biometrics solutions. It also provides data ingestion, data enrichment, data processing, artificial intelligence, machine learning, predictive analytics, and predictive visualization solutions and services. The company serves U.S. defense and intelligence agencies, border protection, transportation security, manufacturing, distribution and logistics, travel, entertainment, and tourism sectors. The company was founded in 1988 and is headquartered in Mclean, Virginia."
+  },
+  {
+    "role": "user",
+    "payload": "what is the dividend yield of rkt"
+  },
+  {
+    "role": "bot",
+    "payload": "### **Rocket Companies, Inc. (RKT)**\n**Sector:** Financial Services\n\n--- **Key Metrics** ---\n**Market Cap:** 36.11 B\n**P/E (trailing):** N/A\n**P/E (forward):** 25.92\n**Price/Sales:** 7.01\n**PEG Ratio:** N/A\n\n--- **Stock Data** ---\n**Day Range:** $16.93 - $17.35\n**52-Week Range:** $10.06 - $21.38\n\n--- **Dividends & Profitability** ---\n**Dividend Yield:** N/A\n**Payout Ratio:** 0.00\n**Profit Margin:** -0.00\n\n--- **Business Summary** ---\nRocket Companies, Inc., provides spanning mortgage, real estate, and personal finance services in the United States and Canada. It operates through two segments, Direct to Consumer and Partner Network. The company offers Rocket Mortgage, a mortgage lender service; Rocket Close, an appraisal management, settlement, and title service; Rocket Homes, a home search platform and real estate agent referral network that provides technology-enabled services to support the home buying and selling experience; and Rocket Loans, an online-based personal loans business. It also provides Rocket Money that provides financial wellness services, including subscription cancellation, budget management, and credit score; and Lendesk, a software service that provides a point of sale system for mortgage professionals and a loan origination system for private lenders. In addition, the company originates, closes, sells, and services agency-conforming loans. Rocket Companies, Inc. was founded in 1985 and is headquartered in Detroit, Michigan. Rocket Companies, Inc. operates as a subsidiary of Rock Holdings Inc."
+  },
+  {
+    "role": "user",
+    "payload": "what is apple's current price"
+  },
+  {
+    "role": "bot",
+    "payload": "An error occurred with the AI assistant: 429 You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. [violations {\n  quota_metric: \"generativelanguage.googleapis.com/generate_content_free_tier_requests\"\n  quota_id: \"GenerateRequestsPerDayPerProjectPerModel-FreeTier\"\n  quota_dimensions {\n    key: \"model\"\n    value: \"gemini-1.5-pro\"\n  }\n  quota_dimensions {\n    key: \"location\"\n    value: \"global\"\n  }\n}\nviolations {\n  quota_metric: \"generativelanguage.googleapis.com/generate_content_free_tier_requests\"\n  quota_id: \"GenerateRequestsPerMinutePerProjectPerModel-FreeTier\"\n  quota_dimensions {\n    key: \"model\"\n    value: \"gemini-1.5-pro\"\n  }\n  quota_dimensions {\n    key: \"location\"\n    value: \"global\"\n  }\n}\nviolations {\n  quota_metric: \"generativelanguage.googleapis.com/generate_content_free_tier_input_token_count\"\n  quota_id: \"GenerateContentInputTokensPerModelPerMinute-FreeTier\"\n  quota_dimensions {\n    key: \"model\"\n    value: \"gemini-1.5-pro\"\n  }\n  quota_dimensions {\n    key: \"location\"\n    value: \"global\"\n  }\n}\n, links {\n  description: \"Learn more about Gemini API quotas\"\n  url: \"https://ai.google.dev/gemini-api/docs/rate-limits\"\n}\n, retry_delay {\n  seconds: 2\n}\n]"
+  },
+  {
+    "role": "user",
+    "payload": "what is an option"
+  },
+  {
+    "role": "bot",
+    "payload": "An error occurred with the AI assistant: 429 You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. [violations {\n  quota_metric: \"generativelanguage.googleapis.com/generate_content_free_tier_requests\"\n  quota_id: \"GenerateRequestsPerDayPerProjectPerModel-FreeTier\"\n  quota_dimensions {\n    key: \"model\"\n    value: \"gemini-1.5-pro\"\n  }\n  quota_dimensions {\n    key: \"location\"\n    value: \"global\"\n  }\n}\nviolations {\n  quota_metric: \"generativelanguage.googleapis.com/generate_content_free_tier_requests\"\n  quota_id: \"GenerateRequestsPerMinutePerProjectPerModel-FreeTier\"\n  quota_dimensions {\n    key: \"model\"\n    value: \"gemini-1.5-pro\"\n  }\n  quota_dimensions {\n    key: \"location\"\n    value: \"global\"\n  }\n}\nviolations {\n  quota_metric: \"generativelanguage.googleapis.com/generate_content_free_tier_input_token_count\"\n  quota_id: \"GenerateContentInputTokensPerModelPerMinute-FreeTier\"\n  quota_dimensions {\n    key: \"model\"\n    value: \"gemini-1.5-pro\"\n  }\n  quota_dimensions {\n    key: \"location\"\n    value: \"global\"\n  }\n}\n, links {\n  description: \"Learn more about Gemini API quotas\"\n  url: \"https://ai.google.dev/gemini-api/docs/rate-limits\"\n}\n, retry_delay {\n  seconds: 41\n}\n]"
+  }
+]
