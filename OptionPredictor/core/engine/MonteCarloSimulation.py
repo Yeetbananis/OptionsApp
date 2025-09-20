@@ -28,6 +28,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 # GUI Embedding Imports
 # ===========================
 import tkinter as tk  # Needed for embedding canvas/toolbar
+from numba import njit, prange
+from typing import Union, Callable
 
 
 # Apply the dark theme globally for matplotlib plots (optional)
@@ -199,10 +201,57 @@ def black_scholes_price(S, K, T, r, sigma, option_type="call"):
         return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 
-# --- Hybrid FFT-based rough Bergomi simulator (Bayer–Friz–Gatheral) ---
+import numpy as np
+import cupy as cp
+from cupyx.scipy.fft import rfft, irfft
+from numba import cuda
+import math
+from typing import Union, Callable, Tuple, Optional
+
+# ---------------------------
+# CUDA kernel: optimized final
+# ---------------------------
+@cuda.jit
+def evolve_paths_cuda_kernel_max_perf(
+    paths, dW1, short_contrib_all, tail_contrib_all, xi0_vals,
+    t_powers,  # precomputed ((i + 0.5)*dt)**(2*H)
+    r, eta, dt
+):
+    p = cuda.grid(1)
+    if p >= paths.shape[0]:
+        return
+
+    logS = math.log(paths[p, 0])
+    N = dW1.shape[1]
+
+    for i in range(N):
+        F_i = short_contrib_all[p, i] + tail_contrib_all[p, i]
+        exp_term = math.exp(eta * F_i - 0.5 * eta * eta * t_powers[i])
+        var_i = xi0_vals[i] * exp_term
+
+        # Guard against tiny negative rounding errors
+        if var_i < 0.0:
+            var_i = 0.0
+
+        logS += (r - 0.5 * var_i) * dt + math.sqrt(var_i) * dW1[p, i]
+        paths[p, i + 1] = math.exp(logS)
+
+
+# ---------------------------
+# Utility: next power of two
+# ---------------------------
+def _next_pow2_int(x: int) -> int:
+    if x < 1:
+        return 1
+    return 1 << int(np.ceil(np.log2(x)))
+
+
+# ---------------------------
+# Main simulation function
+# ---------------------------
 def simulate_rbergomi_hybrid(
     S0: float,
-    xi0: callable,
+    xi0: Union[float, Callable[[float], float], np.ndarray],
     r: float,
     eta: float,
     H: float,
@@ -210,58 +259,163 @@ def simulate_rbergomi_hybrid(
     T: float,
     N: int,
     n_paths: int,
-    m_cutoff: int = None
-) -> tuple[np.ndarray, np.ndarray]:
+    m_cutoff: Optional[int] = None,
+    seed: Optional[int] = None,
+    use_float32: bool = False,
+    device_id: int = 0,
+    batch_size: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Simulate the rBergomi model via an O(N log N) hybrid FFT scheme.
-
-    Returns:
-      t (N+1,) time grid
-      paths (n_paths, N+1) simulated price paths
+    High-performance rBergomi hybrid simulator (pure Python + CuPy + Numba).
+    - Fully GPU-vectorized convolutions for short & long memory (FFT-based).
+    - Precomputed time powers passed into CUDA kernel.
+    - Batched generation to reduce peak GPU memory and allow large n_paths.
+    - dtype-consistent: float32 or float64 pipeline.
     """
-    dt = T / N
-    t = np.linspace(0, T, N+1)
 
-    # default cutoff if not provided
+
+     # --- Safer context reset ---
+    from numba import cuda as _cuda
+
+    try:
+            _cuda.select_device(device_id)
+            _cuda.current_context().reset()   # Reset only this device’s context
+    except Exception as e:
+            print(f"[Warning] Could not reset CUDA context cleanly: {e}")
+
+    cp.cuda.Device(device_id).use()  # Ensure CuPy binds to same device
+
+
+    # dtype setup
+    sim_dtype = cp.float32 if use_float32 else cp.float64
+    output_dtype = np.float32 if use_float32 else np.float64
+
+    # validation
+    if not (0.0 < H < 0.5):
+        raise ValueError("H must be in (0, 0.5).")
     if m_cutoff is None:
         m_cutoff = max(1, N // 10)
 
-    # 1) build kernel weights a[k] = ∫_{k dt}^{(k+1) dt}(t_i - s)^{H-1/2} ds
-    prefac = dt**(H + 0.5) / (H + 0.5)
-    a = np.array([((i+1)**(H+0.5) - i**(H+0.5)) for i in range(N)]) * prefac
+    dt = float(T) / int(N)
+    t_cpu = np.linspace(0.0, T, N + 1, dtype=np.float64)
 
-    # split into exact part and tail
-    a_exact = a[:m_cutoff]
-    a_tail  = a[m_cutoff:]
+    # xi0 handling (compute on CPU, move to GPU dtype later)
+    if np.isscalar(xi0):
+        xi0_vals_gpu = cp.full(N, xi0, dtype=sim_dtype)
+    else:
+        if callable(xi0):
+            xi0_cpu = np.array([xi0(ti) for ti in t_cpu[:-1]], dtype=np.float64)
+        else:
+            xi0_cpu = np.asarray(xi0, dtype=np.float64)
+        if xi0_cpu.shape != (N,):
+            raise ValueError(f"xi0 must have shape ({N},), got {xi0_cpu.shape}")
+        xi0_vals_gpu = cp.asarray(xi0_cpu, dtype=sim_dtype)
 
-    # prepare circulant embedding for FFT convolution of tail
-    circ = np.concatenate([a_tail, np.zeros(N - len(a_tail))])
-    fft_circ = fft(np.concatenate([circ, circ]))
+    # precompute kernel coefficients (on GPU dtype)
+    prefac = (dt ** H) * np.sqrt(2.0 * H) / (H + 0.5)
+    # compute i_vals in GPU dtype to avoid cast later
+    i_vals_gpu = cp.arange(N, dtype=sim_dtype)
+    a_gpu = ((i_vals_gpu + 1.0) ** (H + 0.5) - (i_vals_gpu) ** (H + 0.5)) * prefac
+    a_exact = a_gpu[:m_cutoff].astype(sim_dtype)
+    a_tail = a_gpu[m_cutoff:].astype(sim_dtype)
 
-    paths = np.zeros((n_paths, N+1))
-    paths[:,0] = S0
+    # Precompute FFT kernels once (short kernel and long circ kernel)
+    # Short kernel FFT (for short-memory convolution)
+    conv_len = N + m_cutoff - 1
+    fft_len_short = _next_pow2_int(conv_len)
+    # create short kernel of length fft_len_short and compute rfft
+    short_kernel = cp.zeros(fft_len_short, dtype=sim_dtype)
+    short_kernel[:m_cutoff] = a_exact
+    short_kernel_fft = rfft(short_kernel, n=fft_len_short)
 
-    for p in range(n_paths):
-        # draw correlated Brownian increments
-        Z1 = np.random.standard_normal(N)
-        Z2 = np.random.standard_normal(N)
-        dW1 = Z1 * np.sqrt(dt)
-        dW2 = (rho * Z1 + np.sqrt(1 - rho**2) * Z2) * np.sqrt(dt)
+    # Long-memory circ kernel (we'll use size 2*N)
+    fft_len_long = 2 * N
+    circ = cp.zeros(fft_len_long, dtype=sim_dtype)
+    circ[m_cutoff: m_cutoff + a_tail.size] = a_tail
+    circ_fft = rfft(circ, n=fft_len_long)
 
-        # build fractional driver F
-        F = np.convolve(Z2, a_exact, mode='full')[:N]
-        z2_pad = np.concatenate([Z2, np.zeros(N)])
-        conv  = ifft(fft(z2_pad) * fft_circ)
-        F    += np.real(conv[:N])
+    # choose batch size to fit memory if unspecified
+    if batch_size is None:
+        # heuristic: aim for 1/8 of GPU memory in bytes for batch arrays
+        free_mem, total_mem = cp.cuda.Device().mem_info
+        # approximate bytes per path (Z1,Z2,dW1,short,tails,paths) ~ 5*N*dtypebytes
+        dtype_bytes = 4 if use_float32 else 8
+        approx_per_path_bytes = int(6 * N * dtype_bytes)
+        # keep headroom, so batch = max(1, free_mem // (8 * approx_per_path_bytes))
+        batch_size = max(1, int(free_mem // max(approx_per_path_bytes * 8, 1)))
+        # clamp to n_paths
+        batch_size = min(batch_size, n_paths)
 
-        # Euler–Maruyama for log-S
-        logS = np.log(S0)
-        for i in range(N):
-            var_i = xi0(t[i]) * np.exp(eta * F[i] - 0.5 * eta**2 * (t[i]**(2*H)))
-            logS += (r - 0.5 * var_i) * dt + np.sqrt(var_i) * dW1[i]
-            paths[p, i+1] = np.exp(logS)
+    # precompute t_powers (on GPU)
+    time_steps_gpu = cp.arange(N, dtype=sim_dtype)
+    t_powers_gpu = ((time_steps_gpu + 0.5) * dt) ** (2.0 * H)
 
-    return t, paths
+    # prepare RNG state (reproducible)
+    rng = cp.random.RandomState(seed)
+
+
+    # container for gathering results
+    results = []
+    n_done = 0
+    remaining = n_paths
+
+    while remaining > 0:
+        this_batch = min(batch_size, remaining)
+        # Generate batch randoms on GPU (dtype consistent)
+        # shape (this_batch, N)
+        Z1 = rng.standard_normal((this_batch, N), dtype=sim_dtype)
+        Z2_indep = rng.standard_normal((this_batch, N), dtype=sim_dtype)
+
+        # correlate Z2 and compute dW1
+        Z2 = rho * Z1 + cp.sqrt(1.0 - rho * rho) * Z2_indep
+        dW1 = Z1 * cp.sqrt(dt, dtype=sim_dtype)
+
+        # Short-memory convolution for this batch using precomputed kernel FFT
+        # pad Z2 to fft_len_short on axis=1
+        z2_padded_short = cp.zeros((this_batch, fft_len_short), dtype=sim_dtype)
+        z2_padded_short[:, :N] = Z2
+        # rfft along axis=1 with explicit n
+        z2_short_fft = rfft(z2_padded_short, n=fft_len_short, axis=1)
+        # multiply by kernel fft (broadcast kernel over batch axis)
+        short_conv_fft = z2_short_fft * short_kernel_fft[cp.newaxis, :]
+        short_conv = irfft(short_conv_fft, n=fft_len_short, axis=1)[:, :N]
+
+        # Long-memory (tail) contribution via FFT (explicit n=2*N)
+        z2_padded_long = cp.zeros((this_batch, fft_len_long), dtype=sim_dtype)
+        z2_padded_long[:, :N] = Z2
+        z2_long_fft = rfft(z2_padded_long, n=fft_len_long, axis=1)
+        long_conv_fft = z2_long_fft * circ_fft[cp.newaxis, :]
+        long_conv = irfft(long_conv_fft, n=fft_len_long, axis=1)[:, :N]
+
+        # prepare paths array for this batch
+        paths = cp.zeros((this_batch, N + 1), dtype=sim_dtype)
+        paths[:, 0] = S0
+
+        # Launch kernel
+        threads_per_block = 256
+        blocks_per_grid = (this_batch + (threads_per_block - 1)) // threads_per_block
+
+
+        # Launch kernel directly on CuPy arrays (Numba can use __cuda_array_interface__)
+        evolve_paths_cuda_kernel_max_perf[blocks_per_grid, threads_per_block](
+            paths, dW1, short_conv, long_conv, xi0_vals_gpu,
+            t_powers_gpu, float(r), float(eta), float(dt)
+        )
+
+
+
+        # bring batch to CPU (synchronously). If host-transfer becomes bottleneck,
+        # replace with pinned/asynchronous copy pattern.
+        batch_cpu = paths.get().astype(output_dtype, copy=False)
+        results.append(batch_cpu)
+
+        n_done += this_batch
+        remaining -= this_batch
+
+    # stack results in order
+    all_paths = np.vstack(results) if len(results) > 1 else results[0]
+
+    return t_cpu.astype(output_dtype), all_paths.astype(output_dtype, copy=False)
 
 
 # --- Binomial Option Pricing ---
@@ -373,6 +527,99 @@ def cached_binomial_price(S, K, T, r, sigma,
 
 
 # --- Monte Carlo Simulation ---
+
+from multiprocessing import Process, Queue
+
+
+
+def simulation_worker(q, args, kwargs):
+    import time
+    import traceback
+    
+    try:
+        # Unpack args and kwargs
+        S0, H, sigma, drift, T, r = args
+        input_data = kwargs.copy()
+        input_data.update({
+            'S0': S0, 'H': H, 'sigma': sigma, 'drift': drift, 'T': T, 'r': r
+        })
+
+        # --- START OF FIX ---
+        # 1. Safely get the strike price for later use...
+        strike = kwargs.get('strike')
+        # 2. ...and remove it from the kwargs dictionary so it isn't passed to the next function.
+        if 'strike' in kwargs:
+            del kwargs['strike']
+        # --- END OF FIX ---
+
+        # 1. Main GPU Simulation (now called with the correct arguments)
+        start_time = time.time()
+        sim_results = calculate_simulation_data(*args, **kwargs)
+        end_time = time.time()
+        
+        # --- BENCHMARK PRINTOUT ---
+        elapsed_time = end_time - start_time
+        n_paths = kwargs.get('n_simulations', 100000)
+        n_steps = int(T * 365 * 24)
+        print("-" * 50)
+        print(f"✅ GPU Simulation Benchmark Complete ✅")
+        print(f"   - GPU Time:    {elapsed_time:.4f} seconds")
+        print(f"   - Num. Paths:  {n_paths:,}")
+        print(f"   - Time Steps:  {n_steps:,}")
+        if elapsed_time > 0:
+            paths_per_sec = int(n_paths / elapsed_time)
+            print(f"   - Performance: {paths_per_sec:,} paths/second")
+        print("-" * 50)
+        
+        (prob, avg_trig, std_trig, trig_prices, paths, days) = sim_results
+        input_data.update({
+            'probability': prob, 'avg_trigger': avg_trig, 'std_trigger': std_trig,
+            'trigger_prices': trig_prices, 'sample_paths': paths, 'sim_days': days
+        })
+
+        # 2. Other slow, CPU-bound calculations that DO use the strike price
+        correct_avg_trig, correct_std_trig, _ = calculate_trigger_stats_correctly(
+            S0, sigma, T, r, n_simulations=100000, option_type=kwargs.get('option_type')
+        )
+        input_data['correct_avg_trigger'] = correct_avg_trig
+        input_data['correct_std_trigger'] = correct_std_trig
+
+        fair_price = cached_binomial_price(
+            S0, strike, T, r, sigma, N=500, option_type=kwargs.get('option_type'), american=False
+        )
+        input_data['fair_price'] = fair_price
+        
+        input_data['heatmap_data'] = generate_profit_heatmap_data(
+            S0, strike, T, r, sigma, kwargs.get('option_type'), initial_option_price=fair_price
+        )
+        
+        input_data['surface_data'] = generate_option_surface_data(
+            S0, strike, T, r, sigma, kwargs.get('option_type')
+        )
+        
+        input_data['vol_surface_data'] = generate_volatility_surface_data(
+            S0, strike, T, sigma
+        )
+        
+        # Put the final, complete dictionary on the queue
+        q.put(("ok", input_data))
+
+    except Exception as e:
+        q.put(("err", traceback.format_exc()))
+
+def run_simulation_in_subprocess(*args, **kwargs):
+    q = Queue()
+    p = Process(target=simulation_worker, args=(q, args, kwargs))
+    p.start()
+    # --- START OF FIX ---
+    status, payload = q.get() # <-- Get the result FIRST. This will wait until the worker is done.
+    p.join()                  # <-- Now, safely clean up the completed process.
+    # --- END OF FIX ---
+    if status == "ok":
+        return payload
+    else:
+        raise RuntimeError(f"Worker failed:\n{payload}")
+
 
 def calculate_simulation_data(S0, H, sigma, drift, T, r, n_simulations=100000, option_type='call',
                               model='black_scholes', jump_params=None, heston_params=None, rough_params=None):

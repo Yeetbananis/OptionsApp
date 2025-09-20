@@ -367,13 +367,21 @@ try:
         calculate_trigger_stats_correctly as recalculate_trigger_price_correctly,
         set_max_paths, cached_binomial_price, 
         generate_volatility_surface_data,
-        plot_volatility_surface_3d,   
+        plot_volatility_surface_3d,
+        # The function below runs large simulations in a subprocess to keep the UI responsive.
+        run_simulation_in_subprocess,
         #cached_lsm_price
 
     )
 except ImportError:
     messagebox.showerror("Import Error", "Could not find 'MonteCarloSimulation.py'. Make sure it's in the same directory as this script.")
     exit()
+
+try:
+    from ctypes import windll
+    windll.shcore.SetProcessDpiAwareness(1)
+except ImportError:
+    pass # This will fail on non-Windows systems, which is fin
 
 class OptionAnalyzerApp:
     def __init__(self, root):
@@ -1452,19 +1460,19 @@ class OptionAnalyzerApp:
             print(f"Input Submission Error Traceback:\n{traceback.format_exc()}")
 
 
+    # In OptionsApp.py
+
     def run_analysis_thread(self, inputs):
-        """The function executed in the background thread."""
+        """
+        Performs quick pre-calculations, calls the simulation subprocess for heavy lifting,
+        and then handles the complete results package.
+        """
         try:
+            # --- 1. Perform quick, non-blocking tasks first ---
             T = inputs['T_days'] / 365.0
             self.input_data = inputs.copy()
-            sigma = inputs['sigma']
             self.input_data['T'] = T
-            jump_params = None
-            heston_params = None
-            rough_params = None
 
-
-            # 1. Fetch historical data
             prices = fetch_ticker_data(inputs['ticker'], inputs['T_days'] + 180)
             drift, realized_vol, stderr = calculate_drift_and_volatility(prices)
             self.input_data['drift'] = drift
@@ -1473,99 +1481,39 @@ class OptionAnalyzerApp:
 
             set_max_paths(inputs['paths_to_display'])
 
-            # 2. Detect simulation model
             model = inputs.get("simulation_model", "black_scholes")
             model_params = inputs.get("model_params", {})
-            self.input_data["simulation_model"] = model  # For use in summary
+            jump_params, heston_params, rough_params = None, None, None
 
             if model == "jump_diffusion":
-                jump_params = {
-                    'lambda': model_params.get('λ (Jump Intensity)', 0.1),
-                    'mu': model_params.get('μ (Jump Mean)', -0.1),
-                    'sigma': model_params.get('σ (Jump Volatility)', 0.2)
-                }
-                heston_params = rough_params = None
-
-            if model == "heston":
-                heston_params = {
-                    'kappa': model_params.get('κ (Mean Reversion)',    2.0),
-                    'theta': model_params.get('θ (Long-run Var)',      sigma**2),
-                    'xi':    model_params.get('ξ (Vol of Vol)',        0.10),
-                    'v0':    model_params.get('v₀ (Initial Var)',      sigma**2),
-                    'rho':   model_params.get('ρ (Corr)',             -0.70)
-                }
-                jump_params = rough_params = None
-
+                jump_params = model_params
+            elif model == "heston":
+                heston_params = model_params
             elif model == "rough_bergomi":
-                rough_params = {
-                    'H':   model_params.get('H (Hurst Exponent)',    0.10),
-                    'eta': model_params.get('η (Vol of Vol)',        1.50),
-                    'rho': model_params.get('ρ (Corr)',              0.00)
-                }
-                jump_params = heston_params = None
+                rough_params = model_params
 
-            # 3. Monte Carlo Simulation
-            sim_results = calculate_simulation_data(
-                inputs['S0'], inputs['H'], inputs['sigma'], drift, T, inputs['r'],
-                n_simulations=10000, option_type=inputs['option_type'],
-                model=model,
-                jump_params=jump_params,
-                heston_params=heston_params,
-                rough_params=rough_params
-            )
-            (prob, avg_trig, std_trig, trig_prices, paths, days) = sim_results
+            # --- 2. Call the background worker for all heavy calculations ---
+            # Prepare arguments for the subprocess
+            args = (inputs['S0'], inputs['H'], inputs['sigma'], drift, T, inputs['r'])
+            kwargs = {
+                'n_simulations': 100000,
+                'option_type': inputs['option_type'],
+                'model': model,
+                'strike': inputs['strike'],
+                'jump_params': jump_params,
+                'heston_params': heston_params,
+                'rough_params': rough_params
+            }
+            
+            # The worker now returns a SINGLE dictionary with all calculated data
+            worker_results_dict = run_simulation_in_subprocess(*args, **kwargs)
 
-            self.input_data['probability'] = prob
-            self.input_data['avg_trigger'] = avg_trig
-            self.input_data['std_trigger'] = std_trig
-            self.input_data['trigger_prices'] = trig_prices
-            self.input_data['sample_paths'] = paths
-            self.input_data['sim_days'] = days
-
-            # 4. Corrected trigger price calc
-            correct_avg_trig, correct_std_trig, _ = recalculate_trigger_price_correctly(
-                inputs['S0'], inputs['sigma'], T, inputs['r'],
-                n_simulations=10000, option_type=inputs['option_type']
-            )
-            self.input_data['correct_avg_trigger'] = correct_avg_trig
-            self.input_data['correct_std_trigger'] = correct_std_trig
-
-            if model == "black_scholes":
-                from core.engine.MonteCarloSimulation import black_scholes_price
-                bs_price = black_scholes_price(
-                    inputs['S0'], inputs['strike'], T,
-                    inputs['r'], inputs['sigma'], inputs['option_type']
-                )
-                self.input_data['bs_price'] = bs_price
-
-
-            # 5. Binomial Fair Price
-            fair_price = cached_binomial_price(
-                inputs['S0'], inputs['strike'], T, inputs['r'], inputs['sigma'],
-                N=500, option_type=inputs['option_type'], american=False
-            )
-            self.input_data['fair_price'] = fair_price
-            self.input_data['educational_mode'] = inputs['educational_mode']
-
-            # 6. Heatmap + Surface
-            self.input_data['heatmap_data'] = generate_profit_heatmap_data(
-                inputs['S0'], inputs['strike'], T, inputs['r'], inputs['sigma'],
-                inputs['option_type'], initial_option_price=fair_price,
-                low_pct_factor=0.5, high_pct_factor=2.0
-            )
-
-            # 7. Option Surface Data
-            self.input_data['surface_data'] = generate_option_surface_data(
-                inputs['S0'], inputs['strike'], T, inputs['r'], inputs['sigma'],
-                inputs['option_type'], low_pct_factor=0.5, high_pct_factor=2.0
-            )
-
-            # 8. Volatility Surface Data
-            self.input_data['vol_surface_data'] = generate_volatility_surface_data(
-                 inputs['S0'], inputs['strike'], T, inputs['sigma']
-            )
-
-            # 7. Done → schedule UI update
+            # --- 3. Merge results and signal completion ---
+            # The line that was causing the error is now gone.
+            # We merge the worker's results into our main data dictionary.
+            self.input_data.update(worker_results_dict)
+            
+            # Signal the GUI that everything is ready
             self.root.after(0, self.analysis_complete)
 
         except Exception as e:
@@ -1847,7 +1795,7 @@ class OptionAnalyzerApp:
         vol = fmt_val(rv_val * 100, "{:.1f}%")
         stderr = fmt_val(self.input_data.get('vol_stderr', 0) * 100, "{:.1f}%")
 
-        sim_count = 10000
+        sim_count = 100000
         hits = int(self.input_data.get('probability', 0.0) * sim_count)
         trigger_type = "Maximum" if self.input_data.get('option_type') == 'call' else "Minimum"
         iv_pct = iv_val * 100

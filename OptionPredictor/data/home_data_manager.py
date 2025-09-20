@@ -1,6 +1,8 @@
 from __future__ import annotations
 import requests
 import logging
+import nltk
+
 
 class HomeDataManager:
     """Centralised, lightweight fetchers for the dashboard."""
@@ -99,17 +101,19 @@ class HomeDataManager:
         """
         import datetime as dt, time, math, webbrowser
 
-        # ── nested scorer (prefer your in-house analyser) ────────────────
+         # ── nested scorer (prefer your in-house analyser) ────────────────
         def _score(txt: str) -> float | None:
+            # --- START OF FIX ---
+            # Make NLTK the primary and only sentiment analyzer
             try:
-                from OptionPredictor.ui.StockResearchSuite import score_text
-                return float(score_text(txt))
-            except Exception:
-                try:
-                    from nltk.sentiment import SentimentIntensityAnalyzer
-                    return SentimentIntensityAnalyzer().polarity_scores(txt)["compound"]
-                except Exception:
-                    return None
+                from nltk.sentiment import SentimentIntensityAnalyzer
+                # Use the 'compound' score which is a good overall measure (-1 to +1)
+                return SentimentIntensityAnalyzer().polarity_scores(txt)["compound"]
+            except Exception as e:
+                # If NLTK fails for any reason, log it and return None
+                logging.warning(f"NLTK sentiment analysis failed: {e}")
+                return None
+            # --- END OF FIX ---
 
         cutoff_ts = dt.datetime.now().timestamp() - 86_400         # last 24 h
         rows: list[tuple[str, float | None, str]] = []             # table rows
