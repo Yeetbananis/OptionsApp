@@ -28,6 +28,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 # GUI Embedding Imports
 # ===========================
 import tkinter as tk  # Needed for embedding canvas/toolbar
+from numba import njit, prange
+from typing import Union, Callable
 
 
 # Apply the dark theme globally for matplotlib plots (optional)
@@ -199,10 +201,10 @@ def black_scholes_price(S, K, T, r, sigma, option_type="call"):
         return K * math.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
 
 
-# --- Hybrid FFT-based rough Bergomi simulator (Bayer–Friz–Gatheral) ---
+from scipy.fft import rfft, irfft
 def simulate_rbergomi_hybrid(
     S0: float,
-    xi0: callable,
+    xi0: Union[float, Callable[[float], float], np.ndarray],
     r: float,
     eta: float,
     H: float,
@@ -210,58 +212,137 @@ def simulate_rbergomi_hybrid(
     T: float,
     N: int,
     n_paths: int,
-    m_cutoff: int = None
+    m_cutoff: int = None,
+    seed: int = None,
+    use_float32: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Simulate the rBergomi model via an O(N log N) hybrid FFT scheme.
+    This version includes critical fixes for accuracy and performance based on
+    expert evaluation.
+
+    Args:
+        S0 (float): Initial stock price.
+        xi0 (Union[float, Callable, np.ndarray]): Initial forward variance.
+        r (float): Risk-free interest rate.
+        eta (float): Volatility of volatility parameter.
+        H (float): Hurst parameter (must be > 0 and < 0.5).
+        rho (float): Correlation between Brownian motions.
+        T (float): Time to maturity in years.
+        N (int): Number of time steps.
+        n_paths (int): Number of simulation paths.
+        m_cutoff (int, optional): Cutoff for short-memory part. Defaults to N/10.
+        seed (int, optional): Seed for the random number generator.
+        use_float32 (bool, optional): If True, returns arrays as float32.
 
     Returns:
-      t (N+1,) time grid
-      paths (n_paths, N+1) simulated price paths
+        tuple[np.ndarray, np.ndarray]: Time points and simulated price paths.
     """
-    dt = T / N
-    t = np.linspace(0, T, N+1)
+    output_dtype = np.float32 if use_float32 else np.float64
+    sim_dtype = np.float64
 
-    # default cutoff if not provided
+    # --- 0. Input Validation ---
+    if not (0 < H < 0.5):
+        raise ValueError("Hurst parameter H must be in the interval (0, 0.5).")
+
     if m_cutoff is None:
         m_cutoff = max(1, N // 10)
 
-    # 1) build kernel weights a[k] = ∫_{k dt}^{(k+1) dt}(t_i - s)^{H-1/2} ds
-    prefac = dt**(H + 0.5) / (H + 0.5)
-    a = np.array([((i+1)**(H+0.5) - i**(H+0.5)) for i in range(N)]) * prefac
+    dt = T / N
+    t = np.linspace(0, T, N + 1, dtype=sim_dtype)
 
-    # split into exact part and tail
+    # --- 1. Handle flexible xi0 input ---
+    if np.isscalar(xi0):
+        xi0_vals = np.full(N, xi0, dtype=sim_dtype)
+    elif callable(xi0):
+        xi0_vals = np.array([xi0(ti) for ti in t[:-1]], dtype=sim_dtype)
+    else:
+        xi0_vals = np.asarray(xi0, dtype=sim_dtype)
+        if xi0_vals.shape != (N,):
+            raise ValueError(f"If xi0 is an array, it must have shape ({N},), got {xi0_vals.shape}")
+
+    # --- 2. Set up random number generator ---
+    rng = np.random.default_rng(seed)
+
+    # --- 3. Calculate kernel weights with correct normalization ---
+    # CRITICAL FIX 1: Added np.sqrt(2 * H) to ensure Var(F_t) = t^(2H).
+    prefac = dt**H * np.sqrt(2 * H) / (H + 0.5)
+    i_vals = np.arange(N, dtype=sim_dtype)
+    a = ((i_vals + 1)**(H + 0.5) - i_vals**(H + 0.5)) * prefac
     a_exact = a[:m_cutoff]
-    a_tail  = a[m_cutoff:]
+    a_tail = a[m_cutoff:]
 
-    # prepare circulant embedding for FFT convolution of tail
-    circ = np.concatenate([a_tail, np.zeros(N - len(a_tail))])
-    fft_circ = fft(np.concatenate([circ, circ]))
+    # --- 4. Generate correlated Brownian motions ---
+    Z1 = rng.standard_normal((n_paths, N), dtype=sim_dtype)
+    Z2_indep = rng.standard_normal((n_paths, N), dtype=sim_dtype)
+    Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2_indep
+    dW1 = Z1 * np.sqrt(dt)
 
-    paths = np.zeros((n_paths, N+1))
-    paths[:,0] = S0
+    # --- 5. Calculate short-memory contribution (Vectorized) ---
+    # PERFORMANCE FIX: Replaced slow, per-path np.convolve with a single,
+    # fast vectorized operation before the main simulation loop.
+    short_contrib_all = np.zeros((n_paths, N), dtype=sim_dtype)
+    for k in range(len(a_exact)):
+        # Correctly apply kernel a_exact[k] to Z2 at lag k
+        short_contrib_all[:, k:] += a_exact[k] * Z2[:, :N - k]
 
-    for p in range(n_paths):
-        # draw correlated Brownian increments
-        Z1 = np.random.standard_normal(N)
-        Z2 = np.random.standard_normal(N)
-        dW1 = Z1 * np.sqrt(dt)
-        dW2 = (rho * Z1 + np.sqrt(1 - rho**2) * Z2) * np.sqrt(dt)
 
-        # build fractional driver F
-        F = np.convolve(Z2, a_exact, mode='full')[:N]
-        z2_pad = np.concatenate([Z2, np.zeros(N)])
-        conv  = ifft(fft(z2_pad) * fft_circ)
-        F    += np.real(conv[:N])
+    # --- 6. Calculate long-memory contribution (FFT) ---
+    # CRITICAL FIX 2: Correctly shifted the tail kernel in the circulant vector
+    # to ensure it only contributes for lags >= m_cutoff.
+    circ = np.zeros(2 * N, dtype=sim_dtype)
+    circ[m_cutoff : m_cutoff + len(a_tail)] = a_tail
+    fft_circ = rfft(circ)
 
-        # Euler–Maruyama for log-S
-        logS = np.log(S0)
+    
+    z2_pad = np.zeros((n_paths, 2 * N), dtype=sim_dtype)
+    z2_pad[:, :N] = Z2
+    
+    fft_conv_all_paths = irfft(rfft(z2_pad, axis=1) * fft_circ, n=2*N, axis=1)
+    tail_contrib_all_paths = np.real(fft_conv_all_paths[:, :N])
+    
+    # --- 7. Evolve paths using Numba ---
+    paths = np.zeros((n_paths, N + 1), dtype=sim_dtype)
+    paths[:, 0] = S0
+
+    evolve_paths_numba(
+        paths=paths,
+        dW1=dW1,
+        short_contrib_all=short_contrib_all,
+        tail_contrib_all=tail_contrib_all_paths,
+        xi0_vals=xi0_vals,
+        r=r,
+        eta=eta,
+        H=H,
+        T=T
+    )
+
+    # --- 8. Return with optional downcasting ---
+    return t.astype(output_dtype), paths.astype(output_dtype)
+
+
+@njit(parallel=True, fastmath=True)
+def evolve_paths_numba(paths, dW1, short_contrib_all, tail_contrib_all, xi0_vals, r, eta, H, T):
+    n_paths, N = dW1.shape
+    dt = T / N
+
+    for p in prange(n_paths):
+        logS = np.log(paths[p, 0])
+
         for i in range(N):
-            var_i = xi0(t[i]) * np.exp(eta * F[i] - 0.5 * eta**2 * (t[i]**(2*H)))
-            logS += (r - 0.5 * var_i) * dt + np.sqrt(var_i) * dW1[i]
-            paths[p, i+1] = np.exp(logS)
+            # Combine pre-computed short and long memory parts
+            F_i = short_contrib_all[p, i] + tail_contrib_all[p, i]
 
-    return t, paths
+            # Variance process with exact martingale correction
+            var_t_i = (i + 0.5) * dt
+            exp_term = np.exp(eta * F_i - 0.5 * eta**2 * var_t_i**(2 * H))
+            var_i = xi0_vals[i] * exp_term
+
+            # Evolve the log-price
+            logS += (r - 0.5 * var_i) * dt + np.sqrt(var_i) * dW1[p, i]
+            paths[p, i + 1] = np.exp(logS)
+
+
 
 
 # --- Binomial Option Pricing ---
