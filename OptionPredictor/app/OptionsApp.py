@@ -375,6 +375,12 @@ except ImportError:
     messagebox.showerror("Import Error", "Could not find 'MonteCarloSimulation.py'. Make sure it's in the same directory as this script.")
     exit()
 
+try:
+    from ctypes import windll
+    windll.shcore.SetProcessDpiAwareness(1)
+except ImportError:
+    pass # This will fail on non-Windows systems, which is fin
+
 class OptionAnalyzerApp:
     def __init__(self, root):
         # 1. PRIMARY SETUP (Settings must be first)

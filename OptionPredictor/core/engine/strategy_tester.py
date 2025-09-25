@@ -58,11 +58,15 @@ def ensure_spy_backup():
         df = pd.read_csv(io.StringIO(resp.text), parse_dates=["Date"], index_col="Date").sort_index()
     df.to_csv(backup)
 
+_icon_cache = {}
 def load_icon(path, tint_color=None, tint_black=False, size=(24, 24)):
     """
-    Load an icon and tint all non-transparent pixels to `tint_color` or black if `tint_black` is True.
-    `tint_color` is a hex string like '#RRGGBB' or an (R,G,B) / (R,G,B,A) tuple.
+    Load an icon, tint it, and cache the result to avoid redundant file I/O.
     """
+    cache_key = (path, tint_color, tint_black, size)
+    if cache_key in _icon_cache:
+        return _icon_cache[cache_key]
+    
     try:
         img = Image.open(path).convert("RGBA").resize(size, Image.LANCZOS)
         if tint_black:
@@ -76,35 +80,27 @@ def load_icon(path, tint_color=None, tint_black=False, size=(24, 24)):
             else:
                 tint = (0, 0, 0, 255)
         else:
-            return ImageTk.PhotoImage(img)
+            photo_image = ImageTk.PhotoImage(img)
+            _icon_cache[cache_key] = photo_image
+            return photo_image
+
         r, g, b, a = img.split()
         colored = Image.new("RGBA", img.size, tint)
         colored.putalpha(a)
-        img = colored
-        return ImageTk.PhotoImage(img)
+        photo_image = ImageTk.PhotoImage(colored)
+        _icon_cache[cache_key] = photo_image
+        return photo_image
     except Exception as e:
         logging.error(f"Failed to load icon {path}: {e}")
         return None
 
 
 
-
-
 class StrategyTesterWindow:
     def __init__(self, parent, app_instance):
         self.app = app_instance
-        self.theme = self.app.current_theme # Get theme consistently from OptionAnalyzerApp
-
-        # Initialize attributes that update_theme might use before _create_widgets fully assigns them
-        # This prevents AttributeErrors if update_theme is called early or if a widget isn't created
+        self.theme = self.app.current_theme
         self.copy_perf_btn = None
-        self.filter_button = None
-        self.export_btn = None
-        self.filter_entry = None
-        self.summary_txt = None
-        self.log_text = None # If you have a general log text for live logging from backtest engine
-        self.start_ent = None
-        self.end_ent = None
         self.log_tree = None
         self.history_tree = None
         self.wifi_label = None
@@ -112,19 +108,14 @@ class StrategyTesterWindow:
         self.fig = None
         self.ax = None
         self.canvas = None
-        self.inputs_frame = None # For the calendar area fix
 
-        # Get initial theme settings from the parent app
-        # These will be used by _create_widgets for initial styling
         theme_settings = self.app.theme_settings()
-        self.current_theme_settings = theme_settings # Store for use in _create_widgets if needed
-        self.summary_txt_bg = theme_settings.get("entry_bg", "#3c3c3c" if self.theme == "dark" else "#ffffff")
+        self.current_theme_settings = theme_settings
         self.summary_txt_fg = theme_settings.get("fg", "#ffffff" if self.theme == "dark" else "#000000")
 
-        # --- Single Toplevel creation ---
         self.win = tk.Toplevel(parent)
-        self.win.title("Options Strategy Backtester") # Consistent title
-        self.win.geometry("1400x900") # Set desired geometry
+        self.win.title("Options Strategy Backtester")
+        self.win.geometry("1400x900")
         self.win.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.filters = FilterConfig()
@@ -137,67 +128,50 @@ class StrategyTesterWindow:
         self._flush_scheduled = False
         self.selected_trade_iid = None
         self.trade_marker = None
-        self.bounce = BounceOverlay(self.win) # Ensure BounceOverlay is compatible
+        self.bounce = BounceOverlay(self.win)
         self.custom_legs = []
 
-        # Load icons using the consistent foreground color
+        self._end_early = False
+        self.stat_labels = {}
+        self.optimization_runs_data = {}
+
         icon_fg_color = self.summary_txt_fg
         self.icons = {
-            "down":   load_icon(ICON_DIR/"wifi_disconnected.png", tint_color=icon_fg_color),
-            "weak":   load_icon(ICON_DIR/"wifi_weak.png",        tint_color=icon_fg_color),
-            "medium": load_icon(ICON_DIR/"wifi_medium.png",      tint_color=icon_fg_color),
-            "strong": load_icon(ICON_DIR/"wifi_strong.png",      tint_color=icon_fg_color),
-            "secure": load_icon(ICON_DIR/"wifi_secure.png",      tint_color=icon_fg_color),
+            "down": load_icon(ICON_DIR/"wifi_disconnected.png", tint_color=icon_fg_color),
+            "weak": load_icon(ICON_DIR/"wifi_weak.png", tint_color=icon_fg_color),
+            "medium": load_icon(ICON_DIR/"wifi_medium.png", tint_color=icon_fg_color),
+            "strong": load_icon(ICON_DIR/"wifi_strong.png", tint_color=icon_fg_color),
+            "secure": load_icon(ICON_DIR/"wifi_secure.png", tint_color=icon_fg_color),
         }
-        if ICON_DIR: # Check if ICON_DIR is valid
-            self.fullscreen_icon = load_icon(ICON_DIR / "fullscreen.png", tint_color=icon_fg_color, size=(16, 16))
-            self.minimize_icon = load_icon(ICON_DIR / "minimize.png", tint_color=icon_fg_color, size=(16, 16))
-        else:
-            self.fullscreen_icon = None
-            self.minimize_icon = None
-
+        self.fullscreen_icon = load_icon(ICON_DIR / "fullscreen.png", tint_color=icon_fg_color, size=(16, 16))
+        self.minimize_icon = load_icon(ICON_DIR / "minimize.png", tint_color=icon_fg_color, size=(16, 16))
 
         self._create_widgets() # Create all GUI elements
 
-        # Set up right-click context menus (check if widgets exist)
-        if self.summary_txt:
-            self.summary_txt.bind("<Button-3>", self._show_text_context_menu)
-        self._text_menu = tk.Menu(self.win, tearoff=0)
-        self._text_menu.add_command(label="Copy", command=self._copy_text_selection)
+        # Get theme colors for manually styling the context menus
+        theme_settings = self.app.theme_settings()
+        menu_fg = theme_settings.get("fg", "black")
+        menu_bg = theme_settings.get("bg", "white")
+        
+        # Create a themed menu for the "Trade Log" table
+        self._log_tree_menu = tk.Menu(self.win, tearoff=0, background=menu_bg, foreground=menu_fg)
+        self._log_tree_menu.add_command(label="Copy", command=self._copy_tree_selection)
 
-        if self.log_tree and self.history_tree:
-            for tree_widget in (self.log_tree, self.history_tree):
-                if tree_widget: tree_widget.bind("<Button-3>", self._show_tree_context_menu)
-        self._tree_menu = tk.Menu(self.win, tearoff=0)
-        self._tree_menu.add_command(label="Copy", command=self._copy_tree_selection)
+        # Create a themed menu for the "Optimization Results" table with the extra option
+        self._history_tree_menu = tk.Menu(self.win, tearoff=0, background=menu_bg, foreground=menu_fg)
+        self._history_tree_menu.add_command(label="Load Trades for Selected Run", command=self._load_selected_run_trades)
+        self._history_tree_menu.add_separator()
+        self._history_tree_menu.add_command(label="Copy", command=self._copy_tree_selection)
 
-        # Logging handler
-        if self.summary_txt:
-            class TextHandler(logging.Handler):
-                def __init__(self, text_widget):
-                    super().__init__()
-                    self.text_widget = text_widget
-                def emit(self, record):
-                    try:
-                        if not getattr(self.text_widget, "winfo_exists", lambda: False)(): return
-                        msg = self.format(record)
-                        self.text_widget.configure(state='normal')
-                        self.text_widget.insert('end', msg + '\n')
-                        self.text_widget.see('end')
-                        self.text_widget.configure(state='disabled')
-                    except tk.TclError: return
-            text_handler = TextHandler(self.summary_txt)
-            text_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-            logging.getLogger().addHandler(text_handler) # Be cautious adding to root logger
-
+        # Bind the right-click event to our intelligent handler for both trees
+        if self.log_tree: self.log_tree.bind("<Button-3>", self._show_tree_context_menu)
+        if self.history_tree: self.history_tree.bind("<Button-3>", self._show_tree_context_menu)
+        
+        # <<< FIX: Removed the old TextHandler logging setup which is no longer used >>>
         self._setup_default_values()
         logging.info("Strategy Tester window initialized.")
 
-        # OptionsApp applies general theme to tk widgets and basic window bg
         self.app.apply_theme_to_window(self.win)
-
-        # Call update_theme to apply specific styles (plot, calendar, tags, etc.)
-        # This will also ensure initial state is correct.
         self.update_theme(self.theme)
 
 
@@ -218,15 +192,20 @@ class StrategyTesterWindow:
         self.win.clipboard_append(text)
 
     def _show_tree_context_menu(self, event):
-        # determine which tree was clicked
+        """Intelligently shows the correct context menu based on the treeview clicked."""
         widget = event.widget
         iid = widget.identify_row(event.y)
         if not iid:
             return
+        
         widget.selection_set(iid)
-        # remember which tree for the copy callback
-        self._last_tree = widget
-        self._tree_menu.tk_popup(event.x_root, event.y_root)
+        self._last_tree = widget # Remember which tree for the 'Copy' command
+
+        # Display the correct menu for the specific tree
+        if widget == self.history_tree:
+            self._history_tree_menu.tk_popup(event.x_root, event.y_root)
+        else:
+            self._log_tree_menu.tk_popup(event.x_root, event.y_root)
 
     def _copy_tree_selection(self):
         widget = getattr(self, "_last_tree", None)
@@ -242,12 +221,15 @@ class StrategyTesterWindow:
 
 
     def _create_widgets(self):
-        main_pane = tk.PanedWindow(self.win, orient=tk.VERTICAL, sashrelief=tk.RAISED)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.HEADER_NORMAL_HEIGHT = 275
+        self.HEADER_EXPANDED_HEIGHT = 325 # Give it more space for the progress bar
+
+        self.main_pane = tk.PanedWindow(self.win, orient=tk.VERTICAL, sashrelief=tk.RAISED)
+        self.main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Header with custom legs display
-        hdr = ttk.LabelFrame(main_pane, text="Backtest Configuration", padding=15)
-        main_pane.add(hdr, stretch="never")
+        hdr = ttk.LabelFrame(self.main_pane, text="Backtest Configuration", padding=15)
+        self.main_pane.add(hdr, stretch="never")
 
         # Add custom legs display label
         self.custom_legs_label = ttk.Label(
@@ -390,7 +372,11 @@ class StrategyTesterWindow:
         self.cancel_opt_btn = ttk.Button(self.opt_toolbar, text="✖ Cancel", command=self._cancel_optimization, state='disabled')
         self.cancel_opt_btn.pack(side='left', padx=4)
 
-        self.opt_combo_lbl = ttk.Label(button_frame, text="", font=('Segoe UI', 9, 'italic'), foreground='#888888')
+        # Create the new label for status text animations
+        self.status_label = ttk.Label(button_frame, text="", font=('Segoe UI', 9, 'italic'))
+
+
+        self.opt_combo_lbl = ttk.Label(button_frame, text="", font=('Segoe UI', 9, 'italic'), foreground='#888888', width=65, anchor='w')
         self.opt_combo_lbl.pack(fill='x', padx=4, pady=(2,0))
         self.opt_progress_lbl = ttk.Label(button_frame, text="", font=('Segoe UI', 9))
         self.opt_progress_lbl.pack(fill='x', padx=4)
@@ -418,33 +404,79 @@ class StrategyTesterWindow:
         self.opt_progress_lbl.pack_forget()
         self.progress.pack_forget()
 
-        results_pane = tk.PanedWindow(main_pane, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
-        main_pane.add(results_pane, stretch="always")
+        results_pane = tk.PanedWindow(self.main_pane, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+        self.main_pane.add(results_pane, stretch="always")
 
-        self.win.update_idletasks()
-        main_pane.sash_place(0, 0, 275)
 
-        left_frame = ttk.Frame(results_pane, padding=10)
-        results_pane.add(left_frame, stretch="always")
-        summary_frame = ttk.LabelFrame(left_frame, text="Performance Summary", padding=10)
-        # Define text colors based on theme
-        self.summary_txt_bg = "#1e1e1e" if self.theme == "dark" else "#ffffff"
-        self.summary_txt_fg = "#ffffff" if self.theme == "dark" else "#000000"
+         # <<< FIX: Create a resizable VERTICAL pane for the left side >>>
+        left_vertical_pane = tk.PanedWindow(results_pane, orient=tk.VERTICAL, sashrelief=tk.RAISED)
+        results_pane.add(left_vertical_pane, stretch="always")
+
+        # Create the summary frame that will go in the TOP of the vertical pane
+        summary_frame = ttk.LabelFrame(left_vertical_pane, text="Performance Summary", padding=10)
+        left_vertical_pane.add(summary_frame, stretch="never") # Add to the pane
+
+
+        # <<< FIX: This frame now uses a grid to place metric sections horizontally >>>
+        summary_content_frame = ttk.Frame(summary_frame)
+        summary_content_frame.pack(fill='x', expand=True)
         
-        # Create the summary text widget with theme-appropriate colors
-        self.summary_txt = tk.Text(summary_frame, height=10, width=42, 
-                      bg=self.summary_txt_bg, 
-                      fg=self.summary_txt_fg, 
-                      relief=tk.FLAT, 
-                      wrap="word", 
-                      font=('Consolas', 10))
+        # Create a frame for each horizontal section
+        perf_frame = ttk.Frame(summary_content_frame)
+        perf_frame.grid(row=0, column=0, sticky='nw', padx=(0, 10))
         
-        self.summary_txt.pack(fill="both", expand=True)
-        summary_frame.pack(fill="x", expand=False, pady=(0,5))
+        sep1 = ttk.Separator(summary_content_frame, orient='vertical')
+        sep1.grid(row=0, column=1, sticky='ns', padx=10, pady=5)
+
+        risk_frame = ttk.Frame(summary_content_frame)
+        risk_frame.grid(row=0, column=2, sticky='nw', padx=10)
+
+        sep2 = ttk.Separator(summary_content_frame, orient='vertical')
+        sep2.grid(row=0, column=3, sticky='ns', padx=10, pady=5)
+
+        trade_frame = ttk.Frame(summary_content_frame)
+        trade_frame.grid(row=0, column=4, sticky='nw', padx=(10, 0))
+
+        # Helper function to create a metric row in a specific parent frame
+        def create_metric_row(parent, row, key, label_text):
+            label = ttk.Label(parent, text=label_text + ":")
+            label.grid(row=row, column=0, sticky='e', padx=(0, 10))
+            value_label = ttk.Label(parent, text="N-A", font=('Segoe UI', 9, 'bold'), anchor='w')
+            value_label.grid(row=row, column=1, sticky='w')
+            self.stat_labels[key] = value_label
+        
+        # -- Populate Performance Section --
+        ttk.Label(perf_frame, text="Overall Performance", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 4))
+        create_metric_row(perf_frame, 1, 'start_value', 'Start Equity')
+        create_metric_row(perf_frame, 2, 'end_value', 'End Equity')
+        create_metric_row(perf_frame, 3, 'total_return', 'Total Return ($)')
+        create_metric_row(perf_frame, 4, 'total_return_pct', 'Total Return (%)')
+        create_metric_row(perf_frame, 5, 'cagr', 'CAGR (%)')
+
+        # -- Populate Risk Section --
+        ttk.Label(risk_frame, text="Risk Analysis", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 4))
+        create_metric_row(risk_frame, 1, 'unlimited_risk', 'Unlimited Risk')
+        create_metric_row(risk_frame, 2, 'sharpe', 'Sharpe Ratio')
+        create_metric_row(risk_frame, 3, 'sortino', 'Sortino Ratio')
+        create_metric_row(risk_frame, 4, 'max_drawdown', 'Max Drawdown ($)')
+        create_metric_row(risk_frame, 5, 'ulcer_index', 'Ulcer Index')
+
+        # -- Populate Trade Stats Section --
+        ttk.Label(trade_frame, text="Trade Statistics", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, columnspan=2, sticky='w', pady=(0, 4))
+        create_metric_row(trade_frame, 1, 'total_trades', 'Total Trades')
+        create_metric_row(trade_frame, 2, 'win_rate', 'Win Rate (%)')
+        create_metric_row(trade_frame, 3, 'profit_factor', 'Profit Factor')
+        create_metric_row(trade_frame, 4, 'expectancy', 'Expectancy ($)')
+        self.beat_spy_label = ttk.Label(trade_frame, text="")
+        self.beat_spy_label.grid(row=5, column=0, columnspan=2, sticky='w', pady=(5,0))
+        
+
         self.copy_perf_btn = ttk.Button(summary_frame, text="📋 Copy Metrics", command=self._copy_performance_metrics)
-        self.copy_perf_btn.pack(anchor="ne", pady=(0, 5))
-        plot_frame = ttk.LabelFrame(left_frame, text="Equity Curve", padding=5)
-        plot_frame.pack(fill="both", expand=True)
+        self.copy_perf_btn.pack(anchor="ne", side='bottom', pady=(10, 0))
+
+        # Create the plot frame that will go in the BOTTOM of the vertical pane
+        plot_frame = ttk.LabelFrame(left_vertical_pane, text="Equity Curve", padding=5)
+        left_vertical_pane.add(plot_frame, stretch="always") # Add to the pane
 
         fig_bg = "#0f0f0f" if self.theme == "dark" else "#f0f0f0"
         self.fig, self.ax = plt.subplots(facecolor=fig_bg)
@@ -513,8 +545,8 @@ class StrategyTesterWindow:
         tabs = ttk.Notebook(log_frame)
         best_tab = ttk.Frame(tabs)
         hist_tab = ttk.Frame(tabs)
-        tabs.add(best_tab, text="Best Run")
-        tabs.add(hist_tab, text="All History")
+        tabs.add(best_tab, text="Trade Log")
+        tabs.add(hist_tab, text="Optimization Results")
         tabs.pack(fill="both", expand=True)
 
         cols = ("Trade #","Open Date","Close Date","K Short","K Long","Contracts","Credit ($)","PnL ($)")
@@ -558,11 +590,15 @@ class StrategyTesterWindow:
         self.log_tree.bind('<<TreeviewSelect>>', self._on_trade_select)
         self.log_tree.bind("<Button-3>", self._show_trade_right_click)
 
-        hist_cols = cols + ("dte_target","allocation_pct","profit_target_pct")
-        self.history_tree = ttk.Treeview(hist_tab, columns=hist_cols, show="headings", height=15)
-        for c in hist_cols:
-            self.history_tree.heading(c, text=c)
-            self.history_tree.column(c, width=80, anchor="c")
+        # REPLACE THE OLD history_tree SETUP WITH THIS
+        opt_cols = {
+            "Return %": 80, "CAGR %": 80, "Sharpe": 70, "Win Rate %": 80,
+            "Trades": 60, "DTE": 50, "Alloc %": 60, "PT %": 50, "SL xCr": 50
+        }
+        self.history_tree = ttk.Treeview(hist_tab, columns=list(opt_cols.keys()), show="headings", height=15)
+        for col, width in opt_cols.items():
+            self.history_tree.heading(col, text=col)
+            self.history_tree.column(col, width=width, anchor="c")
         self.history_tree.tag_configure('oddrow')
         self.history_tree.tag_configure('evenrow')
 
@@ -574,6 +610,16 @@ class StrategyTesterWindow:
         self.history_tree.grid(row=0, column=0, sticky="nsew")
         vsb_hist.grid(row=0, column=1, sticky="ns")
         hsb_hist.grid(row=1, column=0, sticky="ew")
+
+        # --- Set initial pane sizes ---
+        self.win.update_idletasks()
+        self.main_pane.sash_place(0, 0, self.HEADER_NORMAL_HEIGHT)
+        results_pane.sash_place(0, 850, 0)
+        
+        # Dynamically set the summary pane height to fit its content cleanly
+        summary_frame.update_idletasks()
+        required_height = summary_frame.winfo_reqheight()
+        left_vertical_pane.sash_place(0, 0, required_height + 20) # Add padding
 
 
     def check_wifi(self):
@@ -715,7 +761,7 @@ class StrategyTesterWindow:
         if self.filter_button: self.filter_button.config(bg=btn_bg_color, fg=fg_color) # tk.Button
         if self.export_btn: self.export_btn.config(bg=btn_bg_color, fg=fg_color)     # tk.Button
         if self.filter_entry: self.filter_entry.config(bg=self.summary_txt_bg, fg=fg_color, insertbackground=fg_color) # tk.Entry
-        if self.summary_txt: self.summary_txt.config(bg=self.summary_txt_bg, fg=fg_color)
+
         if hasattr(self, 'log_text') and self.log_text:
             self.log_text.config(bg=self.summary_txt_bg, fg=fg_color)
 
@@ -860,83 +906,57 @@ class StrategyTesterWindow:
              self.win.master.apply_theme_to_window(dlg)
 
     def _start_optimization(self, param_grid: dict):
-        """Kick off a batch run over our param grid with live progress & trades."""
+        """Kick off a batch run over our param grid with live progress."""
         base_cfg = self._validate_inputs()
         if base_cfg is None:
             return
+        
+        self._start_status_animation("Assembling Timelines & Pre-computing Volatility")
 
-        # ensure filters object
         if isinstance(base_cfg.get("filters"), dict):
             base_cfg["filters"] = FilterConfig(**base_cfg["filters"])
 
-        # ─── load (cached) earnings calendar only once ──────────────────────────────
-        #cal = fetch_earnings_calendar(base_cfg["underlying"])
-        #base_cfg["filters"].earnings_calendar = { base_cfg["underlying"]: cal }
-
-        # start bounce animation during long optimize phase
-        self.bounce.start()
         self.win.update_idletasks()
+        self.main_pane.sash_place(0, 0, self.HEADER_EXPANDED_HEIGHT)
 
-        # Build a StrategyConfig template (validates internally)
         try:
             template = StrategyConfig(**base_cfg)
         except Exception as e:
             messagebox.showerror("Config Error", str(e), parent=self.win)
             return
 
-        # Clear summary & disable main buttons
+        # Prepare UI for optimization
         self.run_btn.configure(state="disabled")
         self.optimize_btn.configure(state="disabled")
-        # also disable Build-Legs (but don’t hide it)
         self.build_btn.configure(state="disabled")
-
-        # Show the secondary toolbar
         self.opt_toolbar.pack(fill='x', pady=5)
         self.pause_opt_btn.configure(state='normal', text='⏸ Pause')
         self.end_early_btn.configure(state='normal')
         self.cancel_opt_btn.configure(state='normal')
-
-        # Show status labels
-        self.opt_combo_lbl.configure(text="")
         self.opt_combo_lbl.pack(fill='x', padx=4, pady=(2,0))
-        self.opt_progress_lbl.configure(text="")
         self.opt_progress_lbl.pack(fill='x', padx=4)
-
-        # Configure progress bar
-        self.progress.configure(mode='determinate', value=0, maximum=1)
         self.progress.pack(fill='x', padx=4, pady=(2,10))
 
-        # Compute total combinations
         total = 1
         for vals in param_grid.values():
             total *= len(vals)
-        self.progress.configure(maximum=total)
+        self.progress.configure(maximum=total, value=0, mode='determinate')
+        self.opt_start_time = time.monotonic() # Use monotonic for accurate duration
+        self.opt_combo_lbl.config(text="Initializing...")
 
-        # Record start time for ETA
-        self.opt_start_time = _dt.datetime.now()
+        # --- Variables for the "Steady-State" ETA Calibration ---
+        self._eta_calibrated = False
+        self._locked_in_eta = 0
+        self._eta_start_time = 0          # Timestamp when the final countdown begins
+        self._calibration_start_time = 0  # Timestamp when the measurement window opens
+        self.CALIBRATION_START_TASK = 3   # Start measuring after 2 tasks
+        self.CALIBRATION_END_TASK = 10     # Stop measuring after 10 tasks
 
-        # Reset combo label for the first iteration
-        self.opt_combo_lbl.config(text="Testing: ")
-
-        # ─────────────────────────────────────────────────────────────
-        # 1) Preload all price & vol data once for the entire grid
-        #    (avoids repeated I/O and roll-vol computation)
-        price_data = get_prices(
-            template.underlying,
-            template.start,
-            template.end,
-        )
+        price_data = get_prices(template.underlying, template.start, template.end)
         vol_data = realized_vol(price_data).ffill().bfill().clip(lower=0.05)
-
-        # Optional: preload benchmark too
         benchmark_data = None
         if template.use_benchmark:
-            benchmark_data = get_prices(
-                template.benchmark_ticker,
-                template.start,
-                template.end,
-            )
-
+            benchmark_data = get_prices(template.benchmark_ticker, template.start, template.end)
 
         # Create and store the BatchRunner with shared data
         self.runner = BatchRunner(
@@ -946,9 +966,10 @@ class StrategyTesterWindow:
             vol_data=vol_data,
             benchmark_data=benchmark_data,
             progress_callback=self._update_opt_progress,
-            trade_callback=self._log_trade
+            # FIX: This callback is disabled to prevent the premature trade log population.
+            # The final results function is now solely responsible for all UI updates.
+            trade_callback=None
         )
-
 
         # Run in background
         threading.Thread(target=self._run_optimization_thread, daemon=True).start()
@@ -957,120 +978,172 @@ class StrategyTesterWindow:
 
 
     def _run_optimization_thread(self):
-        """Execute BatchRunner and schedule display."""
+        """Executes the BatchRunner and schedules UI updates based on how it finished."""
         try:
             self.runner.run()
-            self.win.after(0, self._populate_optimization_results)
+            # After the run is complete (normally or via cancellation):
+            # 1. If 'End Early' was clicked, always show the partial results.
+            # 2. If it finished normally (not cancelled), show the full results.
+            # 3. If it was just cancelled, do nothing.
+            if self._end_early or not self.runner._cancel_event.is_set():
+                self.win.after(0, self._populate_optimization_results)
         except Exception as e:
-            logging.exception("Error during optimization:")
-            # capture e into the lambda
+            logging.exception("A critical error occurred during the optimization batch run:")
             self.win.after(0, lambda exc=e: messagebox.showerror(
-                "Optimize Error", str(exc), parent=self.win))
-
+                "Optimization Error", f"A critical error stopped the process:\n{exc}", parent=self.win))
         finally:
-            self.win.after(0, self._finalize_backtest_ui)  # re-enable Run & Optimize
+            # Always reset the flag and the UI after the thread is done.
+            self._end_early = False
+            self.win.after(0, self._finalize_backtest_ui)
 
     def _populate_optimization_results(self):
-        """After grid-search, pick the best combo and display it just like a normal backtest."""
+        """
+        After grid-search, populates the Optimization Results table,
+        applies the best settings to the UI, and shows the best run's trades.
+        """
+        if not hasattr(self, 'runner') or self.runner.results_df().empty:
+            logging.warning("Optimization ended with no results to populate.")
+            self._finalize_backtest_ui()
+            return
 
-        # ─── STOP THE BOUNCE OVERLAY ───
-        self.bounce.stop()
-
-        # 1) grab the DataFrame and find the best row
         df = self.runner.results_df()
-        best = df.sort_values("total_return_pct", ascending=False).iloc[0]
+        if df.empty:
+            messagebox.showinfo("No Results", "Optimization did not produce any valid results.", parent=self.win)
+            self._finalize_backtest_ui()
+            return
+            
+        # 1. Populate the "Optimization Results" summary table
+        self.history_tree.delete(*self.history_tree.get_children())
+        self.optimization_runs_data.clear()
+        
+        df_sorted = df.sort_values("total_return_pct", ascending=False).reset_index(drop=True)
+        
+        for index, row in df_sorted.iterrows():
+            try:
+                # Prepare values for display in the treeview
+                display_values = (
+                    f"{row.get('total_return_pct', 0):.2f}",
+                    f"{row.get('cagr', 0):.2f}",
+                    f"{row.get('sharpe', 0):.3f}",
+                    f"{row.get('win_rate', 0):.2f}",
+                    f"{row.get('total_trades', 0)}",
+                    f"{int(row.get('dte_target', 0))}",
+                    f"{row.get('allocation_pct', 0):.1f}",
+                    f"{row.get('profit_target_pct', 0):.1f}",
+                    f"{row.get('stop_loss_mult', 0):.1f}"
+                )
+                iid = self.history_tree.insert("", "end", values=display_values)
+                # Store the full data for this run so we can re-run it later
+                self.optimization_runs_data[iid] = row.to_dict()
+            except Exception:
+                continue # Skip any row that fails to format
 
-        # 2) write best values back into the inputs
-        self.dte_ent.delete(0, tk.END)
-        self.dte_ent.insert(0, str(int(best["dte_target"])))
+        # 2. Get the best run from the top of our sorted dataframe
+        best = df_sorted.iloc[0]
 
-        self.alloc_ent.delete(0, tk.END)
-        self.alloc_ent.insert(0, f"{best['allocation_pct']}")
+        # 3. Apply best settings to inputs (UI)
+        try:
+            self.dte_ent.delete(0, tk.END); self.dte_ent.insert(0, str(int(best["dte_target"])))
+            self.alloc_ent.delete(0, tk.END); self.alloc_ent.insert(0, f"{best['allocation_pct']}")
+            self.pt_ent.delete(0, tk.END); self.pt_ent.insert(0, f"{best['profit_target_pct']}")
+            self.sl_ent.delete(0, tk.END); self.sl_ent.insert(0, f"{best['stop_loss_mult']}")
+        except Exception as e:
+            logging.warning(f"Could not apply best settings to UI inputs: {e}")
 
-        self.pt_ent.delete(0, tk.END)
-        self.pt_ent.insert(0, f"{best['profit_target_pct']}")
-
-        self.sl_ent.delete(0, tk.END)
-        self.sl_ent.insert(0, f"{best['stop_loss_mult']}")
-
-        # ─── popup with best settings ───────────────────────────
+        # 4. Show the notification message
         msg = (
             "🎉 Optimization Complete! 🎉\n\n"
-            "Best Settings Applied:\n"
-            f"• DTE: {int(best['dte_target'])}\n"
-            f"• Allocation %: {best['allocation_pct']}\n"
-            f"• Profit Target %: {best['profit_target_pct']}\n\n"
-            f"Win Rate: {best['win_rate']:.2f}%\n"
-            f"Total Return: {best['total_return_pct']:.2f}%"
+            "The best settings have been applied to the input fields.\n"
+            "The 'Trade Log' shows the trades for this best run.\n\n"
+            "Click any run in the 'Optimization Results' tab to see its trades."
         )
-        messagebox.showinfo("Optimization Results", msg, parent=self.win)
+        messagebox.showinfo("Optimization Complete", msg, parent=self.win)
 
-        # 3) build a config with overrides
-        base_cfg = self._validate_inputs()
-        merged = {
-            **base_cfg,
-            "dte_target":        int(best["dte_target"]),
-            "allocation_pct":    best["allocation_pct"],
-            "profit_target_pct": best["profit_target_pct"],
-            "stop_loss_mult":    best["stop_loss_mult"],
-        }
-        self.filters = merged["filters"]
+        # 5. Populate all other UI elements with the best run's data
+        self._display_best_run_results(best)
+        self._finalize_backtest_ui()
 
-        # 4) run single backtest on best
-        cfg_obj = StrategyConfig(**merged)
-        engine = BacktestEngine(cfg_obj)
-        engine.run()
-        self.engine = engine
 
-        # 5) clear and redraw trade logs
-        self.log_tree.delete(*self.log_tree.get_children())
-        self.history_tree.delete(*self.history_tree.get_children())
-
-        # Insert best-run trades into Best Run tab
-        best_trades = self.runner.best_run_trades()
-        for i, t in enumerate(best_trades):
-            pnl = t.get('pnl', 0.0)
-            tag = 'profit' if pnl > 0 else 'loss' if pnl < 0 else ('evenrow' if i % 2 == 0 else 'oddrow')
-
-            k_short = t.get('K_short')
-            k_short_str = f"{k_short:.2f}" if isinstance(k_short, (int, float)) else ""
-            k_long = t.get('K_long')
-            k_long_str = f"{k_long:.2f}" if isinstance(k_long, (int, float)) else ""
-
-            vals = (
-                i + 1,
-                t['open'].strftime('%Y-%m-%d'),
-                t['close'].strftime('%Y-%m-%d'),
-                k_short_str,
-                k_long_str,
-                t.get('contracts', 0),
-                f"{t.get('credit', 0):.2f}",
-                f"{pnl:.2f}"
+    def _display_best_run_results(self, best: pd.Series):
+        """
+        Handles populating all UI elements with the data from a single, specific run
+        (e.g., the best run after an optimization).
+        """
+        # --- 1. Regenerate full results for the selected run ---
+        # This ensures we have the definitive trade list and equity curve.
+        from core.engine.backtestengine import BacktestEngine
+        from app.config import StrategyConfig
+        try:
+            base_cfg = self._validate_inputs()
+            best_config_dict = {
+                **base_cfg,
+                "dte_target": int(best["dte_target"]),
+                "allocation_pct": best["allocation_pct"],
+                "profit_target_pct": best["profit_target_pct"],
+                "stop_loss_mult": best["stop_loss_mult"],
+            }
+            config = StrategyConfig(**best_config_dict)
+            engine = BacktestEngine(config)
+            engine.run(
+                price_data=getattr(self.runner, "price_data", None),
+                vol_data=getattr(self.runner, "vol_data", None),
+                benchmark_data=getattr(self.runner, "benchmark_data", None),
+                spy_prices=getattr(self.runner, "spy_prices", None)
             )
-            self.log_tree.insert("", "end", values=vals, tags=(tag,))
+            result = engine.result()
+            self._best_trades = result.trade_list() # This is used to populate the Trade Log
+            self._best_equity = result.equity_curve()
 
-            # Insert all trades into All History tab
-            for i, record in enumerate(self.runner.all_trades(), start=1):
-                pnl = record.get('pnl', 0)
-                tag = 'profit' if pnl > 0 else 'loss'
-                vals = (
-                    i,
-                    record['open'].strftime('%Y-%m-%d'),
-                    record['close'].strftime('%Y-%m-%d'),
-                    f"{record.get('K_short',''):.2f}" if record.get('K_short') is not None else "",
-                    f"{record.get('K_long',''):.2f}"  if record.get('K_long')  is not None else "",
-                    record.get('contracts', 0),
-                    f"{record.get('credit', 0):.2f}",
-                    f"{record.get('pnl', 0):.2f}",
-                    record.get('dte_target', ''),
-                    record.get('allocation_pct', ''),
-                    record.get('profit_target_pct', ''),
-                )
-                self.history_tree.insert("", "end", values=vals, tags=(tag,))
+        except Exception as e:
+            logging.error(f"Failed to generate final results for the best run: {e}")
+            messagebox.showerror("Result Error", f"Could not generate the final report:\n{e}", parent=self.win)
+            self._best_equity, self._best_trades = None, []
 
+        # --- 2. Populate the "Trade Log" tab ---
+        # NOTE: We no longer touch self.history_tree here.
+        self._populate_log_tree(self._best_trades)
 
-        self.opt_combo_lbl.pack_forget()  # hide label
-        self._populate_results()
+        # --- 3. Plot Equity Curve and Benchmark ---
+        try:
+            self.ax.clear()
+            benchmark_final_value = None
+            if self._best_equity is not None and not self._best_equity.empty:
+                eq = self._best_equity
+                self.ax.plot(eq.index, eq.values, label="Strategy", linewidth=1.25)
+                self.plot_data['dates'], self.plot_data['pnl'] = list(eq.index), list(eq.values)
+
+                benchmark_data = getattr(self.runner, "benchmark_data", None)
+                if benchmark_data is not None and self.benchmark_var.get():
+                    bench_aligned = pd.Series(benchmark_data).reindex(eq.index, method='ffill').fillna(method='bfill')
+                    if not bench_aligned.empty:
+                        bench_norm = bench_aligned / float(bench_aligned.iloc[0]) * float(eq.iloc[0])
+                        self.ax.plot(bench_norm.index, bench_norm.values, label="Benchmark", linestyle='--', linewidth=1.0)
+                        benchmark_final_value = bench_norm.iloc[-1]
+                self.ax.legend()
+            else:
+                self.ax.text(0.5, 0.5, "No equity data", ha='center', va='center', transform=self.ax.transAxes)
+
+            self.ax.set_xlabel("Date"); self.ax.set_ylabel("Equity ($)")
+            self.canvas.draw_idle()
+
+        except Exception as e:
+            logging.exception(f"Failed to draw equity plot: {e}")
+
+        # --- 4. Populate Performance Metrics Table ---
+        try:
+            for key, label_widget in self.stat_labels.items():
+                if key in best and pd.notna(best[key]):
+                    label_widget.config(text=self._format_stat(key, best[key]))
+                else:
+                    label_widget.config(text="N/A")
+            
+            if benchmark_final_value is not None and self._best_equity is not None and not self._best_equity.empty:
+                beat_bench = "Yes" if self._best_equity.iloc[-1] >= benchmark_final_value else "No"
+                self.beat_spy_label.config(text=f"Beat {self.benchmark_cbo.get()}: {beat_bench}")
+            else:
+                self.beat_spy_label.config(text="")
+        except Exception as e:
+            logging.exception(f"Failed to populate performance metrics: {e}")
 
 
     def _handle_trade(self, trades):
@@ -1112,26 +1185,59 @@ class StrategyTesterWindow:
 
 
     def _update_opt_gui(self, done: int, total: int, overrides: dict[str, Any]):
-        # progress-bar
+        # Stop the initial "loading" animation
+        if hasattr(self, '_animation_job') and self._animation_job:
+            self._stop_status_animation()
+            
+        # Update progress bar
         self.progress['maximum'] = total
-        self.progress['value']   = done
+        self.progress['value'] = done
 
-        # status line: counter + ETA
-        elapsed = (_dt.datetime.now() - self.opt_start_time).total_seconds()
-        eta = int(elapsed / done * (total - done)) if done else None
-        eta_str = f" — ETA {eta}s" if eta else ""
-        self.opt_progress_lbl.config(text=f"{done}/{total}{eta_str}")
+        now = time.monotonic()
+        percent_done = (done / total) * 100 if total > 0 else 0
+        
+        # --- New "Steady-State" ETA Logic ---
+        if not self._eta_calibrated:
+            # --- Phase 1 & 2: Pre-Calibration and Calibration Window ---
+            self.opt_progress_lbl.config(text=f"{done}/{total} ({percent_done:.1f}%) — Calibrating ETA...")
 
-        # combo line: the parameters being tried
+            # Record the start time exactly when the 3rd task completes
+            if done == self.CALIBRATION_START_TASK:
+                self._calibration_start_time = now
+
+            # When the 6th task completes, perform the one-time calculation
+            if done == self.CALIBRATION_END_TASK:
+                calibration_duration = now - self._calibration_start_time
+                tasks_in_window = self.CALIBRATION_END_TASK - self.CALIBRATION_START_TASK
+
+                if tasks_in_window > 0 and calibration_duration > 0:
+                    avg_time_per_task = calibration_duration / tasks_in_window
+                    remaining_tasks = total - done
+                    self._locked_in_eta = avg_time_per_task * remaining_tasks
+                    self._eta_calibrated = True
+                    self._eta_start_time = now  # The moment the final countdown begins
+        
+        if self._eta_calibrated:
+            # --- Phase 3: Linear Countdown ---
+            elapsed_since_lock = now - self._eta_start_time
+            current_eta = self._locked_in_eta - elapsed_since_lock
+            current_eta = max(0, current_eta)
+            
+            eta_str = f" — ETA {self._format_eta(current_eta)}"
+            self.opt_progress_lbl.config(text=f"{done}/{total} ({percent_done:.1f}%){eta_str}")
+
+        # Update the line showing the current combination being tested
         if overrides:
+            dte = int(overrides['dte_target'])
+            alloc = overrides['allocation_pct']
+            pt = overrides['profit_target_pct']
+            sl = overrides['stop_loss_mult']
             self.opt_combo_lbl.config(
-                text=(f"Testing: DTE={overrides['dte_target']}, "
-                    f"Alloc={overrides['allocation_pct']}%, "
-                    f"ProfitTgt={overrides['profit_target_pct']}%, "
-                    f"Stop×={overrides['stop_loss_mult']}")
+                text=(f"Testing: DTE={dte:<3d}  Alloc={alloc:4.1f}%  "
+                      f"ProfitTgt={pt:4.1f}%  Stop×={sl:4.1f}")
             )
 
-        # make sure it paints immediately
+        # Force the UI to repaint immediately
         self.progress.update_idletasks()
 
     def _log_trade(self, trade):
@@ -1154,9 +1260,41 @@ class StrategyTesterWindow:
     def _flush_trade_log(self):
         """Runs on the Tk main loop; safe to touch widgets."""
         self._flush_scheduled = False
+        if not self._pending_trades:
+            return
+
+        # <<< FIX: Process all pending trades in a batch for much faster UI updates >>>
+        # Instead of inserting one-by-one, prepare all data first.
         batch, self._pending_trades[:] = self._pending_trades[:], []
+
         for t in batch:
-            self._handle_trade(t)          # original GUI code
+            pnl = t.get('pnl', 0.0)
+            tag = 'profit' if pnl >= 0 else 'loss'
+            i = self._next_trade_iid
+            self._next_trade_iid += 1
+
+            k_short = t.get('K_short')
+            k_long  = t.get('K_long')
+
+            vals = (
+                i,
+                t['open'].strftime('%Y-%m-%d'),
+                t['close'].strftime('%Y-%m-%d'),
+                f"{k_short:.2f}" if isinstance(k_short, (int, float)) else "",
+                f"{k_long:.2f}"  if isinstance(k_long, (int, float))  else "",
+                t.get('contracts', 0),
+                f"{t.get('credit', 0):.2f}",
+                f"{pnl:.2f}"
+            )
+            # Insert into the treeview. This is still done one-by-one, but without
+            # calling the legacy _handle_trade wrapper, it's cleaner.
+            # True batch insertion in Tkinter is complex, but this is a major improvement.
+            self.log_tree.insert("", "end", values=vals, tags=(tag,))
+
+        # After inserting all trades in the batch, scroll to the last one just once.
+        children = self.log_tree.get_children()
+        if children:
+            self.log_tree.see(children[-1])
 
 
     def _see_last(self):
@@ -1201,6 +1339,10 @@ class StrategyTesterWindow:
         self.win.after(0, lambda d=done, t=total: self._update_bt_gui(d, t))
 
     def _update_bt_gui(self, done: int, total: int):
+         # Stop the initial "loading" animation when the progress bar starts moving.
+        if hasattr(self, '_animation_job') and self._animation_job:
+            self._stop_status_animation()
+
         self.progress['maximum'] = total
         self.progress['value']   = done
         self.progress.update_idletasks()   # immediate repaint
@@ -1209,99 +1351,44 @@ class StrategyTesterWindow:
 
 
     def _cancel_optimization(self):
-        """Completely reset after a Cancel Optimize."""
+        """Cancels the optimization and resets the UI without displaying results."""
         if hasattr(self, 'runner'):
+            self._end_early = False # Ensure we don't process results
             self.runner.cancel()
-
-        # Stop and reset progress
-        try:
-            self.progress.stop()
-        except tk.TclError:
-            pass
-        self.progress.configure(value=0, mode="determinate")
-
-        # Clear summary & trade logs
-        for tree in (self.log_tree, self.history_tree):
-            for iid in tree.get_children():
-                tree.delete(iid)
-
-        # Restore buttons & hide cancel/pause labels
-        self.run_btn.configure(state="normal")
-        self.optimize_btn.configure(state="normal")
-        self.cancel_opt_btn.pack_forget()
-        self.pause_opt_btn.pack_forget()
-        self.opt_progress_lbl.pack_forget()
-        self.end_early_btn.pack_forget()
-
-        self.pause_opt_btn.configure(text="⏸ Pause", state="disabled")
-        self.end_early_btn.configure(state="disabled")
-        self.cancel_opt_btn.configure(state="disabled")
-
-
+        
+        self._finalize_backtest_ui()
+        self.opt_progress_lbl.config(text="") # Clear status labels
+        self.opt_combo_lbl.config(text="")
+        messagebox.showinfo("Cancelled", "The optimization has been cancelled.", parent=self.win)
 
     def _toggle_pause_opt(self):
-        """Pause or resume the running optimization."""
+        """Pauses or resumes the running optimization."""
         if not hasattr(self, 'runner'):
             return
 
-        if not getattr(self.runner, 'is_paused', False):
-            # pause
+        # Check the state of the multiprocessing Event to determine if paused
+        if self.runner._pause.is_set():
+            # Is currently running -> Pause it
             self.runner.pause()
-            self.pause_opt_btn.configure(text="▶ Resume Optimize")
-            self.opt_progress_lbl.configure(text="Paused — click Resume to continue")
+            self.pause_opt_btn.configure(text="▶ Resume")
+            self.opt_progress_lbl.config(text="Paused — Click Resume to continue")
         else:
-            # resume
+            # Is currently paused -> Resume it
             self.runner.resume()
-            self.pause_opt_btn.configure(text="⏸ Pause Optimize")
-            self.opt_progress_lbl.configure(text="")
+            self.pause_opt_btn.configure(text="⏸ Pause")
+            # The progress updater will overwrite the status label, so no need to clear it here.
 
     def _end_early_optimization(self):
-        """Stop the grid-search immediately and display the best‐so‐far result."""
+        """Signals the runner to stop and process the best results found so far."""
         if hasattr(self, 'runner'):
+            self._end_early = True
             self.runner.cancel()
-        # update UI
-        self.opt_progress_lbl.config(text="Optimization ended early")
-        self.cancel_opt_btn.pack_forget()
-        self.end_early_btn.pack_forget()
-
-        # pick the best row so far
-        df = self.runner.results_df()
-        if df.empty:
-            messagebox.showinfo("No results", "No completed runs to show yet.", parent=self.win)
-            # re-enable buttons
-            self._finalize_backtest_ui()
-            return
-
-        best = df.sort_values("total_return_pct", ascending=False).iloc[0]
-
-        # write best values back into inputs (same as in _populate_optimization_results)
-        self.dte_ent.delete(0, tk.END)
-        self.dte_ent.insert(0, str(int(best["dte_target"])))
-        self.alloc_ent.delete(0, tk.END)
-        self.alloc_ent.insert(0, f"{best['allocation_pct']}")
-        self.pt_ent.delete(0, tk.END)
-        self.pt_ent.insert(0, f"{best['profit_target_pct']}")
-        self.sl_ent.delete(0, tk.END)
-        self.sl_ent.insert(0, f"{best['stop_loss_mult']}")
-
-        # show a short popup
-        msg = (
-            "🏁 Ended Early! Best‐so‐Far Settings:\n"
-            f"• DTE: {int(best['dte_target'])}\n"
-            f"• Allocation %: {best['allocation_pct']}\n"
-            f"• Profit Target %: {best['profit_target_pct']}\n\n"
-            f"Total Return: {best['total_return_pct']:.2f}%"
-        )
-        messagebox.showinfo("Early Optimization Results", msg, parent=self.win)
-
-        self.pause_opt_btn.configure(text="⏸ Pause", state="disabled")
-        self.end_early_btn.configure(state="disabled")
-        self.cancel_opt_btn.configure(state="disabled")
-
-        # now run a single backtest on that best combo
-        # (reuse the same routine as when optimization finishes)
-        self._populate_optimization_results()
-        self._finalize_backtest_ui()
+        
+        self.opt_progress_lbl.config(text="Finishing up current tasks...")
+        # Disable buttons to prevent further clicks while shutting down
+        self.pause_opt_btn.config(state='disabled')
+        self.end_early_btn.config(state='disabled')
+        self.cancel_opt_btn.config(state='disabled')
 
 
 
@@ -1310,7 +1397,112 @@ class StrategyTesterWindow:
         self.win.wait_window(dlg)
         self.filters = dlg.filter_config
         self._rebuild_trade_log_from_last_run()
-     
+
+    def _show_optimization_context_menu(self, event):
+        """Shows a context menu on right-click in the optimization results table."""
+        widget = event.widget
+        iid = widget.identify_row(event.y)
+        if not iid:
+            return
+        
+        # Programmatically select the row that was right-clicked
+        widget.selection_set(iid)
+        
+        # Display the context menu at the cursor's location
+        self.opt_results_menu.tk_popup(event.x_root, event.y_root)
+
+    def _load_selected_run_trades(self):
+        """
+        When a user selects a run in the Optimization Results table,
+        this runs a backtest for that specific configuration on-demand.
+        """
+        selection = self.history_tree.selection()
+        if not selection:
+            return
+        
+        iid = selection[0]
+        params_to_run = self.optimization_runs_data.get(iid)
+        if not params_to_run:
+            return
+        
+        # Give immediate feedback to the user
+        self.log_tree.delete(*self.log_tree.get_children())
+        self.log_tree.insert("", "end", values=("", "", "Loading trades for selected run...", ""))
+        
+        # Run the single backtest in a background thread to keep the UI responsive
+        threading.Thread(
+            target=self._run_single_backtest_thread,
+            args=(params_to_run,),
+            daemon=True
+        ).start()
+
+    def _run_single_backtest_thread(self, params: dict):
+        """
+        Worker thread function to run a single backtest configuration.
+        """
+        try:
+            base_cfg = self._validate_inputs()
+            
+            # Define the specific optimization parameters we expect to override from the selected run.
+            # This prevents passing unexpected metric keys (like 'sharpe', 'start_value') to the config.
+            override_keys = ['dte_target', 'allocation_pct', 'profit_target_pct', 'stop_loss_mult']
+            overrides = {key: params[key] for key in override_keys if key in params}
+            
+            # Ensure DTE is an integer
+            if 'dte_target' in overrides:
+                overrides['dte_target'] = int(overrides['dte_target'])
+            
+            # Combine the base config from the UI with the clean overrides
+            full_config_dict = {**base_cfg, **overrides}
+            
+            config = StrategyConfig(**full_config_dict)
+            engine = BacktestEngine(config)
+            
+            # Use the price/vol data already loaded by the BatchRunner
+            engine.run(
+                price_data=getattr(self.runner, "price_data", None),
+                vol_data=getattr(self.runner, "vol_data", None),
+                benchmark_data=getattr(self.runner, "benchmark_data", None),
+                spy_prices=getattr(self.runner, "spy_prices", None)
+            )
+            
+            trades = engine.result().trade_list()
+            # Schedule the UI update on the main thread
+            self.win.after(0, lambda: self._populate_log_tree(trades))
+        except Exception as e:
+            logging.exception("Failed to run on-demand backtest for drill-down.")
+            # FIX: Capture the exception 'e' in the lambda to prevent NameError in newer Python versions
+            self.win.after(0, lambda e=e: messagebox.showerror(
+                "Drill-Down Error", f"Could not load trades for the selected run:\n{e}", parent=self.win))
+
+    def _populate_log_tree(self, trades: list):
+        """
+        Clears and populates the main trade log with a given list of trades.
+        """
+        self.log_tree.delete(*self.log_tree.get_children())
+        if not trades:
+            self.log_tree.insert("", "end", values=("", "", "No trades generated for this run.", ""))
+            return
+
+        for i, t in enumerate(trades):
+            try:
+                pnl = t.get('pnl', 0.0)
+                tag = 'profit' if pnl > 0 else 'loss' if pnl < 0 else ('evenrow' if i % 2 == 0 else 'oddrow')
+                k_short = t.get('K_short')
+                k_long  = t.get('K_long')
+                vals = (
+                    i + 1,
+                    t['open'].strftime('%Y-%m-%d'),
+                    t['close'].strftime('%Y-%m-%d'),
+                    f"{k_short:.2f}" if isinstance(k_short, (int, float)) else "",
+                    f"{k_long:.2f}" if isinstance(k_long, (int, float)) else "",
+                    t.get('contracts', 0),
+                    f"{t.get('credit', 0):.2f}",
+                    f"{pnl:.2f}"
+                )
+                self.log_tree.insert("", "end", values=vals, tags=(tag,))
+            except Exception:
+                continue
 
 
     def _setup_default_values(self):
@@ -1400,12 +1592,15 @@ class StrategyTesterWindow:
 
     def _start_backtest(self):
         """Validate inputs, build StrategyConfig, and start the backtest engine in a thread."""
+        
         ensure_spy_backup() # Ensure SPY backup is available
         # 1) pull & validate everything from the form
         gui_cfg = self._validate_inputs()
         if gui_cfg is None:
             return
         
+        self._start_status_animation("Initializing Engine & Loading Data")
+
         if isinstance(gui_cfg.get("filters"), dict):
             gui_cfg["filters"] = FilterConfig(**gui_cfg["filters"])
 
@@ -1436,6 +1631,8 @@ class StrategyTesterWindow:
         logging.info("Running backtest…")
         self.canvas.draw()
         self.run_btn.configure(state="disabled")
+
+        
 
         # ─── determinate progress bar setup ────────────────────────────────────
         # 1) ask engine how many steps it plans (we’ll assume it exposes estimate_steps())
@@ -1478,7 +1675,31 @@ class StrategyTesterWindow:
                 self.win.after(0, self._finalize_backtest_ui)
 
 
+    def _calculate_equity_stats(self, equity_series: pd.Series) -> dict:
+        """
+        Calculates total return and max drawdown directly from the equity curve.
+        """
+        stats = {
+            'total_return': None,
+            'total_return_pct': None,
+            'max_drawdown': None
+        }
+        if equity_series is None or len(equity_series) < 2:
+            return stats
 
+        # Total Return Calculation
+        start_equity = equity_series.iloc[0]
+        end_equity = equity_series.iloc[-1]
+        stats['total_return'] = end_equity - start_equity
+        if start_equity != 0:
+            stats['total_return_pct'] = (end_equity / start_equity - 1) * 100
+
+        # Max Drawdown Calculation
+        cumulative_max = equity_series.cummax()
+        drawdown = equity_series - cumulative_max
+        stats['max_drawdown'] = drawdown.min()
+
+        return stats
 
     def _finalize_backtest_ui(self):
         """Stop progress bar and re-enable Run/Optimize buttons."""
@@ -1503,6 +1724,8 @@ class StrategyTesterWindow:
         self.end_early_btn.configure(state="disabled")
         self.cancel_opt_btn.configure(state="disabled")
 
+        # <<< FIX: Return the header to its normal height >>>
+        self.main_pane.sash_place(0, 0, self.HEADER_NORMAL_HEIGHT)
 
 
     def _format_stat(self, key, value):
@@ -1510,6 +1733,9 @@ class StrategyTesterWindow:
         if isinstance(value, (int, float)):
             if 'pct' in key or 'rate' in key or key in ['cagr', 'sharpe', 'sortino']:
                 return f"{value:.2f}%" if 'pct' in key or 'rate' in key or key == 'cagr' else f"{value:.3f}"
+            elif key in ['ulcer_index', 'trade_pnl_skewness', 'daily_return_skewness']:
+                # Format Ulcer Index and Skewness to 4 decimal places for precision
+                return f"{value:.4f}"
             elif key in ['gross_profit', 'gross_loss', 'total_return', 'start_value', 'end_value', 'avg_win', 'avg_loss', 'max_drawdown']:
                 prefix = "-$" if key == 'max_drawdown' and value < 0 else "$"
                 return f"{prefix}{abs(value):,.2f}"
@@ -1521,6 +1747,15 @@ class StrategyTesterWindow:
                 return f"{value:,}"
         return str(value)
     
+    def _format_eta(self, seconds: float) -> str:
+        if seconds < 60:
+            return f"~ {int(seconds)} seconds"
+        minutes, sec = divmod(seconds, 60)
+        if minutes < 60:
+            return f"~ {int(minutes)} min {int(sec)} sec"
+        hours, minutes = divmod(minutes, 60)
+        return f"~ {int(hours)} hr {int(minutes)} min"
+    
     def _add_numeric_validation(self, widget, cast_type, min_val=None, max_val=None):
         """Attach realtime validation to highlight widget red if cast_type(value) fails or out of bounds."""
         def on_key(event):
@@ -1529,227 +1764,142 @@ class StrategyTesterWindow:
                 num = cast_type(val)
                 if (min_val is not None and num < min_val) or (max_val is not None and num > max_val):
                     raise ValueError
-                widget.configure(foreground='black')
+                # Use the theme's foreground color for valid text
+                widget.configure(foreground=self.summary_txt_fg)
             except:
                 widget.configure(foreground='red')
         widget.bind("<KeyRelease>", on_key)
 
+    def _start_status_animation(self, text_base):
+        """Starts a recurring animation for a status label (e.g., 'Loading...')."""
+        if hasattr(self, '_animation_job') and self._animation_job:
+            self.win.after_cancel(self._animation_job)
+        
+        # Ensure header is expanded to show the status area
+        self.main_pane.sash_place(0, 0, self.HEADER_EXPANDED_HEIGHT)
+        self.status_label.pack(fill='x', padx=4, pady=(10, 0))
+        
+        self._animation_text_base = text_base
+        self._animation_dots = 0
+
+        def _update():
+            dots = "." * (self._animation_dots % 4)
+            self.status_label.config(text=f"{self._animation_text_base}{dots}")
+            self._animation_dots += 1
+            self._animation_job = self.win.after(400, _update)
+        _update()
+
+    def _stop_status_animation(self):
+        """Stops any running status animation and hides the label."""
+        if hasattr(self, '_animation_job') and self._animation_job:
+            self.win.after_cancel(self._animation_job)
+            self._animation_job = None
+        self.status_label.pack_forget()
+
 
     def _populate_results(self):
-        """Pull results out of the engine and plot equity + Stooq benchmark."""
-        import io, requests
+        """Pulls results, populates the UI, and plots the equity curve with all interactive features."""
         import matplotlib.pyplot as plt
+        import pandas as pd
+        import io
+        import requests
 
-        # ─── clear the “log” pane ──────────────────────────────────────────────
-        self.summary_txt.configure(state="normal")
-        self.summary_txt.delete("1.0", "end")
-
-        result  = self.engine.result()
-        stats   = result.summary()
-        equity  = result.equity_curve()
-        trades  = result.trade_list()
-
-
-
-        # ─── Summary panel ─────────────────────────────────────────
-        summary_lines = []
-        if stats:
-            display_order = [
-                ('start_value', 'Start Equity'), ('end_value', 'End Equity'),
-                ('total_return', 'Total Return ($)'), ('total_return_pct', 'Total Return (%)'),
-                ('cagr', 'CAGR (%)'), ('sharpe', 'Sharpe Ratio'),
-                ('sortino', 'Sortino Ratio'), ('max_drawdown', 'Max Drawdown ($)'),
-                ('total_trades', 'Total Trades'), ('win_rate', 'Win Rate (%)'),
-                ('avg_win', 'Average Win ($)'), ('avg_loss', 'Average Loss ($)'),
-                ('profit_factor', 'Profit Factor'), ('expectancy', 'Expectancy ($)'),
-                ('gross_profit', 'Gross Profit ($)'), ('gross_loss', 'Gross Loss ($)'),
-            ]
-            max_label_len = max(len(lbl) for _, lbl in display_order) + 1
-            for key, lbl in display_order:
-                v = stats.get(key, 'N/A')
-                formatted = self._format_stat(key, v) if v != 'N/A' else 'N/A'
-                summary_lines.append(f"{lbl:<{max_label_len}}: {formatted}")
-
-            # only show beat‐benchmark if enabled and we have data
-            if self.benchmark_var.get() and not equity.empty:
-                # fetch Stooq to compare
-                ticker = self.benchmark_cbo.get().lower()
-                s_str = equity.index[0].strftime("%Y%m%d")
-                e_str = equity.index[-1].strftime("%Y%m%d")
-                url = f"https://stooq.com/q/d/l/?s={ticker}.us&d1={s_str}&d2={e_str}&i=d"
-                try:
-                    resp = requests.get(url, timeout=10); resp.raise_for_status()
-                    df2 = pd.read_csv(io.StringIO(resp.text), parse_dates=["Date"], index_col="Date")
-                    series = df2["Adj Close"] if "Adj Close" in df2.columns else df2["Close"]
-                    series = series.reindex(equity.index).ffill().bfill()
-                    # normalize to strategy start
-                    strat_start = float(equity.iloc[0])
-                    series = series / series.iloc[0] * strat_start
-                    last_strat = float(equity.iloc[-1])
-                    last_bench = float(series.iloc[-1])
-                    beat = "Yes" if last_strat >= last_bench else "No"
-                    summary_lines.append(f"{'Beat ' + ticker.upper():<{max_label_len}}: {beat}")
-                except Exception:
-                    summary_lines.append(f"{'Beat ' + ticker.upper():<{max_label_len}}: N/A")
-
-        else:
-            summary_lines.append("Backtest failed or produced no results.")
-
-        
-        # ─── filter out loader HTTP-error warnings ─────────────────────────
-        summary_lines = [
-            ln for ln in summary_lines
-            if "HTTP Error" not in ln           # ← hides “HTTP Error 401” etc.
-        ]
-
-         # ─── dump performance summary into the text pane ───────────────────────
-        self.summary_txt.insert("1.0", "\n".join(summary_lines))
-        self.summary_txt.configure(state="disabled")
-
-
-        # ─── Trade log ─────────────────────────────────────────────
-        self.log_tree.delete(*self.log_tree.get_children())
-        for i, t in enumerate(trades):
-            pnl = t.get('pnl', 0.0)
-            tag = 'profit' if pnl>0 else 'loss' if pnl<0 else ('evenrow' if i%2==0 else 'oddrow')
-            vals = (
-                i+1,
-                t['open'].strftime('%Y-%m-%d'),
-                t['close'].strftime('%Y-%m-%d'),
-                f"{t.get('K_short',''):.2f}" if t.get('K_short') is not None else "",
-                f"{t.get('K_long',''):.2f}" if t.get('K_long') is not None else "",
-                t.get('contracts',0),
-                f"{t.get('credit',0):.2f}",
-                f"{pnl:.2f}"
-            )
-            self.log_tree.insert("", "end", values=vals, tags=(tag,))
-
-        # ─── Equity curve + Stooq benchmark ────────────────────────
+        # --- 1. Clear all previous results from the UI ---
+        for label_widget in self.stat_labels.values():
+            label_widget.config(text="N/A")
+        if hasattr(self, 'beat_spy_label'):
+            self.beat_spy_label.config(text="")
         self.ax.clear()
-        self.plot_data['dates'], self.plot_data['pnl'] = [], []
-        if self.tooltip:
-            self.tooltip.set_visible(False);  self.tooltip=None
-        if self.tooltip_line:
-            self.tooltip_line.set_visible(False); self.tooltip_line=None
+        
+        # Reset data for tooltips and plot markers
+        self.plot_data = {'dates': [], 'pnl': [], 'trades': []}
+        if self.trade_marker:
+            self.trade_marker.set_visible(False)
+            self.trade_marker = None
 
+        # --- 2. Get new results from the backtest engine ---
+        result = self.engine.result()
+        stats = result.summary()
+        equity = result.equity_curve()
+        trades = result.trade_list()
+
+        # --- 3. Calculate Total Return and Max Drawdown directly from equity curve ---
+        if stats:
+            for key, label_widget in self.stat_labels.items():
+                if key in stats:
+                    value = stats.get(key)
+                    formatted_value = self._format_stat(key, value)
+                    label_widget.config(text=formatted_value)
+        
+        # --- 4. Trade Log is now populated live, so this block is no longer needed. ---
+        # The log is cleared automatically when the next backtest starts.
+
+        # --- 5. & 6. Plot Equity Curve and Benchmark using OLD RELIABLE LOGIC ---
+        benchmark_series = None # Initialize benchmark series
+
+        # --- Plot strategy equity first ---
         if not equity.empty:
-            dates  = equity.index.to_pydatetime()
+            dates = equity.index
             values = equity.to_numpy()
-            self.plot_data['dates'] = list(dates)
-            self.plot_data['pnl']   = list(values)
+            
+            # Preserve data for interactive features
+            self.plot_data['dates'] = dates.tolist()
+            self.plot_data['pnl'] = values.tolist()
+            self.plot_data['trades'] = trades
 
-            # strategy
+            # Plot strategy equity curve
             self.ax.plot(dates, values, lw=1.5, color="#3498db", label="Strategy")
 
-            # stooq benchmark
+            # --- Fetch and process benchmark data from Stooq (from old code) ---
             if self.benchmark_var.get():
                 ticker = self.benchmark_cbo.get().lower()
                 s_str = equity.index[0].strftime("%Y%m%d")
                 e_str = equity.index[-1].strftime("%Y%m%d")
                 url = f"https://stooq.com/q/d/l/?s={ticker}.us&d1={s_str}&d2={e_str}&i=d"
-                resp = requests.get(url, timeout=10); resp.raise_for_status()
-                df2 = pd.read_csv(io.StringIO(resp.text), parse_dates=["Date"], index_col="Date")
-                series = df2["Adj Close"] if "Adj Close" in df2.columns else df2["Close"]
-                series = series.reindex(equity.index).ffill().bfill()
-                strat_start = float(equity.iloc[0])
-                series = series / series.iloc[0] * strat_start
+                try:
+                    resp = requests.get(url, timeout=10)
+                    resp.raise_for_status()
+                    df2 = pd.read_csv(io.StringIO(resp.text), parse_dates=["Date"], index_col="Date")
+                    series = df2["Adj Close"] if "Adj Close" in df2.columns else df2["Close"]
+                    series = series.reindex(equity.index).ffill().bfill()
+                    
+                    # Normalize to strategy start value
+                    strat_start = float(equity.iloc[0])
+                    benchmark_series = series / series.iloc[0] * strat_start
+
+                    # --- Update the "Beat Benchmark" label ---
+                    last_strat = float(equity.iloc[-1])
+                    last_bench = float(benchmark_series.iloc[-1])
+                    beat = "Yes" if last_strat >= last_bench else "No"
+                    self.beat_spy_label.config(text=f"Beat {ticker.upper()}: {beat}")
+                    
+                except Exception as e:
+                    logging.error(f"Failed to fetch or process benchmark data: {e}")
+                    self.beat_spy_label.config(text=f"Beat {ticker.upper()}: N/A")
+
+            # --- Plot the benchmark if it was successfully created ---
+            if benchmark_series is not None and not benchmark_series.empty:
                 self.ax.plot(
-                    dates,
-                    series.to_numpy(),
+                    benchmark_series.index,
+                    benchmark_series.to_numpy(),
                     lw=1.2,
                     linestyle="--",
-                    color="#888888",
+                    color="#ffaa00",
                     label=self.benchmark_cbo.get()
                 )
-
+            
+            # --- Display the legend for all plotted items ---
             self.ax.legend()
-            self.ax.set_title("Equity Curve")
-            self.ax.set_xlabel("Date")
-            self.ax.set_ylabel("Account Value ($)")
-            fmt = plt.FuncFormatter(lambda x, p: f'${x:,.0f}')
-            self.ax.yaxis.set_major_formatter(fmt)
-            self.ax.grid(True, linestyle='--', linewidth=0.5,
-                        color=self.summary_txt_fg, alpha=0.7)
-        else:
-            self.ax.set_title("Equity Curve (No Data)")
-
-        # ─── tooltip handler (unchanged) ───────────────────────────
-        if hasattr(self, 'tooltip_cid'):
-            self.canvas.mpl_disconnect(self.tooltip_cid)
-
-        def on_motion(event):
-            if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
-                if self.tooltip:
-                    self.tooltip.set_visible(False)
-                    self.tooltip_line.set_visible(False)
-                    self.canvas.draw_idle()
-                return
-
-            x, y = event.xdata, event.ydata
-            dates, pnl = self.plot_data['dates'], self.plot_data['pnl']
-            if not dates:
-                return
-
-            # find nearest point
-            arr = np.array([d.date() for d in dates], dtype='datetime64[D]').astype(float)
-            idx = np.argmin(np.abs(arr - x))
-            nd, npnl = dates[idx], pnl[idx]
-
-            # format text
-            date_str = pd.Timestamp(nd).strftime('%Y-%m-%d')
-            pnl_str  = f"${npnl:,.2f}" if npnl >= 0 else f"-${-npnl:,.2f}"
-            txt = f"Results on {date_str}\nProfit/Loss: {pnl_str}"
-
-            # figure + canvas pixel size
-            fig_w, fig_h = self.canvas.get_width_height()
-            # data → display coords
-            disp_x, disp_y = self.ax.transData.transform((x, y))
-            margin = 200  # px
-
-            # choose offset & alignment based on proximity to right edge
-            if disp_x > fig_w - margin:
-                offset, ha = (-10, 10), 'right'
-            else:
-                offset, ha = (10, 10), 'left'
-
-            if not self.tooltip:
-                self.tooltip = self.ax.annotate(
-                    txt,
-                    xy=(x, y),
-                    xytext=offset,
-                    textcoords="offset points",
-                    bbox=dict(boxstyle="round,pad=0.5", fc="green", alpha=0.8),
-                    arrowprops=dict(arrowstyle="->"),
-                    ha=ha, va='bottom'
-                )
-                self.tooltip_line, = self.ax.plot(
-                    [x, x],
-                    [self.ax.get_ylim()[0], y],
-                    'k--', lw=1, visible=False
-                )
-            else:
-                self.tooltip.set_text(txt)
-                self.tooltip.xy = (x, y)
-                self.tooltip.set_ha(ha)
-                self.tooltip.set_position(offset)
-                self.tooltip_line.set_xdata([x, x])
-                self.tooltip_line.set_ydata([self.ax.get_ylim()[0], y])
-
-            self.tooltip.set_visible(True)
-            self.tooltip_line.set_visible(True)
-            self.canvas.draw_idle()
-
-
-        # --- Disconnect old handlers if they exist ---
-        if hasattr(self, 'tooltip_cid') and self.tooltip_cid:
-            try:
-                self.canvas.mpl_disconnect(self.tooltip_cid)
-            except:
-                pass # Ignore errors if already disconnected
-
-        # --- Connect the new _on_plot_motion method ---
-        self.tooltip_cid = self.canvas.mpl_connect('motion_notify_event', self._on_plot_motion)
-
+        
+         # --- Finalize Plot ---
+        self.ax.set_title("Equity Curve", color=self.summary_txt_fg)
+        self.ax.set_xlabel("Date")
+        self.ax.set_ylabel("Equity ($)")
+        
+        # Format Y-axis with dollar signs and commas
+        fmt = plt.FuncFormatter(lambda x, p: f'${x:,.0f}')
+        self.ax.yaxis.set_major_formatter(fmt)
+        
         self.fig.tight_layout()
         self.canvas.draw()
 
@@ -1782,7 +1932,7 @@ class StrategyTesterWindow:
 
         date_str = pd.Timestamp(nd).strftime('%Y-%m-%d')
         pnl_str  = f"${npnl:,.2f}" if npnl >= 0 else f"-${-npnl:,.2f}"
-        txt = f"Results on {date_str}\nProfit/Loss: {pnl_str}"
+        txt = f"Results on {date_str}\nEquity: {pnl_str}"
 
         fig_w, fig_h = canvas.get_width_height()
         # Use mdates.date2num(nd) for transformation, but nd (datetime) for plotting
@@ -1870,48 +2020,40 @@ class StrategyTesterWindow:
 
     
     def _copy_performance_metrics(self):
-        # Get the text from the summary_txt widget
-        summary_text = self.summary_txt.get("1.0", tk.END).strip()
-        if not summary_text:
-            messagebox.showwarning("No Metrics", "No performance metrics available to copy.", parent=self.win)
-            return
-        
-        style = ttk.Style()
-        bg = style.lookup('TFrame', 'background')
+        # <<< FIX: Rebuild the summary text from the labels for copying >>>
+        lines = []
+        # Re-create the display order to build the text block
+        display_order = [
+            ('start_value', 'Start Equity'), ('end_value', 'End Equity'),
+            ('total_return', 'Total Return ($)'), ('total_return_pct', 'Total Return (%)'),
+            ('cagr', 'CAGR (%)'),
+            ('unlimited_risk', 'Unlimited Risk'), ('sharpe', 'Sharpe Ratio'),
+            ('sortino', 'Sortino Ratio'), ('max_drawdown', 'Max Drawdown ($)'),
+            ('ulcer_index', 'Ulcer Index'),
+            ('total_trades', 'Total Trades'), ('win_rate', 'Win Rate (%)'),
+            ('profit_factor', 'Profit Factor'), ('expectancy', 'Expectancy ($)'),
+        ]
+        max_label_len = max(len(lbl) for _, lbl in display_order) + 1
 
-        # Copy the summary text to the clipboard
+        for key, text in display_order:
+            if key in self.stat_labels:
+                value = self.stat_labels[key].cget("text")
+                lines.append(f"{text:<{max_label_len}}: {value}")
+        
+        # Add benchmark separately
+        if self.beat_spy_label.cget("text"):
+            lines.append(self.beat_spy_label.cget("text"))
+
+        summary_text = "\n".join(lines)
+        if not summary_text:
+            messagebox.showwarning("No Metrics", "No performance metrics to copy.", parent=self.win)
+            return
+
         self.win.clipboard_clear()
         self.win.clipboard_append(summary_text)
-        self.win.update()
-
-        # Create a temporary notification window
-        notify = tk.Toplevel(self.win)
-        notify.configure(bg=bg)
-        notify.transient(self.win)
-        notify.overrideredirect(True)  # Remove window decorations
-        notify.geometry("200x50")  # Small window size
-        notify.lift()  # Ensure window is on top
-        notify.update()  # Force redraw
 
 
-        # Create label with "Metrics Copied!" message
-        label = ttk.Label(
-            notify,
-            text="Metrics Copied!",
-            background="#888888",
-            foreground="#000000", 
-            font=('Segoe UI', 10, 'italic'),  # Added italic for emphasis
-            anchor='center'
-        )
-        label.pack(fill=tk.BOTH, expand=True)
-
-        # Center the window relative to the main window
-        x = self.win.winfo_rootx() + (self.win.winfo_width() - 200) // 2
-        y = self.win.winfo_rooty() + (self.win.winfo_height() - 50) // 2
-        notify.geometry(f"+{x}+{y}")
-
-        # Destroy the window after 1.5 seconds
-        notify.after(1500, notify.destroy)
+        messagebox.showinfo("Copied", "Performance metrics copied to clipboard.", parent=self.win)
 
 
     def _show_trade_right_click(self, event):
@@ -1935,11 +2077,12 @@ class StrategyTesterWindow:
 
 
     
+    
     def _toggle_fullscreen_graph(self):
         embedded = self.canvas.get_tk_widget()
 
         # → ENTER fullscreen
-        if not getattr(self, '_fs_window', None) or not self._fs_window.winfo_exists():
+        if not hasattr(self, '_fs_window') or not self._fs_window or not self._fs_window.winfo_exists():
             # 1) Remember original parent and FIGURE properties
             self._orig_parent = embedded.master
             self._orig_size = self.fig.get_size_inches()
@@ -1958,57 +2101,56 @@ class StrategyTesterWindow:
             fs_widget = self._fs_canvas.get_tk_widget()
             fs_widget.pack(fill=tk.BOTH, expand=True)
 
-            # 5) Connect the tooltip handler to this new canvas
-            self._fs_tooltip_cid = self._fs_canvas.mpl_connect(
-                'motion_notify_event', self._on_plot_motion)
+            # 5) Bind to <Configure> for dynamic resize
+            self._fs_window.bind("<Configure>", self._resize_fullscreen_fig)
 
-            # 6) Create a close button for the fullscreen window
+            # 6) Schedule initial resize after window mapping
+            self._fs_window.after(100, self._resize_fullscreen_fig, None)
+
+            # 7) Connect the tooltip handler
+            self._fs_tooltip_cid = self._fs_canvas.mpl_connect('motion_notify_event', self._on_plot_motion)
+
+            # 8) Create close button
             try:
-                # Load minimize icon with smaller size
                 self.minimize_icon = load_icon(
                     ICON_DIR / "minimize.png",
-                    size=(16, 16)  # Smaller size
+                    tint_color=self.summary_txt_fg,
+                    size=(16, 16)
                 )
-                if self.minimize_icon is None:
-                    raise ValueError("Failed to load minimize icon")
-
-                # Create button    
                 self._fs_close_btn = ttk.Button(
                     self._fs_window,
                     image=self.minimize_icon,
                     command=self._toggle_fullscreen_graph,
                 )
-                # Explicitly retain the icon reference
                 self._fs_close_btn.image_ref = self.minimize_icon
-                self._fs_close_btn.place(relx=0.99, rely=0.01, anchor='ne', x=-2, y=2)  # Adjusted position
-
+                self._fs_close_btn.place(relx=1.0, rely=0.0, anchor='ne', x=-20, y=20)
             except Exception as e:
-                logging.error(f"Could not load minimize icon for fullscreen window: {e}")
-                # Fallback to minimal text button
-                self.style.configure('Transparent.TButton', background=self.win.cget('bg'), borderwidth=0)
+                logging.error(f"Could not load minimize icon: {e}")
+                # Fallback text button
                 self._fs_close_btn = ttk.Button(
                     self._fs_window,
                     text="Exit FS",
                     command=self._toggle_fullscreen_graph,
-                    style='Transparent.TButton'
                 )
-                self._fs_close_btn.place(relx=0.99, rely=0.01, anchor='ne', x=-2, y=2)
+                self._fs_close_btn.place(relx=1.0, rely=0.0, anchor='ne', x=-10, y=10)
 
-            # 7) Update the main button icon
+            # 9) Update main button icon
             self.fullscreen_button.configure(image=self.minimize_icon)
             self.fullscreen_button.image_ref = self.minimize_icon
 
-            # 8) Adjust layout & redraw
-            self.fig.tight_layout()
-            self._fs_canvas.draw_idle()
             self.is_graph_fullscreen = True
 
         # → EXIT fullscreen
         else:
-            # 1) Disconnect tooltip from fullscreen canvas
-            if hasattr(self, '_fs_tooltip_cid') and hasattr(self, '_fs_canvas') and self._fs_canvas:
+            # 1) Disconnect tooltip and unbind <Configure>
+            if hasattr(self, '_fs_canvas') and self._fs_canvas:
                 try:
                     self._fs_canvas.mpl_disconnect(self._fs_tooltip_cid)
+                except:
+                    pass
+            if self._fs_window:
+                try:
+                    self._fs_window.unbind("<Configure>")
                 except:
                     pass
 
@@ -2050,10 +2192,29 @@ class StrategyTesterWindow:
                     'motion_notify_event', self._on_plot_motion)
 
             # 8) Adjust layout & redraw for original view
-            self.fig.tight_layout()
+            self.fig.tight_layout(pad=0.5)
             self.canvas.draw_idle()
             self.is_graph_fullscreen = False
 
+    def _resize_fullscreen_fig(self, event):
+        if not hasattr(self, '_fs_canvas') or not self._fs_canvas:
+            return
+        widget = self._fs_canvas.get_tk_widget()
+        self._fs_window.update_idletasks()  # Ensure sizes are current
+        w = widget.winfo_width()
+        h = widget.winfo_height()
+        if w <= 1 or h <= 1:
+            return
+        # Get actual DPI from widget
+        dpi = widget.winfo_fpixels('1i')
+        self.fig.set_dpi(dpi)
+        # Set figure size exactly to widget size in inches
+        self.fig.set_size_inches(w / dpi, h / dpi)
+        # Adjust subplot margins to minimize cutoff
+        self.fig.subplots_adjust(left=0.05, right=0.95, bottom=0.1, top=0.95)
+        # Apply tight layout with small padding
+        self.fig.tight_layout(pad=0.1)
+        self._fs_canvas.draw_idle()
    
 # Example Usage
 if __name__ == "__main__":
@@ -2210,46 +2371,190 @@ class CustomLegBuilder(tk.Toplevel):
         self.destroy()
 
 
+class ParameterRangeSelector(ttk.Frame):
+    """A custom widget for selecting a parameter range with a slider for steps."""
+    def __init__(self, master, text, range_from, range_to, default_from, default_to, is_int=False, update_callback=None):
+        super().__init__(master, padding=(0, 5))
+        self.is_int = is_int
+        self.update_callback = update_callback
+
+        self.var_from = tk.StringVar(value=str(default_from))
+        self.var_to = tk.StringVar(value=str(default_to))
+        self.var_steps = tk.IntVar(value=5)
+
+        container = ttk.LabelFrame(self, text=text, padding=10)
+        container.pack(fill='x', expand=True)
+
+        # <<< FIX: Configure grid columns to create a stable, non-resizing layout >>>
+        # Give weight to the column that contains the slider so it expands, not the inputs.
+        container.columnconfigure(1, weight=1) # Slider column
+        container.columnconfigure(3, weight=1) # Slider column
+        
+        # --- Row 0: Input Boxes ---
+        ttk.Label(container, text="From:").grid(row=0, column=0, sticky='w')
+        entry_from = ttk.Entry(container, textvariable=self.var_from, width=8)
+        entry_from.grid(row=0, column=1, sticky='we', padx=(5, 15))
+
+        ttk.Label(container, text="To:").grid(row=0, column=2, sticky='w')
+        entry_to = ttk.Entry(container, textvariable=self.var_to, width=8)
+        entry_to.grid(row=0, column=3, sticky='we', padx=5)
+
+        # --- Row 1: Steps Slider ---
+        ttk.Label(container, text="Steps:").grid(row=1, column=0, sticky='w', pady=(5,0))
+        self.scale_steps = ttk.Scale(container, from_=1, to=20, orient='horizontal', variable=self.var_steps, command=self._update_feedback)
+        # The slider now spans all columns to fill the space cleanly.
+        self.scale_steps.grid(row=1, column=1, columnspan=3, sticky='we', pady=(5,0), padx=5)
+
+        # --- Row 2: Feedback Label ---
+        self.feedback_label = ttk.Label(container, text="", font=('Segoe UI', 8, 'italic'), foreground='#888888', justify='left')
+        self.feedback_label.grid(row=2, column=0, columnspan=4, sticky='w', pady=(2,0))
+
+        # Bind events
+        entry_from.bind("<KeyRelease>", self._update_feedback)
+        entry_to.bind("<KeyRelease>", self._update_feedback)
+        self.var_steps.trace_add("write", self._update_feedback)
+
+        self._update_feedback()
+
+    def _update_feedback(self, *args):
+        try:
+            start = float(self.var_from.get())
+            end = float(self.var_to.get())
+            steps = self.var_steps.get()
+
+            if start >= end:
+                self.feedback_label.config(text="Error: 'From' must be less than 'To'")
+                return
+            
+            if steps == 1:
+                 values = [start]
+            else:
+                values = np.linspace(start, end, steps)
+
+            if self.is_int:
+                values = np.unique(np.round(values).astype(int))
+                self.var_steps.set(len(values))
+                formatted_values = f"[{', '.join(map(str, values))}]"
+            else:
+                formatted_values = f"[{', '.join([f'{v:.1f}' for v in values])}]"
+            
+            self.feedback_label.config(text=f"Testing {len(values)} values: {formatted_values}")
+
+        except (ValueError, TypeError):
+            self.feedback_label.config(text="Invalid number format")
+        
+        if self.update_callback:
+            self.update_callback()
+
+    def get_values(self):
+        start = float(self.var_from.get())
+        end = float(self.var_to.get())
+        steps = self.var_steps.get()
+        if steps == 1:
+            values = [start]  # This is a standard list
+        else:
+            values = np.linspace(start, end, steps) # This is a NumPy array
+
+        if self.is_int:
+            # This branch works correctly for both lists and arrays
+            return np.unique(np.round(values).astype(int)).tolist()
+        
+        # <<< FIX: Check if it's a NumPy array before calling .tolist() >>>
+        if isinstance(values, np.ndarray):
+            return values.tolist()
+        else:
+            # If it's not a NumPy array, it's already the list we need.
+            return values
+    
+
 class OptimizeDialog(tk.Toplevel):
-    """Gather ranges for DTE, Alloc %, Profit Target."""
+    """A modern dialog for setting up grid search parameters with sliders."""
+    AVG_TIME_PER_COMBO = 0.25 
+
     def __init__(self, master, controller):
         super().__init__(master)
         self.controller = controller
         self.transient(master)
         self.grab_set()
-        self.title("Optimize Grid Search")
+        self.title("Configure Optimization")
+        # <<< FIX: Set a wider initial size and make the window resizable >>>
+        self.geometry("550x750")
+        self.resizable(True, True)
+        self.minsize(550, 750)
+
         frm = ttk.Frame(self, padding=15)
         frm.pack(fill="both", expand=True)
-        # Labels + entries for four parameters: from, to, step
-        labels = ["DTE", "Alloc %", "Profit Target %", "Stop Loss ×"]
-        self.vars = {}
-        for i, name in enumerate(labels):
-            ttk.Label(frm, text=f"{name} from").grid(row=i, column=0, sticky="e")
-            v0 = ttk.Entry(frm, width=6); v0.grid(row=i, column=1)
-            ttk.Label(frm, text="to").grid(row=i, column=2)
-            v1 = ttk.Entry(frm, width=6); v1.grid(row=i, column=3)
-            ttk.Label(frm, text="step").grid(row=i, column=4)
-            v2 = ttk.Entry(frm, width=6); v2.grid(row=i, column=5)
-            self.vars[name] = (v0, v1, v2)
 
-        # Control buttons
-        btns = ttk.Frame(frm); btns.grid(row=len(labels), column=0, columnspan=6, pady=10)
-        ttk.Button(btns, text="Run", command=self._on_run).pack(side="left", padx=5)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=5)
+        self.param_selectors = {}
+        
+        # Create all widgets that are used in callbacks FIRST.
+        summary_frame = ttk.LabelFrame(frm, text="Optimization Summary", padding=10)
+        summary_frame.columnconfigure(1, weight=1)
+        ttk.Label(summary_frame, text="Total Combinations:").grid(row=0, column=0, sticky='w')
+        self.totals_label = ttk.Label(summary_frame, text="0", font=('Segoe UI', 10, 'bold'))
+        self.totals_label.grid(row=0, column=1, sticky='w', padx=5)
+
+        btn_frm = ttk.Frame(frm)
+        self.run_btn = ttk.Button(btn_frm, text="Run Optimization", command=self._on_run)
+        
+        # NOW, create the parameter selectors that trigger the callbacks.
+        self.param_selectors['dte_target'] = ParameterRangeSelector(
+            frm, "DTE Target", 1, 180, 30, 60, is_int=True, update_callback=self._update_totals
+        )
+        self.param_selectors['dte_target'].pack(fill='x')
+
+        self.param_selectors['allocation_pct'] = ParameterRangeSelector(
+            frm, "Allocation %", 1, 25, 3, 10, update_callback=self._update_totals
+        )
+        self.param_selectors['allocation_pct'].pack(fill='x')
+
+        self.param_selectors['profit_target_pct'] = ParameterRangeSelector(
+            frm, "Profit Target %", 10, 100, 25, 75, update_callback=self._update_totals
+        )
+        self.param_selectors['profit_target_pct'].pack(fill='x')
+        
+        self.param_selectors['stop_loss_mult'] = ParameterRangeSelector(
+            frm, "Stop Loss Multiplier (xCredit)", 1, 5, 2, 3, update_callback=self._update_totals
+        )
+        self.param_selectors['stop_loss_mult'].pack(fill='x')
+
+        # Finally, pack the summary and button widgets into the layout.
+        summary_frame.pack(fill='x', pady=(15, 5))
+        btn_frm.pack(side='bottom', fill='x', pady=(10, 0))
+        self.run_btn.pack(side="right", padx=5)
+        ttk.Button(btn_frm, text="Cancel", command=self.destroy).pack(side="right")
+
+        self._update_totals() # Initial calculation
+
+
+
+    def _update_totals(self):
+        """Calculates and displays the total number of combinations."""
+        total = 1
+        try:
+            for selector in self.param_selectors.values():
+                steps = selector.var_steps.get()
+                total *= steps if steps > 0 else 1
+
+            self.totals_label.config(text=f"{total:,}")
+            self.run_btn.config(state='normal')
+        except (ValueError, tk.Toplevel):
+            self.totals_label.config(text="Invalid input...")
+            self.run_btn.config(state='disabled')
 
     def _on_run(self):
         try:
-            grid = {}
-            for key, (e0,e1,e2) in self.vars.items():
-                start = float(e0.get()); end = float(e1.get()); step = float(e2.get())
-                grid_key = {
-                    "DTE":                   "dte_target",
-                    "Alloc %":              "allocation_pct",
-                    "Profit Target %":      "profit_target_pct",
-                    "Stop Loss ×":          "stop_loss_mult"
-                }[key]
-                grid[grid_key] = list(np.arange(start, end + 1e-9, step))
+            grid = {
+                key: selector.get_values()
+                for key, selector in self.param_selectors.items()
+            }
+            grid = {k: v for k, v in grid.items() if v}
+
+            if not grid:
+                messagebox.showerror("Input Error", "At least one parameter must have a valid range.", parent=self)
+                return
+
             self.controller._start_optimization(grid)
             self.destroy()
         except Exception as e:
-            messagebox.showerror("Input Error", str(e), parent=self)
+            messagebox.showerror("Input Error", f"Could not generate grid.\nDetails: {e}", parent=self)
