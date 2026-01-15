@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "payload": "help"
+  },
+  {
+    "role": "bot",
+    "payload": "### FinBot Command Reference\n\n**AI Assistant**\nIf your command isn't listed below, the AI assistant will try to answer it. You can ask general financial questions like `what is a covered call?` or `explain theta decay`.\n\n--- **Built-in Commands** ---\n\u2022 **price TICKER**\n  *Latest quote & key stats.*\n\n\u2022 **info TICKER**\n  *Company profile and business summary.*\n\n\u2022 **chart TICKER [period]**\n  *Candle chart. Period can be: 1mo, 3mo, 6mo, 1y, 2y, 5y, ytd, max.*\n\n\u2022 **news TICKER**\n  *Recent headlines with sentiment analysis.*\n\n\u2022 **options TICKER [DATE]**\n  *Lists expiry dates or shows the option chain for a specific date.*\n\n\u2022 **earnings TICKER**\n  *Shows the next earnings date and previous quarter's results.*\n\n\u2022 **income / balance / cashflow TICKER**\n  *Annual financial statements.*\n\n\u2022 **tokens**\n  *Check your daily AI token usage.*\n"
+  },
+  {
+    "role": "user",
+    "payload": "hello"
+  },
+  {
+    "role": "bot",
+    "payload": "An error occurred with the AI assistant: 400 API Key not found. Please pass a valid API key."
+  }
+]

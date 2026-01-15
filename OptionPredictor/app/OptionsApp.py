@@ -1099,10 +1099,12 @@ class OptionAnalyzerApp:
             self._research_suite_win = suite # Store a reference
             self.child_windows.append(suite) # For theme updates
 
-        except ImportError:
-            messagebox.showerror("Error", "StockResearchSuite.py not found.")
+        except ImportError as ie:
+            messagebox.showerror("Error", f"StockResearchSuite.py not found.\n\nDetails: {ie}\n\nMake sure the file exists at: ui/StockResearchSuite.py")
+            logging.error(f"Failed to import StockResearchSuite: {ie}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to open Stock Research Suite:\n{e}")
+            logging.error(f"Error launching Stock Research Suite: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1120,7 +1122,7 @@ class OptionAnalyzerApp:
     # ─────────────────────────────────────────────────────────────
     #  Chat-bot launcher
     # ─────────────────────────────────────────────────────────────
-    from pathlib import Path
+    from pathlib import Path  
 
     # In class OptionAnalyzerApp:
 

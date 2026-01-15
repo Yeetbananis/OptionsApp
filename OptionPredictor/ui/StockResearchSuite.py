@@ -518,35 +518,35 @@ class StockResearchSuite(tk.Toplevel):
             ttk.Label(self.perf_frame, text=value).grid(row=i, column=1, sticky="w", padx=5)
 
     def _update_chart(self, df):
-    """The actual plotting function that draws the mplfinance chart."""
-    for widget in self.chart_frame.winfo_children():
-        widget.destroy()
+        """The actual plotting function that draws the mplfinance chart."""
+        for widget in self.chart_frame.winfo_children():
+            widget.destroy()
 
-    if df is None or df.empty:
-        ttk.Label(self.chart_frame, text="Price data not available.").pack(pady=20)
-        return
+        if df is None or df.empty:
+            ttk.Label(self.chart_frame, text="Price data not available.").pack(pady=20)
+            return
 
-    style = 'nightclouds' if self.current_theme == 'dark' else 'yahoo'
+        style = 'nightclouds' if self.current_theme == 'dark' else 'yahoo'
 
-    try:
-        fig, _ = mpf.plot(df,
-                          type='candle',
-                          style=style,
-                          title=f"\n{self.ticker_entry.get().upper()} Price Chart",
-                          ylabel='Price ($)',
-                          volume=False,
-                          mav=(50, 200),
-                          returnfig=True,
-                          # REMOVED figsize and figratio to let the plot fill the container
-                          tight_layout=True,
-                          xrotation=0)
+        try:
+            fig, _ = mpf.plot(df,
+                            type='candle',
+                            style=style,
+                            title=f"\n{self.ticker_entry.get().upper()} Price Chart",
+                            ylabel='Price ($)',
+                            volume=False,
+                            mav=(50, 200),
+                            returnfig=True,
+                            # REMOVED figsize and figratio to let the plot fill the container
+                            tight_layout=True,
+                            xrotation=0)
 
-        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill='both', expand=True) # This now correctly fills the existing space
-    except Exception as e:
-        print(f"Chart plotting error: {e}")
-        ttk.Label(self.chart_frame, text="Could not plot chart.").pack(pady=20)
+            canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True) # This now correctly fills the existing space
+        except Exception as e:
+            print(f"Chart plotting error: {e}")
+            ttk.Label(self.chart_frame, text="Could not plot chart.").pack(pady=20)
 
 
 
