@@ -9,10 +9,39 @@
   },
   {
     "role": "user",
-    "payload": "hello"
+    "payload": "earnings aapl"
   },
   {
     "role": "bot",
-    "payload": "An error occurred with the AI assistant: 400 API Key not found. Please pass a valid API key."
+    "payload": "### AAPL \u2014 Earnings Snapshot\n\nNext report  \u00b7  **30 Apr 2026**\nLast quarter EPS data unavailable."
+  },
+  {
+    "role": "user",
+    "payload": "earnings rzlv"
+  },
+  {
+    "role": "bot",
+    "payload": "### RZLV \u2014 Earnings Snapshot\n\nNext report  \u00b7  **Not scheduled**\nLast quarter EPS data unavailable."
+  },
+  {
+    "role": "user",
+    "payload": "income aapl"
+  },
+  {
+    "role": "bot",
+    "payload": {
+      "type": "table_placeholder",
+      "title": "AAPL \u2013 Income Statement",
+      "statement_type": "income",
+      "symbol": "AAPL"
+    }
+  },
+  {
+    "role": "user",
+    "payload": "income apple"
+  },
+  {
+    "role": "bot",
+    "payload": "No income data found for APPLE."
   }
 ]
